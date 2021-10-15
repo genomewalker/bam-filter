@@ -1,0 +1,43 @@
+{% set setup_data = load_setup_py_data() %}
+package:
+  name: bam-filter
+  version: {{ setup_data['version'] }}
+
+source:
+  git_rev: {{ setup_data['version'] }}
+  git_url: https://github.com/genomewalker/bam-filter.git
+
+build:
+  number: 0
+  skip: true  # [win and py27 or win32]
+  script: {{ PYTHON }} -m pip install . --no-deps -vv
+
+requirements:
+  build:
+    - python>=3.6,<3.7
+    - setuptools
+    - pip
+    - Cython>=0.29.21
+  run:
+    - python>=3.6,<3.7
+    - mmseqs2
+    - pandas<=1.2.0
+    - scipy>=1.5.2
+    - networkx>=2.5
+    - tqdm==4.50.0
+    - PyYAML>=5.4
+    - biopython>=1.77
+    - pyranges>=0.0.97
+    - pyfaidx>=0.5.9
+    - amos
+    - mummer4
+    
+test:
+  commands:
+    - refineC -h
+
+about:
+  home: https://github.com/genomewalker/bam-filter
+  summary: "A simple tool to identify and clean misassemblies for ancient metagenomics"
+  license: {{ setup_data['license'] }}
+  license_file: LICENSE

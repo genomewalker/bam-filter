@@ -1,0 +1,13 @@
+name: bam-filter
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  - python>=3.7
+  - mmseqs2
+  - amos
+  - mummer4
+  - pip
+  - pip:
+      - Cython>=0.29.21

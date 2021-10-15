@@ -1,0 +1,2 @@
+include versioneer.py
+include bam_filter/_version.py
