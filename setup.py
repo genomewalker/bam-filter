@@ -2,7 +2,7 @@ from setuptools import setup
 import versioneer
 
 requirements = [
-    "pandas>=1.2.0",
+    "pandas>=1.3.3",
     "scipy>=1.5.2",
     "tqdm==4.50.0",
     "pysam>=0.17.0",
@@ -28,8 +28,8 @@ setup(
     install_requires=requirements,
     keywords="bam-filter",
     classifiers=[
-        "Programming Language :: Python :: 3.6",
         "Programming Language :: Python :: 3.7",
         "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
     ],
 )

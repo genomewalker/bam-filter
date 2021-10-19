@@ -2,7 +2,6 @@ import argparse
 import sys
 import gzip
 import os
-import pathlib
 import shutil
 import logging
 import pandas as pd
@@ -13,11 +12,7 @@ from os import devnull
 import tqdm
 from bam_filter import __version__
 import time
-import pathlib
-import uuid
-import subprocess
 from itertools import chain
-from statistics import mean
 
 log = logging.getLogger("my_logger")
 log.setLevel(logging.INFO)
@@ -41,6 +36,31 @@ def check_values(val, minval, maxval, parser, var):
             )
         )
     return value
+
+
+# From: https://note.nkmk.me/en/python-check-int-float/
+def is_integer(n):
+    try:
+        float(n)
+    except ValueError:
+        return False
+    else:
+        return float(n).is_integer()
+
+
+# function to check if the input value has K, M or G suffix in it
+def check_suffix(val, parser, var):
+    units = ["K", "M", "G"]
+    unit = val[-1]
+    value = int(val[:-1])
+
+    if is_integer(value) & (unit in units) & (value > 0):
+        return val
+    else:
+        parser.error(
+            "argument %s: Invalid value %s. Memory has to be an integer larger than 0 with the following suffix K, M or G"
+            % (var, val)
+        )
 
 
 def get_compression_type(filename):
@@ -78,35 +98,39 @@ def get_open_func(filename):
 # From: https://stackoverflow.com/a/11541450
 def is_valid_file(parser, arg, var):
     if not os.path.exists(arg):
-        if os.path.isfile(arg):
-            parser.error("argument %s: The file %s does not exist!" % (var, arg))
-        else:
-            parser.error("argument %s: The directory %s does not exist!" % (var, arg))
+        parser.error("argument %s: The file %s does not exist!" % (var, arg))
     else:
-        if os.path.isfile(arg):
-            return get_open_func(arg)(arg, "rt")  # return an open file handle
-        else:
-            return arg
+        return arg
 
 
-defaults = {}
+defaults = {
+    "min_read_length": 30,
+    "min_read_count": 10,
+    "min_expected_breadth_ratio": 0.5,
+    "min_read_ani": 90.0,
+    "min_coverage_evenness": 0,
+    "prefix": None,
+    "sort_memory": "1G",
+}
 
 help_msg = {
     "bam": "BAM file containing aligned reads",
     "threads": "Number of threads to use",
-    "output": "Output file name",
-    "breadthExpRatio": "Breadth to expected breadth ratio",
-    "covEvenness": "Eveness of coverage",
-    "nReads": "Number of reads",
-    "aniNM": "ANI between NM and MD",
-    "aniMD": "ANI between MD and NM",
+    "prefix": "Prefix used for the output files",
+    "min_read_length": "Minimum read length",
+    "min_read_count": "Minimum read count",
+    "min_expected_breadth_ratio": "Minimum expected breadth ratio",
+    "min_read_ani": "Minimum average read ANI",
+    "min_coverage_evenness": "Minimum coverage evenness",
+    "sort_memory": "Set maximum memory per thread for sorting; suffix K/M/G recognized",
     "help": "Help message",
+    "debug": f"Print debug messages",
 }
 
 
 def get_arguments(argv=None):
     parser = argparse.ArgumentParser(
-        description="Calculate metrics for a BAM file",
+        description="A simple tool to calculate metrics from a BAM file and filter references to be used with Woltka",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -120,65 +144,89 @@ def get_arguments(argv=None):
         type=lambda x: int(
             check_values(x, minval=1, maxval=1000, parser=parser, var="--threads")
         ),
+        dest="threads",
         default=1,
         help=help_msg["threads"],
     )
     parser.add_argument(
-        "-o",
-        "--output",
+        "-p",
+        "--prefix",
         type=str,
-        default="metrics.tsv",
-        help=help_msg["output"],
+        default=defaults["prefix"],
+        dest="prefix",
+        help=help_msg["prefix"],
     )
     parser.add_argument(
-        "-B",
-        "--breadthExpRatio",
-        type=lambda x: check_values(
-            x, minval=0, maxval=1, parser=parser, var="--breadthExpRatio"
+        "-l",
+        "--min-read-length",
+        type=lambda x: int(
+            check_values(
+                x, minval=1, maxval=100000, parser=parser, var="--min-read-length"
+            )
         ),
-        default=0.0,
-        help=help_msg["breadthExpRatio"],
+        default=defaults["min_read_length"],
+        dest="min_read_length",
+        help=help_msg["min_read_length"],
     )
-    parser.add_argument(
-        "-C",
-        "--covEvenness",
-        type=lambda x: check_values(
-            x, minval=0, maxval=1, parser=parser, var="--covEvenness"
-        ),
-        default=0.0,
-        help=help_msg["covEvenness"],
-    )
-    # nReads
     parser.add_argument(
         "-n",
-        "--nReads",
-        type=lambda x: check_values(
-            x, minval=0, maxval=1e9, parser=parser, var="--nReads"
+        "--min-read-count",
+        type=lambda x: int(
+            check_values(
+                x, minval=1, maxval=100000, parser=parser, var="--min-read-count"
+            )
         ),
-        default=0.0,
-        help=help_msg["nReads"],
+        default=defaults["min_read_count"],
+        dest="min_read_count",
+        help=help_msg["min_read_count"],
     )
-    # aniNM
+    parser.add_argument(
+        "-b",
+        "--min-expected-breadth-ratio",
+        type=lambda x: float(
+            check_values(
+                x, minval=0, maxval=1, parser=parser, var="--min-expected-breadth-ratio"
+            )
+        ),
+        default=defaults["min_expected_breadth_ratio"],
+        dest="min_expected_breadth_ratio",
+        help=help_msg["min_expected_breadth_ratio"],
+    )
     parser.add_argument(
         "-a",
-        "--aniNM",
-        type=lambda x: check_values(
-            x, minval=0, maxval=100, parser=parser, var="--aniNM"
+        "--min-read-ani",
+        type=lambda x: float(
+            check_values(x, minval=0, maxval=1, parser=parser, var="--min-read-ani")
         ),
-        default=0.0,
-        help=help_msg["aniNM"],
+        default=defaults["min_read_ani"],
+        dest="min_read_ani",
+        help=help_msg["min_read_ani"],
     )
-    # aniMD
     parser.add_argument(
-        "-A",
-        "--aniMD",
-        type=lambda x: check_values(
-            x, minval=0, maxval=100, parser=parser, var="--aniMD"
+        "-c",
+        "--min-coverage-evenness",
+        type=lambda x: float(
+            check_values(
+                x, minval=0, maxval=1, parser=parser, var="--min-coverage-evenness"
+            )
         ),
-        default=0.0,
-        help=help_msg["aniMD"],
+        default=defaults["min_coverage_evenness"],
+        dest="min_coverage_evenness",
+        help=help_msg["min_coverage_evenness"],
     )
 
+    # sort memory
+    parser.add_argument(
+        "-m",
+        "--sort-memory",
+        type=lambda x: check_suffix(x, parser=parser, var="--sort-memory"),
+        default=defaults["sort_memory"],
+        dest="sort_memory",
+        help=help_msg["sort_memory"],
+    )
+    parser.add_argument(
+        "--debug", dest="debug", action="store_true", help=help_msg["debug"]
+    )
     args = parser.parse_args(None if sys.argv[1:] else ["-h"])
     return args
 
@@ -285,7 +333,7 @@ def get_components_large(parms, components, func, threads):
 
 def clean_up(keep, temp_dir):
     if keep:
-        logging.info("Cleaning up temporary files")
+        logging.info(f"Cleaning up temporary files")
         logging.shutdown()
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -300,3 +348,16 @@ def calc_chunksize(n_workers, len_iterable, factor=4):
     if extra:
         chunksize += 1
     return chunksize
+
+
+def create_output_files(prefix, bam):
+    if prefix is None:
+        prefix = bam.replace(".bam", "")
+    # create output files
+    out_files = {
+        "stats": f"{prefix}_stats.tsv.gz",
+        "stats_filtered": f"{prefix}_stats-filtered.tsv",
+        "bam_filtered_tmp": f"{prefix}.filtered.tmp.bam",
+        "bam_filtered": f"{prefix}.filtered.bam",
+    }
+    return out_files

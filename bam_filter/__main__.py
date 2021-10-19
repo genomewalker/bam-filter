@@ -13,12 +13,10 @@ see <https://www.gnu.org/licenses/>.
 
 
 import logging
-
-from bam_filter.sam_utils import processBam, filterReferenceBAMfile
-
-from bam_filter.utils import (
-    get_arguments,
-)
+import pandas as pd
+from bam_filter.sam_utils import process_bam, filter_reference_BAM
+import numpy as np
+from bam_filter.utils import get_arguments, create_output_files
 
 log = logging.getLogger("my_logger")
 
@@ -33,15 +31,33 @@ def main():
     logging.getLogger("my_logger").setLevel(
         logging.DEBUG if args.debug else logging.INFO
     )
-    datadf = processBam(bam=args.bam, threads=args.threads)
-    datadf_filtered = datadf.loc[
-        (datadf["breadthExpRatio"] > args.breadthExpRatio)
-        & (datadf["covEvenness"] > args.covEvenness)
-        & (datadf["nReads"] > args.nReads)
-    ]
-    datadf.to_csv(args.output, sep="\t", index=False)
-    refs_dict = dict(zip(datadf["chromosome"], datadf["referenceLength"]))
-    filterReferenceBAMfile(args.bam, refs_dict, outBAMfile="test.bam")
+
+    out_files = create_output_files(prefix=args.prefix, bam=args.bam)
+
+    data = process_bam(bam=args.bam, threads=args.threads)
+
+    data_df = pd.DataFrame([x.to_summary() for x in data])
+
+    logging.info(f"Writing reference statistics to {out_files['stats']}")
+    data_df.to_csv(out_files["stats"], sep="\t", index=False, compression="gzip")
+
+    filter_conditions = {
+        "min_read_length": args.min_read_length,
+        "min_read_count": args.min_read_count,
+        "min_expected_breadth_ratio": args.min_expected_breadth_ratio,
+        "min_read_ani": args.min_read_ani,
+        "min_coverage_evenness": args.min_coverage_evenness,
+    }
+
+    filter_reference_BAM(
+        bam=args.bam,
+        df=data_df,
+        filter_conditions=filter_conditions,
+        threads=args.threads,
+        out_files=out_files,
+        sort_memory=args.sort_memory,
+    )
+    logging.info(f"ALL DONE.")
 
 
 if __name__ == "__main__":
