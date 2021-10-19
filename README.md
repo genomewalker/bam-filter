@@ -90,14 +90,14 @@ One would run filterBAM as:
 filterBAM --min-read-count 100 --min-expected-breadth-ratio 0.75 --min-read-ani 98 --sort-memory 1G --threads 16  c55d4e2df1.woltka.dedup.bam
 ```
 
-*--min-read-count*: Minimum number of reads mapped to a reference in the BAM file
+**--min-read-count**: Minimum number of reads mapped to a reference in the BAM file
 
-*--min-expected-breadth-ratio*: Minimum expected breadth ratio needed to keep a reference. This is based on the concepts defined [here](https://instrain.readthedocs.io/en/latest/important_concepts.html#detecting-organisms-in-metagenomic-data). I basically estimates the ratio between the observed and expected breadth, the closest to 1 the more evenly distributed the mapped reads are and we can be more confident that the genome was detected.
+**--min-expected-breadth-ratio**: Minimum expected breadth ratio needed to keep a reference. This is based on the concepts defined [here](https://instrain.readthedocs.io/en/latest/important_concepts.html#detecting-organisms-in-metagenomic-data). I basically estimates the ratio between the observed and expected breadth, the closest to 1 the more evenly distributed the mapped reads are and we can be more confident that the genome was detected.
 
-*--min-read-ani*: Minimum average read ANI that a reference has
+**--min-read-ani**: Minimum average read ANI that a reference has
 
-*--sort-memory*: Memory used for each thread when sorting the filtered BAM file
+**--sort-memory**: Memory used for each thread when sorting the filtered BAM file
 
-*--threads*: Number of threads
+**--threads**: Number of threads
 
 
