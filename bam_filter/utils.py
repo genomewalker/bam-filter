@@ -111,6 +111,7 @@ defaults = {
     "min_coverage_evenness": 0,
     "prefix": None,
     "sort_memory": "1G",
+    "reference_lengths": None,
 }
 
 help_msg = {
@@ -125,6 +126,8 @@ help_msg = {
     "sort_memory": "Set maximum memory per thread for sorting; suffix K/M/G recognized",
     "help": "Help message",
     "debug": f"Print debug messages",
+    "reference_lengths": "File with references lengths",
+    "version": f"Print program version",
 }
 
 
@@ -214,8 +217,6 @@ def get_arguments(argv=None):
         dest="min_coverage_evenness",
         help=help_msg["min_coverage_evenness"],
     )
-
-    # sort memory
     parser.add_argument(
         "-m",
         "--sort-memory",
@@ -224,8 +225,23 @@ def get_arguments(argv=None):
         dest="sort_memory",
         help=help_msg["sort_memory"],
     )
+    # reference_lengths
+    parser.add_argument(
+        "-r",
+        "--reference-lengths",
+        type=lambda x: is_valid_file(parser, x, "reference_lengths"),
+        default=defaults["reference_lengths"],
+        dest="reference_lengths",
+        help=help_msg["reference_lengths"],
+    )
     parser.add_argument(
         "--debug", dest="debug", action="store_true", help=help_msg["debug"]
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version="%(prog)s " + __version__,
+        help=help_msg["version"],
     )
     args = parser.parse_args(None if sys.argv[1:] else ["-h"])
     return args

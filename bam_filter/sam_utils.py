@@ -3,11 +3,13 @@ import numpy as np
 import re, os, sys
 import pandas as pd
 from multiprocessing import Pool
+import functools
 from scipy import stats
 import pysam
 import tqdm
 import logging
-from bam_filter.utils import is_debug, calc_chunksize, fast_flatten
+import warnings
+from bam_filter.utils import is_debug, calc_chunksize, fast_flatten, initializer
 
 log = logging.getLogger("my_logger")
 
@@ -37,7 +39,7 @@ def coverage_evenness(coverage):
     return covEvenness
 
 
-def get_bam_stats(params):
+def get_bam_stats(params, ref_lengths=None):
     """
     Worker function per chromosome
     loop over a bam file and create tuple with lists containing metrics:
@@ -55,7 +57,16 @@ def get_bam_stats(params):
     read_aln_score = []
     read_names = []
     n_alns = 0
-    reference_length = int(samfile.get_reference_length(reference))
+    if ref_lengths is None:
+        reference_length = int(samfile.get_reference_length(reference))
+        bam_reference_length = reference_length
+    else:
+        reference_length = int(ref_lengths.loc[reference, "length"])
+        bam_reference_length = int(samfile.get_reference_length(reference))
+
+    log.debug(f"Processing reference {reference}")
+    log.debug(f"Reference length: {reference_length:,}")
+    log.debug(f"BAM reference length: {bam_reference_length:,}")
 
     for aln in samfile.fetch(reference=reference, multiple_iterators=False):
         n_alns += 1
@@ -104,10 +115,23 @@ def get_bam_stats(params):
 
         c_v = cov_sd / mean_coverage
         read_mapq = [np.nan if x == 255 else x for x in read_mapq]
+
+        log.debug(f"Bases covered: {bases_covered:,}")
+        log.debug(f"Mean coverage: {mean_coverage:.2f}")
+        log.debug(f"Mean coverage covered: {mean_coverage_covered:.2f}")
+        log.debug(f"SD: {cov_sd:.2f}")
+        log.debug(f"Breadth: {breadth:.2f}")
+        log.debug(f"Exp. breadth: {exp_breadth:.2f}")
+        log.debug(f"Breadth/exp. ratio: {breadth_exp_ratio:.2f}")
+        log.debug(f"Cov. evenness: {cov_evenness:.2f}")
+        log.debug(f"C_v: {c_v:.2f}")
+        log.debug(f"Mean mapq: {np.mean(read_mapq):.2f}")
+
         data = BamAlignment(
             reference=reference,
             n_alns=n_alns,
             reference_length=reference_length,
+            bam_reference_length=bam_reference_length,
             mean_coverage=mean_coverage,
             mean_coverage_covered=mean_coverage_covered,
             bases_covered=bases_covered,
@@ -131,6 +155,7 @@ def get_bam_stats(params):
             reference=reference,
             n_alns=n_alns,
             reference_length=reference_length,
+            bam_reference_length=bam_reference_length,
             mean_coverage=np.nan,
             mean_coverage_covered=np.nan,
             bases_covered=np.nan,
@@ -172,6 +197,7 @@ class BamAlignment:
         mean_coverage,
         mean_coverage_covered,
         reference_length,
+        bam_reference_length,
         breadth,
         exp_breadth,
         breadth_exp_ratio,
@@ -194,6 +220,7 @@ class BamAlignment:
         self.mean_coverage = mean_coverage
         self.mean_coverage_covered = mean_coverage_covered
         self.reference_length = reference_length
+        self.bam_reference_length = bam_reference_length
         self.breadth = breadth
         self.exp_breadth = exp_breadth
         self.breadth_exp_ratio = breadth_exp_ratio
@@ -227,25 +254,35 @@ class BamAlignment:
         }
 
     def to_summary(self):
-
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
+            read_length_mean = np.mean(self.read_length)
+            read_length_median = np.median(self.read_length)
+            read_length_mode = stats.mode(self.read_length)[0][0]
+            read_aligned_length = np.mean(self.read_aligned_length)
+            read_aln_score = np.mean(self.read_aln_score)
+            mapping_quality = np.mean(self.mapping_quality)
+            edit_distances = np.mean(self.edit_distances)
+            read_ani_mean = np.mean(self.ani_nm)
         return {
             "reference": self.reference,
             "n_reads": len(self.read_names),
             "n_alns": self.n_alns,
-            "read_length_mean": np.mean(self.read_length),
-            "read_length_median": np.median(self.read_length),
-            "read_length_mode": stats.mode(self.read_length)[0][0],
-            "read_aligned_length": np.mean(self.read_aligned_length),
-            "read_aln_score": np.mean(self.read_aln_score),
-            "mapping_quality": np.nanmean(self.mapping_quality),
-            "edit_distances": np.mean(self.edit_distances),
+            "read_length_mean": read_length_mean,
+            "read_length_median": read_length_median,
+            "read_length_mode": read_length_mode,
+            "read_aligned_length": read_aligned_length,
+            "read_aln_score": read_aln_score,
+            "mapping_quality": mapping_quality,
+            "edit_distances": edit_distances,
             # "edit_distances_md": np.mean(self.edit_distances_md),
-            "read_ani_mean": np.mean(self.ani_nm),
+            "read_ani_mean": read_ani_mean,
             # "ani_md": np.mean(self.ani_md),
             "bases_covered": self.bases_covered,
             "coverage_mean": self.mean_coverage,
             "coverage_covered_mean": self.mean_coverage_covered,
             "reference_length": self.reference_length,
+            "bam_reference_length": self.bam_reference_length,
             "breadth": self.breadth,
             "exp_breadth": self.exp_breadth,
             "breadth_exp_ratio": self.breadth_exp_ratio,
@@ -254,7 +291,8 @@ class BamAlignment:
         }
 
 
-def process_bam(bam, threads=1):
+# Inspired from https://gigabaseorgigabyte.wordpress.com/2017/04/14/getting-the-edit-distance-from-a-bam-alignment-a-journey/
+def process_bam(bam, threads=1, reference_lengths=None):
     """
     Processing function: calls pool of worker functions
     to extract from a bam file two definitions of the edit distances to the reference genome scaled by read length
@@ -264,6 +302,11 @@ def process_bam(bam, threads=1):
     save = pysam.set_verbosity(0)
     samfile = pysam.AlignmentFile(bam, "rb")
     pysam.set_verbosity(save)
+
+    if reference_lengths is not None:
+        ref_lengths = pd.read_csv(
+            reference_lengths, sep="\t", index_col=0, names=["reference", "length"]
+        )
 
     if not samfile.has_index():
         logging.info(f"BAM index not found. Indexing...")
@@ -278,20 +321,31 @@ def process_bam(bam, threads=1):
     logging.info(f"Found {total_refs:,} reference sequences")
     logging.info(f"Found {samfile.mapped:,} aligned reads")
 
-    references = samfile.references[0:100]
+    references = samfile.references
     params = zip([bam] * len(references), references)
     try:
         logging.info(f"Getting stats for each reference...")
 
         if is_debug():
-            data = list(map(get_bam_stats, params))
+            data = list(
+                map(functools.partial(get_bam_stats, ref_lengths=ref_lengths), params)
+            )
         else:
 
-            p = Pool(threads)
-            c_size = calc_chunksize(threads, len(references))
+            p = Pool(
+                threads, initializer=initializer, initargs=([params, ref_lengths],)
+            )
+            c_size = calc_chunksize(
+                n_workers=threads,
+                len_iterable=len(references),
+            )
             data = list(
                 tqdm.tqdm(
-                    p.imap_unordered(get_bam_stats, params, chunksize=c_size),
+                    p.imap_unordered(
+                        functools.partial(get_bam_stats, ref_lengths=ref_lengths),
+                        params,
+                        chunksize=c_size,
+                    ),
                     total=len(references),
                     leave=False,
                     ncols=80,

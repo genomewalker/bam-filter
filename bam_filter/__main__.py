@@ -34,7 +34,9 @@ def main():
 
     out_files = create_output_files(prefix=args.prefix, bam=args.bam)
 
-    data = process_bam(bam=args.bam, threads=args.threads)
+    data = process_bam(
+        bam=args.bam, threads=args.threads, reference_lengths=args.reference_lengths
+    )
 
     data_df = pd.DataFrame([x.to_summary() for x in data])
 
