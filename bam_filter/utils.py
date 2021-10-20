@@ -372,7 +372,7 @@ def create_output_files(prefix, bam):
     # create output files
     out_files = {
         "stats": f"{prefix}_stats.tsv.gz",
-        "stats_filtered": f"{prefix}_stats-filtered.tsv",
+        "stats_filtered": f"{prefix}_stats-filtered.tsv.gz",
         "bam_filtered_tmp": f"{prefix}.filtered.tmp.bam",
         "bam_filtered": f"{prefix}.filtered.bam",
     }
