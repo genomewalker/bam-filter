@@ -147,7 +147,7 @@ def get_bam_stats(params, ref_lengths=None):
             read_length=read_length,
             read_aligned_length=read_aligned_length,
             mapping_quality=read_mapq,
-            read_names=read_names,
+            read_names=set(read_names),
             read_aln_score=read_aln_score,
         )
     else:
@@ -319,7 +319,7 @@ def process_bam(bam, threads=1, reference_lengths=None):
 
     total_refs = samfile.nreferences
     logging.info(f"Found {total_refs:,} reference sequences")
-    logging.info(f"Found {samfile.mapped:,} aligned reads")
+    logging.info(f"Found {samfile.mapped:,} alignments")
 
     references = samfile.references
     params = zip([bam] * len(references), references)
