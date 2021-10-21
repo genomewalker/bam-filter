@@ -5,8 +5,8 @@ channels:
   - defaults
 dependencies:
   - python>=3.7
+  - Cython>=0.29.24
   - pip
   - pip:
-      - Cython>=0.29.21
       - pyrle>=0.0.31
       - pyranges>=0.0.112
