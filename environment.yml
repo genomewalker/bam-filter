@@ -8,3 +8,5 @@ dependencies:
   - pip
   - pip:
       - Cython>=0.29.21
+      - pyrle>=0.0.31
+      - pyranges>=0.0.112
