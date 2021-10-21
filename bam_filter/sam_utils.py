@@ -399,7 +399,7 @@ def process_bam(bam, threads=1, reference_lengths=None):
     logging.info(f"Found {total_refs:,} reference sequences")
     logging.info(f"Found {samfile.mapped:,} alignments")
 
-    references = samfile.references[0:100]
+    references = samfile.references
     params = zip([bam] * len(references), references)
     try:
         logging.info(f"Getting stats for each reference...")
