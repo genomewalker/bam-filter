@@ -10,6 +10,7 @@ import tqdm
 import logging
 import warnings
 from bam_filter.utils import is_debug, calc_chunksize, fast_flatten, initializer
+import pyranges as pr
 
 log = logging.getLogger("my_logger")
 
@@ -39,6 +40,42 @@ def coverage_evenness(coverage):
     return covEvenness
 
 
+# function to calculate GC content
+def calc_gc_content(seq):
+    """Calculate GC content of a sequence
+
+    Args:
+        seq (str): DNA sequence
+
+    Returns:
+        int: Number of GC content
+    """
+    gc = seq.count("G") + seq.count("C")
+    return gc
+
+
+def create_pyranges(reference, starts, ends, strands):
+    """[summary]
+
+    Args:
+        reference ([type]): [description]
+        starts ([type]): [description]
+        ends ([type]): [description]
+        strands ([type]): [description]
+    """
+    chromosomes = [reference] * len(starts)
+    chromosomes = pd.Series(chromosomes).astype("category")
+    starts = pd.Series(starts)
+    ends = pd.Series(ends)
+    strands = pd.Series(strands).astype("category")
+
+    return pr.PyRanges(
+        pd.DataFrame(
+            {"Chromosome": chromosomes, "Start": starts, "End": ends, "Strand": strands}
+        )
+    )
+
+
 def get_bam_stats(params, ref_lengths=None):
     """
     Worker function per chromosome
@@ -56,6 +93,7 @@ def get_bam_stats(params, ref_lengths=None):
     read_mapq = []
     read_aln_score = []
     read_names = []
+    read_gc_content = []
     n_alns = 0
     if ref_lengths is None:
         reference_length = int(samfile.get_reference_length(reference))
@@ -67,7 +105,9 @@ def get_bam_stats(params, ref_lengths=None):
     log.debug(f"Processing reference {reference}")
     log.debug(f"Reference length: {reference_length:,}")
     log.debug(f"BAM reference length: {bam_reference_length:,}")
-
+    starts = []
+    ends = []
+    strands = []
     for aln in samfile.fetch(reference=reference, multiple_iterators=False):
         n_alns += 1
         if aln.has_tag("AS"):
@@ -82,10 +122,20 @@ def get_bam_stats(params, ref_lengths=None):
             edit_distances.append(np.nan)
             ani_nm.append(np.nan)
 
+        read_gc_content.append(calc_gc_content(aln.query_sequence))
         read_length.append(aln.infer_read_length())
         read_aligned_length.append(aln.query_alignment_length)
         read_mapq.append(aln.mapping_quality)
         read_names.append(aln.query_name)
+        # check if strand is reverse
+        if aln.is_reverse:
+            strand = "-"
+        else:
+            strand = "+"
+        starts.append(aln.reference_start)
+        ends.append(aln.reference_end)
+        strands.append(strand)
+
     if n_alns > 1:
         # get bases covered by reads pileup
         cov_pos = [
@@ -99,7 +149,11 @@ def get_bam_stats(params, ref_lengths=None):
                 min_mapping_quality=0,
             )
         ]
-
+        # convert datafrane to pyranges
+        ranges = create_pyranges(reference, starts, ends, strands)
+        ranges = ranges.merge(strand=False).lengths().to_list()
+        max_covered_bases = np.max(ranges)
+        mean_covered_bases = np.mean(ranges)
         bases_covered = int(len(cov_pos))
         # get SD from covered bases
         cov_sd = np.std(cov_pos)
@@ -112,13 +166,17 @@ def get_bam_stats(params, ref_lengths=None):
         breadth_exp_ratio = breadth / exp_breadth
 
         cov_evenness = coverage_evenness(cov_pos)
-
+        gc_content = (np.sum(read_gc_content) / np.sum(read_length)) * 100
         c_v = cov_sd / mean_coverage
         read_mapq = [np.nan if x == 255 else x for x in read_mapq]
 
+        log.debug(f"Number of reads: {len(set(read_names)):,}")
+        log.debug(f"Number of alignments: {n_alns:,}")
         log.debug(f"Bases covered: {bases_covered:,}")
         log.debug(f"Mean coverage: {mean_coverage:.2f}")
         log.debug(f"Mean coverage covered: {mean_coverage_covered:.2f}")
+        log.debug(f"Max covered bases: {max_covered_bases:,}")
+        log.debug(f"Mean covered bases: {mean_covered_bases:.2f}")
         log.debug(f"SD: {cov_sd:.2f}")
         log.debug(f"Breadth: {breadth:.2f}")
         log.debug(f"Exp. breadth: {exp_breadth:.2f}")
@@ -126,7 +184,7 @@ def get_bam_stats(params, ref_lengths=None):
         log.debug(f"Cov. evenness: {cov_evenness:.2f}")
         log.debug(f"C_v: {c_v:.2f}")
         log.debug(f"Mean mapq: {np.mean(read_mapq):.2f}")
-
+        log.debug(f"GC content: {gc_content:.2f}")
         data = BamAlignment(
             reference=reference,
             n_alns=n_alns,
@@ -135,6 +193,8 @@ def get_bam_stats(params, ref_lengths=None):
             mean_coverage=mean_coverage,
             mean_coverage_covered=mean_coverage_covered,
             bases_covered=bases_covered,
+            max_covered_bases=max_covered_bases,
+            mean_covered_bases=mean_covered_bases,
             cov_evenness=cov_evenness,
             breadth=breadth,
             exp_breadth=exp_breadth,
@@ -145,6 +205,7 @@ def get_bam_stats(params, ref_lengths=None):
             ani_nm=ani_nm,
             # ani_md=ani_md,
             read_length=read_length,
+            read_gc_content=read_gc_content,
             read_aligned_length=read_aligned_length,
             mapping_quality=read_mapq,
             read_names=set(read_names),
@@ -159,6 +220,8 @@ def get_bam_stats(params, ref_lengths=None):
             mean_coverage=np.nan,
             mean_coverage_covered=np.nan,
             bases_covered=np.nan,
+            max_covered_bases=np.nan,
+            mean_covered_bases=np.nan,
             cov_evenness=np.nan,
             breadth=np.nan,
             exp_breadth=np.nan,
@@ -169,6 +232,7 @@ def get_bam_stats(params, ref_lengths=None):
             ani_nm=np.nan,
             # ani_md=np.nan,
             read_length=np.nan,
+            read_gc_content=np.nan,
             read_aligned_length=np.nan,
             mapping_quality=np.nan,
             read_names=read_names,
@@ -187,6 +251,7 @@ class BamAlignment:
         reference,
         n_alns,
         read_length,
+        read_gc_content,
         read_aligned_length,
         mapping_quality,
         edit_distances,
@@ -194,6 +259,8 @@ class BamAlignment:
         ani_nm,
         # ani_md,
         bases_covered,
+        max_covered_bases,
+        mean_covered_bases,
         mean_coverage,
         mean_coverage_covered,
         reference_length,
@@ -209,6 +276,7 @@ class BamAlignment:
         self.reference = reference
         self.n_alns = n_alns
         self.read_length = read_length
+        self.read_gc_content = read_gc_content
         self.read_aligned_length = read_aligned_length
         self.read_aln_score = read_aln_score
         self.mapping_quality = mapping_quality
@@ -217,6 +285,8 @@ class BamAlignment:
         self.ani_nm = ani_nm
         # self.ani_md = ani_md
         self.bases_covered = bases_covered
+        self.max_covered_bases = max_covered_bases
+        self.mean_covered_bases = mean_covered_bases
         self.mean_coverage = mean_coverage
         self.mean_coverage_covered = mean_coverage_covered
         self.reference_length = reference_length
@@ -235,6 +305,7 @@ class BamAlignment:
             "n_reads": self.read_names,
             "n_alns": self.n_alns,
             "read_length": self.read_length,
+            "read_gc_content": self.read_gc_content,
             "read_aligned_length": self.read_aligned_length,
             "read_aln_score": self.read_aln_score,
             "mapping_quality": self.mapping_quality,
@@ -243,6 +314,8 @@ class BamAlignment:
             "ani_nm": self.ani_nm,
             # "ani_md": np.mean(self.ani_md),
             "bases_covered": self.bases_covered,
+            "max_covered_bases": self.max_covered_bases,
+            "mean_covered_bases": self.mean_covered_bases,
             "mean_coverage": self.mean_coverage,
             "mean_coverage_covered": self.mean_coverage_covered,
             "reference_length": self.reference_length,
@@ -264,6 +337,8 @@ class BamAlignment:
             mapping_quality = np.mean(self.mapping_quality)
             edit_distances = np.mean(self.edit_distances)
             read_ani_mean = np.mean(self.ani_nm)
+            gc_content = (np.sum(self.read_gc_content) / np.sum(self.read_length)) * 100
+
         return {
             "reference": self.reference,
             "n_reads": len(self.read_names),
@@ -271,6 +346,7 @@ class BamAlignment:
             "read_length_mean": read_length_mean,
             "read_length_median": read_length_median,
             "read_length_mode": read_length_mode,
+            "gc_content": gc_content,
             "read_aligned_length": read_aligned_length,
             "read_aln_score": read_aln_score,
             "mapping_quality": mapping_quality,
@@ -279,6 +355,8 @@ class BamAlignment:
             "read_ani_mean": read_ani_mean,
             # "ani_md": np.mean(self.ani_md),
             "bases_covered": self.bases_covered,
+            "max_covered_bases": self.max_covered_bases,
+            "mean_covered_bases": self.mean_covered_bases,
             "coverage_mean": self.mean_coverage,
             "coverage_covered_mean": self.mean_coverage_covered,
             "reference_length": self.reference_length,
@@ -321,7 +399,7 @@ def process_bam(bam, threads=1, reference_lengths=None):
     logging.info(f"Found {total_refs:,} reference sequences")
     logging.info(f"Found {samfile.mapped:,} alignments")
 
-    references = samfile.references
+    references = samfile.references[0:100]
     params = zip([bam] * len(references), references)
     try:
         logging.info(f"Getting stats for each reference...")

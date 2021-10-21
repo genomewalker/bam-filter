@@ -2,18 +2,21 @@ from setuptools import setup
 import versioneer
 
 requirements = [
+    "Cython>=0.29.24",
     "pandas>=1.3.3",
     "scipy>=1.5.2",
     "tqdm==4.50.0",
     "pysam>=0.17.0",
     "numpy>=1.21.2",
+    "pyrle>=0.0.31",
+    "pyranges>=0.0.112",
 ]
 
 setup(
     setup_requires=[
         # Setuptools 18.0 properly handles Cython extensions.
         "setuptools>=18.0",
-        "Cython>=0.29.21",
+        "Cython>=0.29.24",
     ],
     name="bam-filter",
     version=versioneer.get_version(),
