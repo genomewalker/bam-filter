@@ -58,6 +58,10 @@ filterBAM only needs a BAM file. For a complete list of options:
 ```
 $ filterBAM --help
 
+usage: filterBAM [-h] [-t THREADS] [-p PREFIX] [-l MIN_READ_LENGTH] [-n MIN_READ_COUNT] [-b MIN_EXPECTED_BREADTH_RATIO] [-a MIN_READ_ANI] [-c MIN_COVERAGE_EVENNESS] [-m SORT_MEMORY] [-r REFERENCE_LENGTHS]
+                 [--debug] [--version]
+                 bam
+
 A simple tool to calculate metrics from a BAM file and filter references to be used with Woltka
 
 positional arguments:
@@ -81,7 +85,10 @@ optional arguments:
                         Minimum coverage evenness (default: 0)
   -m SORT_MEMORY, --sort-memory SORT_MEMORY
                         Set maximum memory per thread for sorting; suffix K/M/G recognized (default: 1G)
+  -r REFERENCE_LENGTHS, --reference-lengths REFERENCE_LENGTHS
+                        File with references lengths (default: None)
   --debug               Print debug messages (default: False)
+  --version             Print program version
 ```
 
 One would run filterBAM as:
