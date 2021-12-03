@@ -110,4 +110,30 @@ filterBAM --min-read-count 100 --min-expected-breadth-ratio 0.75 --min-read-ani 
 **--threads**: Number of threads
 
 
-
+The program will produce two main outputs:
+ - A BAM file where the references that are below the defined threshold have been filtered out
+ - A TSV file with statistics for each reference, with the following columns:
+    - **reference**: Reference name
+    - **n_reads**: Number of reads mapped to the reference
+    - **n_alns**: Number of alignments in the reference
+    - **read_length_mean**: Mean read length mapped to the reference
+    - **read_length_median**: Medium read length mapped to the reference
+    - **read_length_mode**: Modal read length mapped to the reference
+    - **gc_content**: Average GC content of the reads mapped to the reference
+    - **read_aligned_length**: Average aligned read length mapped to the reference
+    - **read_aln_score**: Average alignment score of the reads mapped to the reference
+    - **mapping_quality**: Average mapping quality of the reads mapped to the reference
+    - **edit_distances**: Average edit distance of the reads mapped to the reference
+    - **read_ani_mean**: Average ANI of the reads mapped to the reference
+    - **bases_covered**: Number of bases covered by the reference
+    - **max_covered_bases**: Maximum number of bases covered in the reference
+    - **mean_covered_bases**: Average number of bases covered in the reference
+    - **coverage_mean**: Mean depth of the reference
+    - **coverage_covered_mean**: Mean depth of the reference only counting covered bases
+    - **reference_length**: Real reference length
+    - **bam_reference_length**: Length reported by the BAM file
+    - **breadth**: Breadth of coverage 
+    - **exp_breadth**: Expected breadth of coverage. Using the formula: _expected_breadth = 1 - e<sup>-coverage</sup>_
+    - **breadth_exp_ratio**: Ration between the obsrved and the expected depth of coverage
+    - **c_v**: Coefficient of variation of the coverage
+    - **cov_evenness**: Eveness of coverage as calculated [here](https://www.nature.com/articles/jhg201621).
