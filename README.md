@@ -5,7 +5,7 @@
 [![GitHub release (latest by date including pre-releases)](https://img.shields.io/github/v/release/genomewalker/bam-filter?include_prereleases&label=version)](https://github.com/genomewalker/bam-filter/releases) [![bam-filter](https://github.com/genomewalker/bam-filter/workflows/filterBAM_ci/badge.svg)](https://github.com/genomewalker/bam-filter/actions) [![PyPI](https://img.shields.io/pypi/v/bam-filter)](https://pypi.org/project/bam-filter/) [![Conda](https://img.shields.io/conda/v/genomewalker/bam-filter)](https://anaconda.org/genomewalker/bam-filter)
 
 
-A simple tool to calculate metrics from a BAM file and filter references to be used with Woltka
+A simple tool to calculate metrics from a BAM file and filter references with uneven coverages. It is mainly designed to be used with Woltka to profile ancient metagenomes.
 
 # Installation
 
@@ -94,17 +94,20 @@ optional arguments:
 One would run filterBAM as:
 
 ```bash
-filterBAM --min-read-count 100 --min-expected-breadth-ratio 0.75 --min-read-ani 98 --sort-memory 1G --threads 16  c55d4e2df1.woltka.dedup.bam
+filterBAM --min-read-count 100 --min-expected-breadth-ratio 0.75 --min-read-ani 98 --sort-memory 1G --reference-lengths gtdb-r202.len.map --threads 16  c55d4e2df1.woltka.dedup.bam 
 ```
 
 **--min-read-count**: Minimum number of reads mapped to a reference in the BAM file
 
-**--min-expected-breadth-ratio**: Minimum expected breadth ratio needed to keep a reference. This is based on the concepts defined [here](https://instrain.readthedocs.io/en/latest/important_concepts.html#detecting-organisms-in-metagenomic-data). I basically estimates the ratio between the observed and expected breadth, the closest to 1 the more evenly distributed the mapped reads are and we can be more confident that the genome was detected.
+**--min-expected-breadth-ratio**: Minimum expected breadth ratio needed to keep a reference. This is based on the concepts defined [here](https://instrain.readthedocs.io/en/latest/important_concepts.html#detecting-organisms-in-metagenomic-data). It basically estimates the ratio between the observed and expected breadth, the closest to 1 the more evenly distributed the mapped reads are and we can be more confident that the genome was detected.
 
 **--min-read-ani**: Minimum average read ANI that a reference has
 
 **--sort-memory**: Memory used for each thread when sorting the filtered BAM file
 
+**--reference-lengths**: File with the lengths of the references in the BAM file. This is used to calculate the coverage estimates of each reference when multiple contigs have been concatenad with Ns.
+
 **--threads**: Number of threads
+
 
 
