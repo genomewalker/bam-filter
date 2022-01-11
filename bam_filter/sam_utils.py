@@ -463,68 +463,72 @@ def filter_reference_BAM(bam, df, filter_conditions, threads, out_files, sort_me
         & (df["breadth_exp_ratio"] >= filter_conditions["min_expected_breadth_ratio"])
         & (df["cov_evenness"] >= filter_conditions["min_coverage_evenness"])
     ]
+    if len(df_filtered.index) > 0:
+        refs_dict = dict(zip(df_filtered["reference"], df_filtered["reference_length"]))
+        (ref_names, ref_lengths) = zip(*refs_dict.items())
 
-    refs_dict = dict(zip(df_filtered["reference"], df_filtered["reference_length"]))
-    (ref_names, ref_lengths) = zip(*refs_dict.items())
+        out_bam_file = pysam.Samfile(
+            out_files["bam_filtered_tmp"],
+            "wb",
+            referencenames=list(ref_names),
+            referencelengths=list(ref_lengths),
+            threads=threads,
+        )
+        header = pysam.AlignmentHeader.from_references(
+            list(ref_names), list(ref_lengths)
+        )
+        logging.info(f"Writing filtered BAM file... (be patient)")
+        references = df_filtered["reference"].values
+        params = zip([bam] * len(references), references)
+        logging.info(f"Saving filtered stats...")
+        df_filtered.to_csv(
+            out_files["stats_filtered"], sep="\t", index=False, compression="gzip"
+        )
+        try:
+            logging.info(f"Filtering BAM file...")
 
-    out_bam_file = pysam.Samfile(
-        out_files["bam_filtered_tmp"],
-        "wb",
-        referencenames=list(ref_names),
-        referencelengths=list(ref_lengths),
-        threads=threads,
-    )
-    header = pysam.AlignmentHeader.from_references(list(ref_names), list(ref_lengths))
-    logging.info(f"Writing filtered BAM file... (be patient)")
-    references = df_filtered["reference"].values
-    params = zip([bam] * len(references), references)
-    logging.info(f"Saving filtered stats...")
-    df_filtered.to_csv(
-        out_files["stats_filtered"], sep="\t", index=False, compression="gzip"
-    )
-    try:
-        logging.info(f"Filtering BAM file...")
+            if is_debug():
+                alns = list(map(get_alns, params))
+            else:
 
-        if is_debug():
-            alns = list(map(get_alns, params))
-        else:
-
-            p = Pool(threads)
-            c_size = calc_chunksize(threads, len(references))
-            alns = list(
-                tqdm.tqdm(
-                    p.imap_unordered(get_alns, params, chunksize=c_size),
-                    total=len(references),
-                    leave=False,
-                    ncols=80,
-                    desc=f"References processed",
+                p = Pool(threads)
+                c_size = calc_chunksize(threads, len(references))
+                alns = list(
+                    tqdm.tqdm(
+                        p.imap_unordered(get_alns, params, chunksize=c_size),
+                        total=len(references),
+                        leave=False,
+                        ncols=80,
+                        desc=f"References processed",
+                    )
                 )
-            )
 
-            p.close()
+                p.close()
+                p.join()
+
+        except KeyboardInterrupt:
+            logging.info(f"User canceled the operation. Terminating jobs.")
+            p.terminate()
             p.join()
+            sys.exit()
 
-    except KeyboardInterrupt:
-        logging.info(f"User canceled the operation. Terminating jobs.")
-        p.terminate()
-        p.join()
-        sys.exit()
-
-    samfile = pysam.AlignmentFile(bam, "rb")
-    for aln in fast_flatten(alns):
-        out_bam_file.write(pysam.AlignedSegment.fromstring(aln, header=header))
-    out_bam_file.close()
-    pysam.sort(
-        "-@",
-        str(threads),
-        "-m",
-        str(sort_memory),
-        "-o",
-        out_files["bam_filtered"],
-        out_files["bam_filtered_tmp"],
-    )
-    pysam.index(out_files["bam_filtered"])
-    os.remove(out_files["bam_filtered_tmp"])
+        samfile = pysam.AlignmentFile(bam, "rb")
+        for aln in fast_flatten(alns):
+            out_bam_file.write(pysam.AlignedSegment.fromstring(aln, header=header))
+        out_bam_file.close()
+        pysam.sort(
+            "-@",
+            str(threads),
+            "-m",
+            str(sort_memory),
+            "-o",
+            out_files["bam_filtered"],
+            out_files["bam_filtered_tmp"],
+        )
+        pysam.index(out_files["bam_filtered"])
+        os.remove(out_files["bam_filtered_tmp"])
+    else:
+        logging.info(f"No references meet the filter conditions. Skipping...")
 
 
 def get_alns(params):

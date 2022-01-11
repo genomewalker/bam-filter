@@ -24,7 +24,9 @@ log = logging.getLogger("my_logger")
 def main():
 
     logging.basicConfig(
-        level=logging.DEBUG, format="%(levelname)s ::: %(asctime)s ::: %(message)s"
+        level=logging.DEBUG,
+        format="%(levelname)s ::: %(asctime)s ::: %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
 
     args = get_arguments()
