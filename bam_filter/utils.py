@@ -199,7 +199,7 @@ def get_arguments(argv=None):
         "-a",
         "--min-read-ani",
         type=lambda x: float(
-            check_values(x, minval=0, maxval=1, parser=parser, var="--min-read-ani")
+            check_values(x, minval=0, maxval=100, parser=parser, var="--min-read-ani")
         ),
         default=defaults["min_read_ani"],
         dest="min_read_ani",

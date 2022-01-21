@@ -381,6 +381,8 @@ def process_bam(bam, threads=1, reference_lengths=None):
     samfile = pysam.AlignmentFile(bam, "rb")
     pysam.set_verbosity(save)
 
+    ref_lengths = None
+
     if reference_lengths is not None:
         ref_lengths = pd.read_csv(
             reference_lengths, sep="\t", index_col=0, names=["reference", "length"]
