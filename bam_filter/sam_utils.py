@@ -379,18 +379,26 @@ def process_bam(bam, threads=1, reference_lengths=None):
     logging.info(f"Loading BAM file")
     save = pysam.set_verbosity(0)
     samfile = pysam.AlignmentFile(bam, "rb")
+    chr_lengths = []
+    for chrom in samfile.references:
+        chr_lengths.append(samfile.get_reference_length(chrom))
+    max_chr_length = np.max(chr_lengths)
     pysam.set_verbosity(save)
-
     ref_lengths = None
 
     if reference_lengths is not None:
         ref_lengths = pd.read_csv(
             reference_lengths, sep="\t", index_col=0, names=["reference", "length"]
         )
+        max_chr_length = np.max(ref_lengths["length"].tolist())
 
     if not samfile.has_index():
         logging.info(f"BAM index not found. Indexing...")
-        pysam.index(bam)
+        if max_chr_length > 536870912:
+            logging.info(f"A reference is longer than 2^29, indexing with csi")
+            pysam.index(bam, "-c")
+        else:
+            pysam.index(bam)
 
         logging.info(f"Reloading BAM file")
         samfile = pysam.AlignmentFile(
@@ -514,7 +522,6 @@ def filter_reference_BAM(bam, df, filter_conditions, threads, out_files, sort_me
             p.join()
             sys.exit()
 
-        samfile = pysam.AlignmentFile(bam, "rb")
         for aln in fast_flatten(alns):
             out_bam_file.write(pysam.AlignedSegment.fromstring(aln, header=header))
         out_bam_file.close()
@@ -527,7 +534,23 @@ def filter_reference_BAM(bam, df, filter_conditions, threads, out_files, sort_me
             out_files["bam_filtered"],
             out_files["bam_filtered_tmp"],
         )
-        pysam.index(out_files["bam_filtered"])
+
+        save = pysam.set_verbosity(0)
+        samfile = pysam.AlignmentFile(out_files["bam_filtered"], "rb")
+        chr_lengths = []
+        for chrom in samfile.references:
+            chr_lengths.append(samfile.get_reference_length(chrom))
+        max_chr_length = np.max(chr_lengths)
+        pysam.set_verbosity(save)
+        samfile.close()
+
+        logging.info(f"BAM index not found. Indexing...")
+        if max_chr_length > 536870912:
+            logging.info(f"A reference is longer than 2^29, indexing with csi")
+            pysam.index(out_files["bam_filtered"], "-c")
+        else:
+            pysam.index(out_files["bam_filtered"])
+
         os.remove(out_files["bam_filtered_tmp"])
     else:
         logging.info(f"No references meet the filter conditions. Skipping...")
