@@ -407,7 +407,7 @@ def process_bam(bam, threads=1, reference_lengths=None):
 
     total_refs = samfile.nreferences
     logging.info(f"Found {total_refs:,} reference sequences")
-    logging.info(f"Found {samfile.mapped:,} alignments")
+    #logging.info(f"Found {samfile.mapped:,} alignments")
 
     references = samfile.references
     params = zip([bam] * len(references), references)
