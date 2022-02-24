@@ -37,11 +37,13 @@ def main():
     out_files = create_output_files(prefix=args.prefix, bam=args.bam)
 
     data = process_bam(
-        bam=args.bam, threads=args.threads, reference_lengths=args.reference_lengths
+        bam=args.bam,
+        threads=args.threads,
+        reference_lengths=args.reference_lengths,
+        scale=args.scale,
     )
 
     data_df = pd.DataFrame([x.to_summary() for x in data])
-
     logging.info(f"Writing reference statistics to {out_files['stats']}")
     data_df.to_csv(out_files["stats"], sep="\t", index=False, compression="gzip")
 
