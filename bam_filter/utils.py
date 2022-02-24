@@ -50,15 +50,27 @@ def is_integer(n):
 
 # function to check if the input value has K, M or G suffix in it
 def check_suffix(val, parser, var):
-    units = ["K", "M", "G"]
+    if var == "--scale":
+        units = ["K", "M"]
+    else:
+        units = ["K", "M", "G"]
     unit = val[-1]
     value = int(val[:-1])
 
     if is_integer(value) & (unit in units) & (value > 0):
-        return val
+        if var == "--scale":
+            if unit == "K":
+                val = value * 1000
+            elif unit == "M":
+                val = value * 1000000
+            elif unit == "G":
+                val = value * 1000000000
+            return val
+        else:
+            return val
     else:
         parser.error(
-            "argument %s: Invalid value %s. Memory has to be an integer larger than 0 with the following suffix K, M or G"
+            "argument %s: Invalid value %s. Has to be an integer larger than 0 with the following suffix K, M or G"
             % (var, val)
         )
 
@@ -112,6 +124,7 @@ defaults = {
     "prefix": None,
     "sort_memory": "1G",
     "reference_lengths": None,
+    "scale": 1e6,
 }
 
 help_msg = {
@@ -124,6 +137,7 @@ help_msg = {
     "min_read_ani": "Minimum average read ANI",
     "min_coverage_evenness": "Minimum coverage evenness",
     "sort_memory": "Set maximum memory per thread for sorting; suffix K/M/G recognized",
+    "scale": "Scale taxonomic abundance by this factor; suffix K/M recognized",
     "help": "Help message",
     "debug": f"Print debug messages",
     "reference_lengths": "File with references lengths",
@@ -224,6 +238,13 @@ def get_arguments(argv=None):
         default=defaults["sort_memory"],
         dest="sort_memory",
         help=help_msg["sort_memory"],
+    )
+    parser.add_argument(
+        "--scale",
+        type=lambda x: check_suffix(x, parser=parser, var="--scale"),
+        default=defaults["scale"],
+        dest="scale",
+        help=help_msg["scale"],
     )
     # reference_lengths
     parser.add_argument(

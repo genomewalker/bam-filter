@@ -76,7 +76,7 @@ def create_pyranges(reference, starts, ends, strands):
     )
 
 
-def get_bam_stats(params, ref_lengths=None):
+def get_bam_stats(params, ref_lengths=None, scale=1e6):
     """
     Worker function per chromosome
     loop over a bam file and create tuple with lists containing metrics:
@@ -170,6 +170,9 @@ def get_bam_stats(params, ref_lengths=None):
         c_v = cov_sd / mean_coverage
         read_mapq = [np.nan if x == 255 else x for x in read_mapq]
 
+        tax_abund_aln = round((n_alns / reference_length) * scale)
+        tax_abund_read = round((len(set(read_names)) / reference_length) * scale)
+
         log.debug(f"Number of reads: {len(set(read_names)):,}")
         log.debug(f"Number of alignments: {n_alns:,}")
         log.debug(f"Bases covered: {bases_covered:,}")
@@ -185,6 +188,8 @@ def get_bam_stats(params, ref_lengths=None):
         log.debug(f"C_v: {c_v:.2f}")
         log.debug(f"Mean mapq: {np.mean(read_mapq):.2f}")
         log.debug(f"GC content: {gc_content:.2f}")
+        log.debug(f"Taxonomic abundance (alns): {tax_abund_aln:.2f}")
+        log.debug(f"Taxonomic abundance (reads): {tax_abund_read:.2f}")
         data = BamAlignment(
             reference=reference,
             n_alns=n_alns,
@@ -210,6 +215,8 @@ def get_bam_stats(params, ref_lengths=None):
             mapping_quality=read_mapq,
             read_names=set(read_names),
             read_aln_score=read_aln_score,
+            tax_abund_aln=tax_abund_aln,
+            tax_abund_read=tax_abund_read,
         )
     else:
         data = BamAlignment(
@@ -237,6 +244,8 @@ def get_bam_stats(params, ref_lengths=None):
             mapping_quality=np.nan,
             read_names=read_names,
             read_aln_score=read_aln_score,
+            tax_abund_aln=np.nan,
+            tax_abund_read=np.nan,
         )
     return data
 
@@ -272,6 +281,8 @@ class BamAlignment:
         cov_evenness,
         read_names,
         read_aln_score,
+        tax_abund_aln,
+        tax_abund_read,
     ):
         self.reference = reference
         self.n_alns = n_alns
@@ -297,6 +308,8 @@ class BamAlignment:
         self.c_v = c_v
         self.cov_evenness = cov_evenness
         self.read_names = read_names
+        self.tax_abund_aln = tax_abund_aln
+        self.tax_abund_read = tax_abund_read
         # function to convert class to dict
 
     def as_dict(self):
@@ -324,6 +337,8 @@ class BamAlignment:
             "breadth_exp_ratio": self.breadth_exp_ratio,
             "c_v": self.c_v,
             "cov_evenness": self.cov_evenness,
+            "tax_abund_read": self.tax_abund_read,
+            "tax_abund_aln": self.tax_abund_aln,
         }
 
     def to_summary(self):
@@ -366,11 +381,13 @@ class BamAlignment:
             "breadth_exp_ratio": self.breadth_exp_ratio,
             "c_v": self.c_v,
             "cov_evenness": self.cov_evenness,
+            "tax_abund_read": self.tax_abund_read,
+            "tax_abund_aln": self.tax_abund_aln,
         }
 
 
 # Inspired from https://gigabaseorgigabyte.wordpress.com/2017/04/14/getting-the-edit-distance-from-a-bam-alignment-a-journey/
-def process_bam(bam, threads=1, reference_lengths=None):
+def process_bam(bam, threads=1, reference_lengths=None, scale=1e6):
     """
     Processing function: calls pool of worker functions
     to extract from a bam file two definitions of the edit distances to the reference genome scaled by read length
@@ -379,6 +396,9 @@ def process_bam(bam, threads=1, reference_lengths=None):
     logging.info(f"Loading BAM file")
     save = pysam.set_verbosity(0)
     samfile = pysam.AlignmentFile(bam, "rb")
+
+    references = samfile.references
+
     chr_lengths = []
     for chrom in samfile.references:
         chr_lengths.append(samfile.get_reference_length(chrom))
@@ -390,6 +410,12 @@ def process_bam(bam, threads=1, reference_lengths=None):
         ref_lengths = pd.read_csv(
             reference_lengths, sep="\t", index_col=0, names=["reference", "length"]
         )
+        # check if the dataframe contains all the References in the BAM file
+        if not set(references).issubset(set(ref_lengths.index)):
+            logging.error(
+                f"The BAM file contains references not found in the reference lengths file"
+            )
+            sys.exit(1)
         max_chr_length = np.max(ref_lengths["length"].tolist())
 
     if not samfile.has_index():
@@ -407,21 +433,27 @@ def process_bam(bam, threads=1, reference_lengths=None):
 
     total_refs = samfile.nreferences
     logging.info(f"Found {total_refs:,} reference sequences")
-    #logging.info(f"Found {samfile.mapped:,} alignments")
+    # logging.info(f"Found {samfile.mapped:,} alignments")
 
-    references = samfile.references
     params = zip([bam] * len(references), references)
     try:
         logging.info(f"Getting stats for each reference...")
 
         if is_debug():
             data = list(
-                map(functools.partial(get_bam_stats, ref_lengths=ref_lengths), params)
+                map(
+                    functools.partial(
+                        get_bam_stats, ref_lengths=ref_lengths, scale=scale
+                    ),
+                    params,
+                )
             )
         else:
 
             p = Pool(
-                threads, initializer=initializer, initargs=([params, ref_lengths],)
+                threads,
+                initializer=initializer,
+                initargs=([params, ref_lengths, scale],),
             )
             c_size = calc_chunksize(
                 n_workers=threads,
@@ -430,7 +462,9 @@ def process_bam(bam, threads=1, reference_lengths=None):
             data = list(
                 tqdm.tqdm(
                     p.imap_unordered(
-                        functools.partial(get_bam_stats, ref_lengths=ref_lengths),
+                        functools.partial(
+                            get_bam_stats, ref_lengths=ref_lengths, scale=scale
+                        ),
                         params,
                         chunksize=c_size,
                     ),
