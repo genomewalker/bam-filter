@@ -85,6 +85,7 @@ optional arguments:
                         Minimum coverage evenness (default: 0)
   -m SORT_MEMORY, --sort-memory SORT_MEMORY
                         Set maximum memory per thread for sorting; suffix K/M/G recognized (default: 1G)
+  --scale SCALE         Scale taxonomic abundance by this factor; suffix K/M recognized (default: 1000000.0)
   -r REFERENCE_LENGTHS, --reference-lengths REFERENCE_LENGTHS
                         File with references lengths (default: None)
   --debug               Print debug messages (default: False)
@@ -137,3 +138,5 @@ The program will produce two main outputs:
     - **breadth_exp_ratio**: Ration between the obsrved and the expected depth of coverage
     - **c_v**: Coefficient of variation of the coverage
     - **cov_evenness**: Eveness of coverage as calculated [here](https://www.nature.com/articles/jhg201621).
+    - **tax_abund_read**: Counts estimated like Woltka but using number of reads.
+    - **tax_abund_aln**: Counts estimated like Woltka.
