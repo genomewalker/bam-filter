@@ -346,14 +346,14 @@ class BamAlignment:
             warnings.simplefilter("ignore", category=RuntimeWarning)
             read_length_mean = np.mean(self.read_length)
             read_length_median = np.median(self.read_length)
-            read_length_sd = np.std(self.read_length, ddof=1)
+            read_length_std = np.std(self.read_length, ddof=1)
             read_length_mode = stats.mode(self.read_length)[0][0]
             read_aligned_length = np.mean(self.read_aligned_length)
             read_aln_score = np.mean(self.read_aln_score)
             mapping_quality = np.mean(self.mapping_quality)
             edit_distances = np.mean(self.edit_distances)
             read_ani_mean = np.mean(self.ani_nm)
-            read_ani_sd = np.std(self.ani_nm, ddof=1)
+            read_ani_std = np.std(self.ani_nm, ddof=1)
             reads_ani_median = np.median(self.ani_nm)
             gc_content = (np.sum(self.read_gc_content) / np.sum(self.read_length)) * 100
 

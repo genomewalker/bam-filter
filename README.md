@@ -118,6 +118,7 @@ The program will produce two main outputs:
     - **n_reads**: Number of reads mapped to the reference
     - **n_alns**: Number of alignments in the reference
     - **read_length_mean**: Mean read length mapped to the reference
+    - **read_length_std**: Standard deviation of read lengths mapped to the reference
     - **read_length_median**: Medium read length mapped to the reference
     - **read_length_mode**: Modal read length mapped to the reference
     - **gc_content**: Average GC content of the reads mapped to the reference
@@ -126,6 +127,8 @@ The program will produce two main outputs:
     - **mapping_quality**: Average mapping quality of the reads mapped to the reference
     - **edit_distances**: Average edit distance of the reads mapped to the reference
     - **read_ani_mean**: Average ANI of the reads mapped to the reference
+    - **read_ani_std**: Standard deviation of ANI of the reads mapped to the reference
+    - **read_ani_median**: Median ANI of the reads mapped to the reference
     - **bases_covered**: Number of bases covered by the reference
     - **max_covered_bases**: Maximum number of bases covered in the reference
     - **mean_covered_bases**: Average number of bases covered in the reference
