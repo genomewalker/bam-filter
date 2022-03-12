@@ -156,7 +156,7 @@ def get_bam_stats(params, ref_lengths=None, scale=1e6):
         mean_covered_bases = np.mean(ranges)
         bases_covered = int(len(cov_pos))
         # get SD from covered bases
-        cov_sd = np.std(cov_pos)
+        cov_sd = np.std(cov_pos, ddof=1)
         # get average coverage
         mean_coverage = sum(cov_pos) / reference_length
         mean_coverage_covered = sum(cov_pos) / bases_covered
@@ -346,12 +346,15 @@ class BamAlignment:
             warnings.simplefilter("ignore", category=RuntimeWarning)
             read_length_mean = np.mean(self.read_length)
             read_length_median = np.median(self.read_length)
+            read_length_sd = np.std(self.read_length, ddof=1)
             read_length_mode = stats.mode(self.read_length)[0][0]
             read_aligned_length = np.mean(self.read_aligned_length)
             read_aln_score = np.mean(self.read_aln_score)
             mapping_quality = np.mean(self.mapping_quality)
             edit_distances = np.mean(self.edit_distances)
             read_ani_mean = np.mean(self.ani_nm)
+            read_ani_sd = np.std(self.ani_nm, ddof=1)
+            reads_ani_median = np.median(self.ani_nm)
             gc_content = (np.sum(self.read_gc_content) / np.sum(self.read_length)) * 100
 
         return {
@@ -359,6 +362,7 @@ class BamAlignment:
             "n_reads": len(self.read_names),
             "n_alns": self.n_alns,
             "read_length_mean": read_length_mean,
+            "read_length_sd": read_length_sd,
             "read_length_median": read_length_median,
             "read_length_mode": read_length_mode,
             "gc_content": gc_content,
@@ -368,6 +372,8 @@ class BamAlignment:
             "edit_distances": edit_distances,
             # "edit_distances_md": np.mean(self.edit_distances_md),
             "read_ani_mean": read_ani_mean,
+            "read_ani_sd": read_ani_sd,
+            "reads_ani_median": reads_ani_median,
             # "ani_md": np.mean(self.ani_md),
             "bases_covered": self.bases_covered,
             "max_covered_bases": self.max_covered_bases,
