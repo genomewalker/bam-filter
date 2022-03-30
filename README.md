@@ -96,7 +96,7 @@ optional arguments:
 One would run filterBAM as:
 
 ```bash
-filterBAM --min-read-count 100 --min-expected-breadth-ratio 0.75 --min-read-ani 98 --sort-memory 1G --reference-lengths gtdb-r202.len.map --threads 16  c55d4e2df1.woltka.dedup.bam 
+filterBAM --min-read-count 100 --min-expected-breadth-ratio 0.75 --min-read-ani 98 --sort-memory 1G --reference-lengths gtdb-r202.len.map --threads 16  c55d4e2df1.dedup.bam 
 ```
 
 **--min-read-count**: Minimum number of reads mapped to a reference in the BAM file

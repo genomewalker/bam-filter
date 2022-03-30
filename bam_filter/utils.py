@@ -148,7 +148,7 @@ help_msg = {
 
 def get_arguments(argv=None):
     parser = argparse.ArgumentParser(
-        description="A simple tool to calculate metrics from a BAM file and filter references to be used with Woltka",
+        description="A simple tool to calculate metrics from a BAM file and filter with uneven coverage.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
