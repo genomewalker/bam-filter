@@ -14,7 +14,7 @@ import pyranges as pr
 
 log = logging.getLogger("my_logger")
 
-sys.setrecursionlimit(10 ** 6)
+sys.setrecursionlimit(10**6)
 
 # Function to calculate evenness of coverage
 def coverage_evenness(coverage):
@@ -219,34 +219,35 @@ def get_bam_stats(params, ref_lengths=None, scale=1e6):
             tax_abund_read=tax_abund_read,
         )
     else:
-        data = BamAlignment(
-            reference=reference,
-            n_alns=n_alns,
-            reference_length=reference_length,
-            bam_reference_length=bam_reference_length,
-            mean_coverage=np.nan,
-            mean_coverage_covered=np.nan,
-            bases_covered=np.nan,
-            max_covered_bases=np.nan,
-            mean_covered_bases=np.nan,
-            cov_evenness=np.nan,
-            breadth=np.nan,
-            exp_breadth=np.nan,
-            breadth_exp_ratio=np.nan,
-            c_v=np.nan,
-            edit_distances=np.nan,
-            # edit_distances_md=np.nan,
-            ani_nm=np.nan,
-            # ani_md=np.nan,
-            read_length=np.nan,
-            read_gc_content=np.nan,
-            read_aligned_length=np.nan,
-            mapping_quality=np.nan,
-            read_names=read_names,
-            read_aln_score=read_aln_score,
-            tax_abund_aln=np.nan,
-            tax_abund_read=np.nan,
-        )
+        # data = BamAlignment(
+        #     reference=reference,
+        #     n_alns=n_alns,
+        #     reference_length=reference_length,
+        #     bam_reference_length=bam_reference_length,
+        #     mean_coverage=np.nan,
+        #     mean_coverage_covered=np.nan,
+        #     bases_covered=np.nan,
+        #     max_covered_bases=np.nan,
+        #     mean_covered_bases=np.nan,
+        #     cov_evenness=np.nan,
+        #     breadth=np.nan,
+        #     exp_breadth=np.nan,
+        #     breadth_exp_ratio=np.nan,
+        #     c_v=np.nan,
+        #     edit_distances=np.nan,
+        #     # edit_distances_md=np.nan,
+        #     ani_nm=np.nan,
+        #     # ani_md=np.nan,
+        #     read_length=np.nan,
+        #     read_gc_content=np.nan,
+        #     read_aligned_length=np.nan,
+        #     mapping_quality=np.nan,
+        #     read_names=read_names,
+        #     read_aln_score=read_aln_score,
+        #     tax_abund_aln=np.nan,
+        #     tax_abund_read=np.nan,
+        # )
+        data = None
     return data
 
 
@@ -347,6 +348,8 @@ class BamAlignment:
             read_length_mean = np.mean(self.read_length)
             read_length_median = np.median(self.read_length)
             read_length_std = np.std(self.read_length, ddof=1)
+            read_length_max = np.max(self.read_length)
+            read_length_min = np.min(self.read_length)
             read_length_mode = stats.mode(self.read_length)[0][0]
             read_aligned_length = np.mean(self.read_aligned_length)
             read_aln_score = np.mean(self.read_aln_score)
@@ -356,13 +359,14 @@ class BamAlignment:
             read_ani_std = np.std(self.ani_nm, ddof=1)
             reads_ani_median = np.median(self.ani_nm)
             gc_content = (np.sum(self.read_gc_content) / np.sum(self.read_length)) * 100
-
         return {
             "reference": self.reference,
             "n_reads": len(self.read_names),
             "n_alns": self.n_alns,
             "read_length_mean": read_length_mean,
             "read_length_std": read_length_std,
+            "read_length_min": read_length_min,
+            "read_length_max": read_length_max,
             "read_length_median": read_length_median,
             "read_length_mode": read_length_mode,
             "gc_content": gc_content,
@@ -390,6 +394,14 @@ class BamAlignment:
             "tax_abund_read": self.tax_abund_read,
             "tax_abund_aln": self.tax_abund_aln,
         }
+
+    def get_read_length_freqs(self):
+        frags = {}
+        lengths = pd.Series(self.read_length)
+        lengths = lengths.value_counts().sort_index()
+        freqs = list(lengths / sum(lengths))
+        frags[self.reference] = {"length": list(lengths.index), "freq": freqs}
+        return frags
 
 
 # Inspired from https://gigabaseorgigabyte.wordpress.com/2017/04/14/getting-the-edit-distance-from-a-bam-alignment-a-journey/

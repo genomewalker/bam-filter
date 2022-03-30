@@ -138,6 +138,7 @@ help_msg = {
     "min_coverage_evenness": "Minimum coverage evenness",
     "sort_memory": "Set maximum memory per thread for sorting; suffix K/M/G recognized",
     "scale": "Scale taxonomic abundance by this factor; suffix K/M recognized",
+    "read_length_freqs": "Save a JSON file with the read length frequencies mapped to each reference",
     "help": "Help message",
     "debug": f"Print debug messages",
     "reference_lengths": "File with references lengths",
@@ -254,6 +255,12 @@ def get_arguments(argv=None):
         default=defaults["reference_lengths"],
         dest="reference_lengths",
         help=help_msg["reference_lengths"],
+    )
+    parser.add_argument(
+        "--read-length-freqs",
+        dest="read_length_freqs",
+        action="store_true",
+        help=help_msg["read_length_freqs"],
     )
     parser.add_argument(
         "--debug", dest="debug", action="store_true", help=help_msg["debug"]
@@ -396,5 +403,6 @@ def create_output_files(prefix, bam):
         "stats_filtered": f"{prefix}_stats-filtered.tsv.gz",
         "bam_filtered_tmp": f"{prefix}.filtered.tmp.bam",
         "bam_filtered": f"{prefix}.filtered.bam",
+        "read_length_freqs": f"{prefix}_read-length-freqs.json",
     }
     return out_files

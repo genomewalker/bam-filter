@@ -17,8 +17,13 @@ import pandas as pd
 from bam_filter.sam_utils import process_bam, filter_reference_BAM
 import numpy as np
 from bam_filter.utils import get_arguments, create_output_files
+import json
 
 log = logging.getLogger("my_logger")
+
+
+def obj_dict(obj):
+    return obj.__dict__
 
 
 def main():
@@ -43,7 +48,15 @@ def main():
         scale=args.scale,
     )
 
+    data = list(filter(None, data))
+
     data_df = pd.DataFrame([x.to_summary() for x in data])
+    if args.read_length_freqs:
+        lens = [x.get_read_length_freqs() for x in data]
+        lens = json.dumps(lens, default=obj_dict, ensure_ascii=False, indent=4)
+    with open(out_files["read_length_freqs"], "w", encoding="utf-8") as outfile:
+        print(lens, file=outfile)
+
     logging.info(f"Writing reference statistics to {out_files['stats']}")
     data_df.to_csv(out_files["stats"], sep="\t", index=False, compression="gzip")
 

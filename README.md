@@ -5,7 +5,7 @@
 [![GitHub release (latest by date including pre-releases)](https://img.shields.io/github/v/release/genomewalker/bam-filter?include_prereleases&label=version)](https://github.com/genomewalker/bam-filter/releases) [![bam-filter](https://github.com/genomewalker/bam-filter/workflows/filterBAM_ci/badge.svg)](https://github.com/genomewalker/bam-filter/actions) [![PyPI](https://img.shields.io/pypi/v/bam-filter)](https://pypi.org/project/bam-filter/) [![Conda](https://img.shields.io/conda/v/genomewalker/bam-filter)](https://anaconda.org/genomewalker/bam-filter)
 
 
-A simple tool to calculate metrics from a BAM file and filter references with uneven coverages. It is mainly designed to be used with Woltka to profile ancient metagenomes.
+A simple tool to calculate metrics from a BAM file and filter references with uneven coverages.
 
 # Installation
 
@@ -62,7 +62,7 @@ usage: filterBAM [-h] [-t THREADS] [-p PREFIX] [-l MIN_READ_LENGTH] [-n MIN_READ
                  [--debug] [--version]
                  bam
 
-A simple tool to calculate metrics from a BAM file and filter references to be used with Woltka
+A simple tool to calculate metrics from a BAM file and filter references with uneven coverage.
 
 positional arguments:
   bam                   BAM file containing aligned reads
@@ -88,6 +88,7 @@ optional arguments:
   --scale SCALE         Scale taxonomic abundance by this factor; suffix K/M recognized (default: 1000000.0)
   -r REFERENCE_LENGTHS, --reference-lengths REFERENCE_LENGTHS
                         File with references lengths (default: None)
+  --read-length-freqs   Save a JSON file with the read length frequencies mapped to each reference (default: False)
   --debug               Print debug messages (default: False)
   --version             Print program version
 ```
@@ -119,6 +120,8 @@ The program will produce two main outputs:
     - **n_alns**: Number of alignments in the reference
     - **read_length_mean**: Mean read length mapped to the reference
     - **read_length_std**: Standard deviation of read lengths mapped to the reference
+    - **read_length_min**: Minimum read length mapped to the reference
+    - **read_length_max**: Maximum read length mapped to the reference
     - **read_length_median**: Medium read length mapped to the reference
     - **read_length_mode**: Modal read length mapped to the reference
     - **gc_content**: Average GC content of the reads mapped to the reference
