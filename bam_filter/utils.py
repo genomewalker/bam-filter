@@ -120,6 +120,7 @@ defaults = {
     "min_read_count": 10,
     "min_expected_breadth_ratio": 0.5,
     "min_read_ani": 90.0,
+    "min_breadth": 0,
     "min_coverage_evenness": 0,
     "prefix": None,
     "sort_memory": "1G",
@@ -133,12 +134,15 @@ help_msg = {
     "prefix": "Prefix used for the output files",
     "min_read_length": "Minimum read length",
     "min_read_count": "Minimum read count",
+    "min_breadth": "Minimum breadth",
     "min_expected_breadth_ratio": "Minimum expected breadth ratio",
     "min_read_ani": "Minimum average read ANI",
     "min_coverage_evenness": "Minimum coverage evenness",
     "sort_memory": "Set maximum memory per thread for sorting; suffix K/M/G recognized",
     "scale": "Scale taxonomic abundance by this factor; suffix K/M recognized",
     "read_length_freqs": "Save a JSON file with the read length frequencies mapped to each reference",
+    "only_stats": "Only produce statistics and skip filtering",
+    "only_stats_filtered": "Only filter statistics and skip BAM filtering",
     "help": "Help message",
     "debug": f"Print debug messages",
     "reference_lengths": "File with references lengths",
@@ -211,6 +215,16 @@ def get_arguments(argv=None):
         help=help_msg["min_expected_breadth_ratio"],
     )
     parser.add_argument(
+        "-B",
+        "--min-breadth",
+        type=lambda x: float(
+            check_values(x, minval=0, maxval=1, parser=parser, var="--min-breadth")
+        ),
+        default=defaults["min_breadth"],
+        dest="min_breadth",
+        help=help_msg["min_breadth"],
+    )
+    parser.add_argument(
         "-a",
         "--min-read-ani",
         type=lambda x: float(
@@ -261,6 +275,18 @@ def get_arguments(argv=None):
         dest="read_length_freqs",
         action="store_true",
         help=help_msg["read_length_freqs"],
+    )
+    parser.add_argument(
+        "--only-stats",
+        dest="only_stats",
+        action="store_true",
+        help=help_msg["only_stats"],
+    )
+    parser.add_argument(
+        "--only-stats-filtered",
+        dest="only_stats_filtered",
+        action="store_true",
+        help=help_msg["only_stats_filtered"],
     )
     parser.add_argument(
         "--debug", dest="debug", action="store_true", help=help_msg["debug"]

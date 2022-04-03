@@ -504,7 +504,9 @@ def process_bam(bam, threads=1, reference_lengths=None, scale=1e6):
     return data
 
 
-def filter_reference_BAM(bam, df, filter_conditions, threads, out_files, sort_memory):
+def filter_reference_BAM(
+    bam, df, filter_conditions, threads, out_files, sort_memory, only_stats_filtered
+):
     """Filter BAM based on certain conditions
 
     Args:
@@ -515,14 +517,14 @@ def filter_reference_BAM(bam, df, filter_conditions, threads, out_files, sort_me
     """
     logging.info(f"Filtering stats...")
     logging.info(
-        f"min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_read_ani >= {filter_conditions['min_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']}"
+        f"min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_read_ani >= {filter_conditions['min_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} &  min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']}"
     )
-
     df_filtered = df.loc[
         (df["n_reads"] >= filter_conditions["min_read_count"])
         & (df["read_length_mean"] >= filter_conditions["min_read_length"])
         & (df["read_ani_mean"] >= filter_conditions["min_read_ani"])
         & (df["breadth_exp_ratio"] >= filter_conditions["min_expected_breadth_ratio"])
+        & (df["breadth"] >= filter_conditions["min_breadth"])
         & (df["cov_evenness"] >= filter_conditions["min_coverage_evenness"])
     ]
     if len(df_filtered.index) > 0:
@@ -539,71 +541,74 @@ def filter_reference_BAM(bam, df, filter_conditions, threads, out_files, sort_me
         header = pysam.AlignmentHeader.from_references(
             list(ref_names), list(ref_lengths)
         )
-        logging.info(f"Writing filtered BAM file... (be patient)")
-        references = df_filtered["reference"].values
-        params = zip([bam] * len(references), references)
         logging.info(f"Saving filtered stats...")
         df_filtered.to_csv(
             out_files["stats_filtered"], sep="\t", index=False, compression="gzip"
         )
-        try:
-            logging.info(f"Filtering BAM file...")
-
-            if is_debug():
-                alns = list(map(get_alns, params))
-            else:
-
-                p = Pool(threads)
-                c_size = calc_chunksize(threads, len(references))
-                alns = list(
-                    tqdm.tqdm(
-                        p.imap_unordered(get_alns, params, chunksize=c_size),
-                        total=len(references),
-                        leave=False,
-                        ncols=80,
-                        desc=f"References processed",
-                    )
-                )
-
-                p.close()
-                p.join()
-
-        except KeyboardInterrupt:
-            logging.info(f"User canceled the operation. Terminating jobs.")
-            p.terminate()
-            p.join()
-            sys.exit()
-
-        for aln in fast_flatten(alns):
-            out_bam_file.write(pysam.AlignedSegment.fromstring(aln, header=header))
-        out_bam_file.close()
-        pysam.sort(
-            "-@",
-            str(threads),
-            "-m",
-            str(sort_memory),
-            "-o",
-            out_files["bam_filtered"],
-            out_files["bam_filtered_tmp"],
-        )
-
-        save = pysam.set_verbosity(0)
-        samfile = pysam.AlignmentFile(out_files["bam_filtered"], "rb")
-        chr_lengths = []
-        for chrom in samfile.references:
-            chr_lengths.append(samfile.get_reference_length(chrom))
-        max_chr_length = np.max(chr_lengths)
-        pysam.set_verbosity(save)
-        samfile.close()
-
-        logging.info(f"BAM index not found. Indexing...")
-        if max_chr_length > 536870912:
-            logging.info(f"A reference is longer than 2^29, indexing with csi")
-            pysam.index(out_files["bam_filtered"], "-c")
+        if only_stats_filtered:
+            logging.info(f"Skipping saving filtered BAM file.")
         else:
-            pysam.index(out_files["bam_filtered"])
+            logging.info(f"Writing filtered BAM file... (be patient)")
+            references = df_filtered["reference"].values
+            params = zip([bam] * len(references), references)
+            try:
+                logging.info(f"Filtering BAM file...")
 
-        os.remove(out_files["bam_filtered_tmp"])
+                if is_debug():
+                    alns = list(map(get_alns, params))
+                else:
+
+                    p = Pool(threads)
+                    c_size = calc_chunksize(threads, len(references))
+                    alns = list(
+                        tqdm.tqdm(
+                            p.imap_unordered(get_alns, params, chunksize=c_size),
+                            total=len(references),
+                            leave=False,
+                            ncols=80,
+                            desc=f"References processed",
+                        )
+                    )
+
+                    p.close()
+                    p.join()
+
+            except KeyboardInterrupt:
+                logging.info(f"User canceled the operation. Terminating jobs.")
+                p.terminate()
+                p.join()
+                sys.exit()
+
+            for aln in fast_flatten(alns):
+                out_bam_file.write(pysam.AlignedSegment.fromstring(aln, header=header))
+            out_bam_file.close()
+            pysam.sort(
+                "-@",
+                str(threads),
+                "-m",
+                str(sort_memory),
+                "-o",
+                out_files["bam_filtered"],
+                out_files["bam_filtered_tmp"],
+            )
+
+            save = pysam.set_verbosity(0)
+            samfile = pysam.AlignmentFile(out_files["bam_filtered"], "rb")
+            chr_lengths = []
+            for chrom in samfile.references:
+                chr_lengths.append(samfile.get_reference_length(chrom))
+            max_chr_length = np.max(chr_lengths)
+            pysam.set_verbosity(save)
+            samfile.close()
+
+            logging.info(f"BAM index not found. Indexing...")
+            if max_chr_length > 536870912:
+                logging.info(f"A reference is longer than 2^29, indexing with csi")
+                pysam.index(out_files["bam_filtered"], "-c")
+            else:
+                pysam.index(out_files["bam_filtered"])
+
+            os.remove(out_files["bam_filtered_tmp"])
     else:
         logging.info(f"No references meet the filter conditions. Skipping...")
 
