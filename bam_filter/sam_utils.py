@@ -528,19 +528,6 @@ def filter_reference_BAM(
         & (df["cov_evenness"] >= filter_conditions["min_coverage_evenness"])
     ]
     if len(df_filtered.index) > 0:
-        refs_dict = dict(zip(df_filtered["reference"], df_filtered["reference_length"]))
-        (ref_names, ref_lengths) = zip(*refs_dict.items())
-
-        out_bam_file = pysam.Samfile(
-            out_files["bam_filtered_tmp"],
-            "wb",
-            referencenames=list(ref_names),
-            referencelengths=list(ref_lengths),
-            threads=threads,
-        )
-        header = pysam.AlignmentHeader.from_references(
-            list(ref_names), list(ref_lengths)
-        )
         logging.info(f"Saving filtered stats...")
         df_filtered.to_csv(
             out_files["stats_filtered"], sep="\t", index=False, compression="gzip"
@@ -549,6 +536,21 @@ def filter_reference_BAM(
             logging.info(f"Skipping saving filtered BAM file.")
         else:
             logging.info(f"Writing filtered BAM file... (be patient)")
+            refs_dict = dict(
+                zip(df_filtered["reference"], df_filtered["reference_length"])
+            )
+            (ref_names, ref_lengths) = zip(*refs_dict.items())
+
+            out_bam_file = pysam.Samfile(
+                out_files["bam_filtered_tmp"],
+                "wb",
+                referencenames=list(ref_names),
+                referencelengths=list(ref_lengths),
+                threads=threads,
+            )
+            header = pysam.AlignmentHeader.from_references(
+                list(ref_names), list(ref_lengths)
+            )
             references = df_filtered["reference"].values
             params = zip([bam] * len(references), references)
             try:
