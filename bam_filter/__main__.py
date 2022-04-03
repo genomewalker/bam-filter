@@ -51,11 +51,12 @@ def main():
     data = list(filter(None, data))
 
     data_df = pd.DataFrame([x.to_summary() for x in data])
+
     if args.read_length_freqs:
         lens = [x.get_read_length_freqs() for x in data]
         lens = json.dumps(lens, default=obj_dict, ensure_ascii=False, indent=4)
-    with open(out_files["read_length_freqs"], "w", encoding="utf-8") as outfile:
-        print(lens, file=outfile)
+        with open(out_files["read_length_freqs"], "w", encoding="utf-8") as outfile:
+            print(lens, file=outfile)
 
     logging.info(f"Writing reference statistics to {out_files['stats']}")
     data_df.to_csv(out_files["stats"], sep="\t", index=False, compression="gzip")
@@ -64,18 +65,22 @@ def main():
         "min_read_length": args.min_read_length,
         "min_read_count": args.min_read_count,
         "min_expected_breadth_ratio": args.min_expected_breadth_ratio,
+        "min_breadth": args.min_breadth,
         "min_read_ani": args.min_read_ani,
         "min_coverage_evenness": args.min_coverage_evenness,
     }
-
-    filter_reference_BAM(
-        bam=args.bam,
-        df=data_df,
-        filter_conditions=filter_conditions,
-        threads=args.threads,
-        out_files=out_files,
-        sort_memory=args.sort_memory,
-    )
+    if args.only_stats:
+        logging.info("Skipping filtering...")
+    else:
+        filter_reference_BAM(
+            bam=args.bam,
+            df=data_df,
+            filter_conditions=filter_conditions,
+            threads=args.threads,
+            out_files=out_files,
+            only_stats_filtered=args.only_stats_filtered,
+            sort_memory=args.sort_memory,
+        )
     logging.info(f"ALL DONE.")
 
 
