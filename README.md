@@ -89,6 +89,9 @@ optional arguments:
   -r REFERENCE_LENGTHS, --reference-lengths REFERENCE_LENGTHS
                         File with references lengths (default: None)
   --read-length-freqs   Save a JSON file with the read length frequencies mapped to each reference (default: False)
+  --only-stats          Only produce statistics and skip filtering (default: False)
+  --only-stats-filtered
+                        Only filter statistics and skip BAM filtering (default: False)
   --debug               Print debug messages (default: False)
   --version             Print program version
 ```
