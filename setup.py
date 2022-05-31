@@ -9,6 +9,7 @@ requirements = [
     "pysam>=0.17.0",
     "numpy>=1.21.2",
     "pyrle>=0.0.31",
+    "sorted-nearest<=0.0.33",
     "pyranges>=0.0.112",
 ]
 
