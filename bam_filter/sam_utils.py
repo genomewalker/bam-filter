@@ -11,10 +11,11 @@ import logging
 import warnings
 from bam_filter.utils import is_debug, calc_chunksize, fast_flatten, initializer
 import pyranges as pr
+from collections import defaultdict
 
 log = logging.getLogger("my_logger")
 
-sys.setrecursionlimit(10**6)
+sys.setrecursionlimit(10 ** 6)
 
 # Function to calculate evenness of coverage
 def coverage_evenness(coverage):
@@ -136,118 +137,87 @@ def get_bam_stats(params, ref_lengths=None, scale=1e6):
         ends.append(aln.reference_end)
         strands.append(strand)
 
-    if n_alns > 1:
-        # get bases covered by reads pileup
-        cov_pos = [
-            pileupcolumn.n
-            for pileupcolumn in samfile.pileup(
-                reference,
-                start=None,
-                stop=None,
-                region=None,
-                stepper="nofilter",
-                min_mapping_quality=0,
-            )
-        ]
-        # convert datafrane to pyranges
-        ranges = create_pyranges(reference, starts, ends, strands)
-        ranges = ranges.merge(strand=False).lengths().to_list()
-        max_covered_bases = np.max(ranges)
-        mean_covered_bases = np.mean(ranges)
-        bases_covered = int(len(cov_pos))
-        # get SD from covered bases
-        cov_sd = np.std(cov_pos, ddof=1)
-        # get average coverage
-        mean_coverage = sum(cov_pos) / reference_length
-        mean_coverage_covered = sum(cov_pos) / bases_covered
-
-        breadth = bases_covered / reference_length
-        exp_breadth = 1 - np.exp(-mean_coverage)
-        breadth_exp_ratio = breadth / exp_breadth
-
-        cov_evenness = coverage_evenness(cov_pos)
-        gc_content = (np.sum(read_gc_content) / np.sum(read_length)) * 100
-        c_v = cov_sd / mean_coverage
-        read_mapq = [np.nan if x == 255 else x for x in read_mapq]
-
-        tax_abund_aln = round((n_alns / reference_length) * scale)
-        tax_abund_read = round((len(set(read_names)) / reference_length) * scale)
-
-        log.debug(f"Number of reads: {len(set(read_names)):,}")
-        log.debug(f"Number of alignments: {n_alns:,}")
-        log.debug(f"Bases covered: {bases_covered:,}")
-        log.debug(f"Mean coverage: {mean_coverage:.2f}")
-        log.debug(f"Mean coverage covered: {mean_coverage_covered:.2f}")
-        log.debug(f"Max covered bases: {max_covered_bases:,}")
-        log.debug(f"Mean covered bases: {mean_covered_bases:.2f}")
-        log.debug(f"SD: {cov_sd:.2f}")
-        log.debug(f"Breadth: {breadth:.2f}")
-        log.debug(f"Exp. breadth: {exp_breadth:.2f}")
-        log.debug(f"Breadth/exp. ratio: {breadth_exp_ratio:.2f}")
-        log.debug(f"Cov. evenness: {cov_evenness:.2f}")
-        log.debug(f"C_v: {c_v:.2f}")
-        log.debug(f"Mean mapq: {np.mean(read_mapq):.2f}")
-        log.debug(f"GC content: {gc_content:.2f}")
-        log.debug(f"Taxonomic abundance (alns): {tax_abund_aln:.2f}")
-        log.debug(f"Taxonomic abundance (reads): {tax_abund_read:.2f}")
-        data = BamAlignment(
-            reference=reference,
-            n_alns=n_alns,
-            reference_length=reference_length,
-            bam_reference_length=bam_reference_length,
-            mean_coverage=mean_coverage,
-            mean_coverage_covered=mean_coverage_covered,
-            bases_covered=bases_covered,
-            max_covered_bases=max_covered_bases,
-            mean_covered_bases=mean_covered_bases,
-            cov_evenness=cov_evenness,
-            breadth=breadth,
-            exp_breadth=exp_breadth,
-            breadth_exp_ratio=breadth_exp_ratio,
-            c_v=c_v,
-            edit_distances=edit_distances,
-            # edit_distances_md=edit_distances_md,
-            ani_nm=ani_nm,
-            # ani_md=ani_md,
-            read_length=read_length,
-            read_gc_content=read_gc_content,
-            read_aligned_length=read_aligned_length,
-            mapping_quality=read_mapq,
-            read_names=set(read_names),
-            read_aln_score=read_aln_score,
-            tax_abund_aln=tax_abund_aln,
-            tax_abund_read=tax_abund_read,
+    # get bases covered by reads pileup
+    cov_pos = [
+        pileupcolumn.n
+        for pileupcolumn in samfile.pileup(
+            reference,
+            start=None,
+            stop=None,
+            region=None,
+            stepper="nofilter",
+            min_mapping_quality=0,
         )
-    else:
-        # data = BamAlignment(
-        #     reference=reference,
-        #     n_alns=n_alns,
-        #     reference_length=reference_length,
-        #     bam_reference_length=bam_reference_length,
-        #     mean_coverage=np.nan,
-        #     mean_coverage_covered=np.nan,
-        #     bases_covered=np.nan,
-        #     max_covered_bases=np.nan,
-        #     mean_covered_bases=np.nan,
-        #     cov_evenness=np.nan,
-        #     breadth=np.nan,
-        #     exp_breadth=np.nan,
-        #     breadth_exp_ratio=np.nan,
-        #     c_v=np.nan,
-        #     edit_distances=np.nan,
-        #     # edit_distances_md=np.nan,
-        #     ani_nm=np.nan,
-        #     # ani_md=np.nan,
-        #     read_length=np.nan,
-        #     read_gc_content=np.nan,
-        #     read_aligned_length=np.nan,
-        #     mapping_quality=np.nan,
-        #     read_names=read_names,
-        #     read_aln_score=read_aln_score,
-        #     tax_abund_aln=np.nan,
-        #     tax_abund_read=np.nan,
-        # )
-        data = None
+    ]
+    # convert datafrane to pyranges
+    ranges = create_pyranges(reference, starts, ends, strands)
+    ranges = ranges.merge(strand=False).lengths().to_list()
+    max_covered_bases = np.max(ranges)
+    mean_covered_bases = np.mean(ranges)
+    bases_covered = int(len(cov_pos))
+    # get SD from covered bases
+    cov_sd = np.std(cov_pos, ddof=1)
+    # get average coverage
+    mean_coverage = sum(cov_pos) / reference_length
+    mean_coverage_covered = sum(cov_pos) / bases_covered
+
+    breadth = bases_covered / reference_length
+    exp_breadth = 1 - np.exp(-mean_coverage)
+    breadth_exp_ratio = breadth / exp_breadth
+
+    cov_evenness = coverage_evenness(cov_pos)
+    gc_content = (np.sum(read_gc_content) / np.sum(read_length)) * 100
+    c_v = cov_sd / mean_coverage
+    read_mapq = [np.nan if x == 255 else x for x in read_mapq]
+
+    tax_abund_aln = round((n_alns / reference_length) * scale)
+    tax_abund_read = round((len(set(read_names)) / reference_length) * scale)
+
+    log.debug(f"Number of reads: {len(set(read_names)):,}")
+    log.debug(f"Number of alignments: {n_alns:,}")
+    log.debug(f"Bases covered: {bases_covered:,}")
+    log.debug(f"Mean coverage: {mean_coverage:.2f}")
+    log.debug(f"Mean coverage covered: {mean_coverage_covered:.2f}")
+    log.debug(f"Max covered bases: {max_covered_bases:,}")
+    log.debug(f"Mean covered bases: {mean_covered_bases:.2f}")
+    log.debug(f"SD: {cov_sd:.2f}")
+    log.debug(f"Breadth: {breadth:.2f}")
+    log.debug(f"Exp. breadth: {exp_breadth:.2f}")
+    log.debug(f"Breadth/exp. ratio: {breadth_exp_ratio:.2f}")
+    log.debug(f"Cov. evenness: {cov_evenness:.2f}")
+    log.debug(f"C_v: {c_v:.2f}")
+    log.debug(f"Mean mapq: {np.mean(read_mapq):.2f}")
+    log.debug(f"GC content: {gc_content:.2f}")
+    log.debug(f"Taxonomic abundance (alns): {tax_abund_aln:.2f}")
+    log.debug(f"Taxonomic abundance (reads): {tax_abund_read:.2f}")
+    data = BamAlignment(
+        reference=reference,
+        n_alns=n_alns,
+        reference_length=reference_length,
+        bam_reference_length=bam_reference_length,
+        mean_coverage=mean_coverage,
+        mean_coverage_covered=mean_coverage_covered,
+        bases_covered=bases_covered,
+        max_covered_bases=max_covered_bases,
+        mean_covered_bases=mean_covered_bases,
+        cov_evenness=cov_evenness,
+        breadth=breadth,
+        exp_breadth=exp_breadth,
+        breadth_exp_ratio=breadth_exp_ratio,
+        c_v=c_v,
+        edit_distances=edit_distances,
+        # edit_distances_md=edit_distances_md,
+        ani_nm=ani_nm,
+        # ani_md=ani_md,
+        read_length=read_length,
+        read_gc_content=read_gc_content,
+        read_aligned_length=read_aligned_length,
+        mapping_quality=read_mapq,
+        read_names=set(read_names),
+        read_aln_score=read_aln_score,
+        tax_abund_aln=tax_abund_aln,
+        tax_abund_read=tax_abund_read,
+    )
     return data
 
 
@@ -452,6 +422,21 @@ def process_bam(bam, threads=1, reference_lengths=None, scale=1e6):
     total_refs = samfile.nreferences
     logging.info(f"Found {total_refs:,} reference sequences")
     # logging.info(f"Found {samfile.mapped:,} alignments")
+    logging.info(f"Removing references without mappings...")
+    # Remove references without mapped reads
+    alns_in_ref = defaultdict(int)
+    for aln in tqdm.tqdm(
+        samfile.fetch(until_eof=True),
+        total=samfile.mapped,
+        leave=False,
+        ncols=80,
+        desc=f"Alignments processed",
+    ):
+        alns_in_ref[aln.reference_name] += 1
+
+    references = [ref for ref, count in alns_in_ref.items() if count > 0]
+
+    logging.info(f"Keeping {len(references):,} references")
 
     params = zip([bam] * len(references), references)
     try:
@@ -474,8 +459,7 @@ def process_bam(bam, threads=1, reference_lengths=None, scale=1e6):
                 initargs=([params, ref_lengths, scale],),
             )
             c_size = calc_chunksize(
-                n_workers=threads,
-                len_iterable=len(references),
+                n_workers=threads, len_iterable=len(references), factor=4
             )
             data = list(
                 tqdm.tqdm(
@@ -484,7 +468,7 @@ def process_bam(bam, threads=1, reference_lengths=None, scale=1e6):
                             get_bam_stats, ref_lengths=ref_lengths, scale=scale
                         ),
                         params,
-                        chunksize=c_size,
+                        chunksize=20,
                     ),
                     total=len(references),
                     leave=False,
