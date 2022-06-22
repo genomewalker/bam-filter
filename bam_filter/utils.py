@@ -143,6 +143,7 @@ help_msg = {
     "read_length_freqs": "Save a JSON file with the read length frequencies mapped to each reference",
     "only_stats": "Only produce statistics and skip filtering",
     "only_stats_filtered": "Only filter statistics and skip BAM filtering",
+    "sort_by_name": "Sort by read names",
     "help": "Help message",
     "debug": f"Print debug messages",
     "reference_lengths": "File with references lengths",
@@ -253,6 +254,13 @@ def get_arguments(argv=None):
         default=defaults["sort_memory"],
         dest="sort_memory",
         help=help_msg["sort_memory"],
+    )
+    parser.add_argument(
+        "-N",
+        "--sort-by-name",
+        dest="sort_by_name",
+        action="store_true",
+        help=help_msg["sort_by_name"],
     )
     parser.add_argument(
         "--scale",

@@ -489,7 +489,14 @@ def process_bam(bam, threads=1, reference_lengths=None, scale=1e6):
 
 
 def filter_reference_BAM(
-    bam, df, filter_conditions, threads, out_files, sort_memory, only_stats_filtered
+    bam,
+    df,
+    filter_conditions,
+    threads,
+    out_files,
+    sort_memory,
+    only_stats_filtered,
+    sort_by_name=False,
 ):
     """Filter BAM based on certain conditions
 
@@ -568,15 +575,28 @@ def filter_reference_BAM(
             for aln in fast_flatten(alns):
                 out_bam_file.write(pysam.AlignedSegment.fromstring(aln, header=header))
             out_bam_file.close()
-            pysam.sort(
-                "-@",
-                str(threads),
-                "-m",
-                str(sort_memory),
-                "-o",
-                out_files["bam_filtered"],
-                out_files["bam_filtered_tmp"],
-            )
+            if sort_by_name:
+                logging.info(f"Sorting BAM file by read name...")
+                pysam.sort(
+                    "-n",
+                    "-@",
+                    str(threads),
+                    "-m",
+                    str(sort_memory),
+                    "-o",
+                    out_files["bam_filtered"],
+                    out_files["bam_filtered_tmp"],
+                )
+            else:
+                pysam.sort(
+                    "-@",
+                    str(threads),
+                    "-m",
+                    str(sort_memory),
+                    "-o",
+                    out_files["bam_filtered"],
+                    out_files["bam_filtered_tmp"],
+                )
 
             save = pysam.set_verbosity(0)
             samfile = pysam.AlignmentFile(out_files["bam_filtered"], "rb")

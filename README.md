@@ -58,11 +58,11 @@ filterBAM only needs a BAM file. For a complete list of options:
 ```
 $ filterBAM --help
 
-usage: filterBAM [-h] [-t THREADS] [-p PREFIX] [-l MIN_READ_LENGTH] [-n MIN_READ_COUNT] [-b MIN_EXPECTED_BREADTH_RATIO] [-a MIN_READ_ANI] [-c MIN_COVERAGE_EVENNESS] [-m SORT_MEMORY] [-r REFERENCE_LENGTHS]
-                 [--debug] [--version]
+usage: filterBAM [-h] [-t THREADS] [-p PREFIX] [-l MIN_READ_LENGTH] [-n MIN_READ_COUNT] [-b MIN_EXPECTED_BREADTH_RATIO] [-B MIN_BREADTH] [-a MIN_READ_ANI] [-c MIN_COVERAGE_EVENNESS] [-m SORT_MEMORY] [-N] [--scale SCALE] [-r REFERENCE_LENGTHS]
+                 [--read-length-freqs] [--only-stats] [--only-stats-filtered] [--debug] [--version]
                  bam
 
-A simple tool to calculate metrics from a BAM file and filter references with uneven coverage.
+A simple tool to calculate metrics from a BAM file and filter with uneven coverage.
 
 positional arguments:
   bam                   BAM file containing aligned reads
@@ -79,12 +79,15 @@ optional arguments:
                         Minimum read count (default: 10)
   -b MIN_EXPECTED_BREADTH_RATIO, --min-expected-breadth-ratio MIN_EXPECTED_BREADTH_RATIO
                         Minimum expected breadth ratio (default: 0.5)
+  -B MIN_BREADTH, --min-breadth MIN_BREADTH
+                        Minimum breadth (default: 0)
   -a MIN_READ_ANI, --min-read-ani MIN_READ_ANI
                         Minimum average read ANI (default: 90.0)
   -c MIN_COVERAGE_EVENNESS, --min-coverage-evenness MIN_COVERAGE_EVENNESS
                         Minimum coverage evenness (default: 0)
   -m SORT_MEMORY, --sort-memory SORT_MEMORY
                         Set maximum memory per thread for sorting; suffix K/M/G recognized (default: 1G)
+  -N, --sort-by-name          Sort by read names (default: False)
   --scale SCALE         Scale taxonomic abundance by this factor; suffix K/M recognized (default: 1000000.0)
   -r REFERENCE_LENGTHS, --reference-lengths REFERENCE_LENGTHS
                         File with references lengths (default: None)
@@ -99,7 +102,7 @@ optional arguments:
 One would run filterBAM as:
 
 ```bash
-filterBAM --min-read-count 100 --min-expected-breadth-ratio 0.75 --min-read-ani 98 --sort-memory 1G --reference-lengths gtdb-r202.len.map --threads 16  c55d4e2df1.dedup.bam 
+filterBAM --min-read-count 100 --min-expected-breadth-ratio 0.75 --min-read-ani 98 --sort-by-name --sort-memory 1G --reference-lengths gtdb-r202.len.map --threads 16  c55d4e2df1.dedup.bam 
 ```
 
 **--min-read-count**: Minimum number of reads mapped to a reference in the BAM file
@@ -107,6 +110,8 @@ filterBAM --min-read-count 100 --min-expected-breadth-ratio 0.75 --min-read-ani 
 **--min-expected-breadth-ratio**: Minimum expected breadth ratio needed to keep a reference. This is based on the concepts defined [here](https://instrain.readthedocs.io/en/latest/important_concepts.html#detecting-organisms-in-metagenomic-data). It basically estimates the ratio between the observed and expected breadth, the closest to 1 the more evenly distributed the mapped reads are and we can be more confident that the genome was detected.
 
 **--min-read-ani**: Minimum average read ANI that a reference has
+
+**--sort-by-name**: Sort filtered BAM file by read name so it can be used in metaDMG
 
 **--sort-memory**: Memory used for each thread when sorting the filtered BAM file
 

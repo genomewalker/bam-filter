@@ -80,6 +80,7 @@ def main():
             out_files=out_files,
             only_stats_filtered=args.only_stats_filtered,
             sort_memory=args.sort_memory,
+            sort_by_name=args.sort_by_name,
         )
     logging.info(f"ALL DONE.")
 
