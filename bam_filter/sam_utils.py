@@ -436,6 +436,10 @@ def process_bam(bam, threads=1, reference_lengths=None, scale=1e6):
 
     references = [ref for ref, count in alns_in_ref.items() if count > 0]
 
+    if len(references) == 0:
+        logging.error("No reference sequences with alignments found in the BAM file")
+        sys.exit(1)
+
     logging.info(f"Keeping {len(references):,} references")
 
     params = zip([bam] * len(references), references)
@@ -484,7 +488,7 @@ def process_bam(bam, threads=1, reference_lengths=None, scale=1e6):
         logging.info(f"User canceled the operation. Terminating jobs.")
         p.terminate()
         p.join()
-        sys.exit()
+        sys.exit(0)
     return data
 
 
@@ -570,7 +574,7 @@ def filter_reference_BAM(
                 logging.info(f"User canceled the operation. Terminating jobs.")
                 p.terminate()
                 p.join()
-                sys.exit()
+                sys.exit(0)
 
             for aln in fast_flatten(alns):
                 out_bam_file.write(pysam.AlignedSegment.fromstring(aln, header=header))
