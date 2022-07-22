@@ -327,7 +327,7 @@ class BamAlignment:
             edit_distances = np.mean(self.edit_distances)
             read_ani_mean = np.mean(self.ani_nm)
             read_ani_std = np.std(self.ani_nm, ddof=1)
-            reads_ani_median = np.median(self.ani_nm)
+            read_ani_median = np.median(self.ani_nm)
             gc_content = (np.sum(self.read_gc_content) / np.sum(self.read_length)) * 100
         return {
             "reference": self.reference,
@@ -347,7 +347,7 @@ class BamAlignment:
             # "edit_distances_md": np.mean(self.edit_distances_md),
             "read_ani_mean": read_ani_mean,
             "read_ani_std": read_ani_std,
-            "reads_ani_median": reads_ani_median,
+            "read_ani_median": read_ani_median,
             # "ani_md": np.mean(self.ani_md),
             "bases_covered": self.bases_covered,
             "max_covered_bases": self.max_covered_bases,
