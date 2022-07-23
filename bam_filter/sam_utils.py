@@ -165,6 +165,9 @@ def get_bam_stats(params, ref_lengths=None, scale=1e6):
     exp_breadth = 1 - np.exp(-mean_coverage)
     breadth_exp_ratio = breadth / exp_breadth
 
+    if breadth_exp_ratio > 1:
+        breadth_exp_ratio = 1.0
+
     cov_evenness = coverage_evenness(cov_pos)
     gc_content = (np.sum(read_gc_content) / np.sum(read_length)) * 100
     c_v = cov_sd / mean_coverage
