@@ -323,7 +323,7 @@ class BamAlignment:
             read_length_std = np.std(self.read_length, ddof=1)
             read_length_max = np.max(self.read_length)
             read_length_min = np.min(self.read_length)
-            read_length_mode = stats.mode(self.read_length)[0][0]
+            read_length_mode = stats.mode(self.read_length, keepdims=True).mode[0]
             read_aligned_length = np.mean(self.read_aligned_length)
             read_aln_score = np.mean(self.read_aln_score)
             mapping_quality = np.mean(self.mapping_quality)

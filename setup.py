@@ -4,7 +4,7 @@ import versioneer
 requirements = [
     "Cython>=0.29.24",
     "pandas>=1.3.3",
-    "scipy>=1.5.2",
+    "scipy>=1.9.0",
     "tqdm==4.50.0",
     "pysam>=0.17.0",
     "numpy>=1.21.2",
