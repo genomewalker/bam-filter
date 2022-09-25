@@ -149,6 +149,7 @@ def get_bam_stats(params, ref_lengths=None, scale=1e6):
             min_mapping_quality=0,
         )
     ]
+    samfile.close()
     # convert datafrane to pyranges
     ranges = create_pyranges(reference, starts, ends, strands)
     ranges = ranges.merge(strand=False).lengths().to_list()
