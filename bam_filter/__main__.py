@@ -46,6 +46,7 @@ def main():
         threads=args.threads,
         reference_lengths=args.reference_lengths,
         scale=args.scale,
+        min_read_count=args.min_read_count,
     )
 
     data = list(filter(None, data))

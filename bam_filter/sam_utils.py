@@ -379,7 +379,7 @@ class BamAlignment:
 
 
 # Inspired from https://gigabaseorgigabyte.wordpress.com/2017/04/14/getting-the-edit-distance-from-a-bam-alignment-a-journey/
-def process_bam(bam, threads=1, reference_lengths=None, scale=1e6):
+def process_bam(bam, threads=1, reference_lengths=None, scale=1e6, min_read_count=0):
     """
     Processing function: calls pool of worker functions
     to extract from a bam file two definitions of the edit distances to the reference genome scaled by read length
@@ -426,27 +426,25 @@ def process_bam(bam, threads=1, reference_lengths=None, scale=1e6):
     total_refs = samfile.nreferences
     logging.info(f"Found {total_refs:,} reference sequences")
     # logging.info(f"Found {samfile.mapped:,} alignments")
-    logging.info(f"Removing references without mappings...")
-    # Remove references without mapped reads
-    alns_in_ref = defaultdict(int)
-    for aln in tqdm.tqdm(
-        samfile.fetch(until_eof=True),
-        total=samfile.mapped,
-        leave=False,
-        ncols=80,
-        desc=f"Alignments processed",
-    ):
-        alns_in_ref[aln.reference_name] += 1
 
-    references = [ref for ref, count in alns_in_ref.items() if count > 0]
+    logging.info(
+        f"Removing references without mappings or less than {min_read_count} reads..."
+    )
+
+    references = [
+        chrom.contig
+        for chrom in samfile.get_index_statistics()
+        if chrom.mapped > min_read_count
+    ]
 
     if len(references) == 0:
         logging.error("No reference sequences with alignments found in the BAM file")
         sys.exit(1)
 
     logging.info(f"Keeping {len(references):,} references")
-
+    
     params = zip([bam] * len(references), references)
+
     try:
         logging.info(f"Getting stats for each reference...")
 
