@@ -45,6 +45,7 @@ def main():
         bam=args.bam,
         threads=args.threads,
         reference_lengths=args.reference_lengths,
+        min_read_count=args.min_read_count,
         scale=args.scale,
     )
 

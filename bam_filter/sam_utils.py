@@ -4,6 +4,7 @@ import re, os, sys
 import pandas as pd
 from multiprocessing import Pool
 import functools
+from regex import P
 from scipy import stats
 import pysam
 import tqdm
@@ -13,8 +14,19 @@ from bam_filter.utils import is_debug, calc_chunksize, fast_flatten, initializer
 import pyranges as pr
 from collections import defaultdict
 
+from sklearn import preprocessing, cluster
+
+import scipy.spatial
+import libpysal as ps
+from pointpats import PointPattern, ripley, quadrat_statistics
+
+from scipy import fftpack
+
+import matplotlib.pyplot as plt
+
 log = logging.getLogger("my_logger")
 
+logging.getLogger("matplotlib").setLevel(logging.WARNING)
 sys.setrecursionlimit(10 ** 6)
 
 # Function to calculate evenness of coverage
@@ -75,6 +87,25 @@ def create_pyranges(reference, starts, ends, strands):
             {"Chromosome": chromosomes, "Start": starts, "End": ends, "Strand": strands}
         )
     )
+
+
+def produce_qstats(point_pattern, nx, ny):
+    # Rectangular quadrats
+    qstat = quadrat_statistics.QStatistic(point_pattern, nx=nx, ny=ny)
+
+    if qstat.chi2_pvalue < 0.05:
+        return "Not CSR"
+    else:
+        return "CSR"
+
+
+def mean_cov_region(df):
+    grpby = df.groupby("Cluster")
+    prob = grpby["cov"].mean()
+    prob = pd.DataFrame({"cov_mean": prob}).reset_index()
+    df = pr.PyRanges(df).merge(by="Cluster")
+
+    return df.df.merge(prob, on="Cluster")
 
 
 def get_bam_stats(params, ref_lengths=None, scale=1e6):
@@ -138,8 +169,8 @@ def get_bam_stats(params, ref_lengths=None, scale=1e6):
         strands.append(strand)
 
     # get bases covered by reads pileup
-    cov_pos = [
-        pileupcolumn.n
+    cov_pos_raw = [
+        (pileupcolumn.pos, pileupcolumn.n)
         for pileupcolumn in samfile.pileup(
             reference,
             start=None,
@@ -150,14 +181,19 @@ def get_bam_stats(params, ref_lengths=None, scale=1e6):
         )
     ]
     samfile.close()
+    cov_pos = [i[1] for i in cov_pos_raw]
     # convert datafrane to pyranges
     ranges = create_pyranges(reference, starts, ends, strands)
-    ranges = ranges.merge(strand=False).lengths().to_list()
+
+    ranges_raw = ranges.merge(strand=False)
+    ranges = ranges_raw.lengths().to_list()
+
     max_covered_bases = np.max(ranges)
     mean_covered_bases = np.mean(ranges)
     bases_covered = int(len(cov_pos))
     # get SD from covered bases
     cov_sd = np.std(cov_pos, ddof=1)
+    cov_var = np.var(cov_pos, ddof=1)
     # get average coverage
     mean_coverage = sum(cov_pos) / reference_length
     mean_coverage_covered = sum(cov_pos) / bases_covered
@@ -172,10 +208,145 @@ def get_bam_stats(params, ref_lengths=None, scale=1e6):
     cov_evenness = coverage_evenness(cov_pos)
     gc_content = (np.sum(read_gc_content) / np.sum(read_length)) * 100
     c_v = cov_sd / mean_coverage
+    d_i = cov_var / mean_coverage
+
     read_mapq = [np.nan if x == 255 else x for x in read_mapq]
 
     tax_abund_aln = round((n_alns / reference_length) * scale)
     tax_abund_read = round((len(set(read_names)) / reference_length) * scale)
+
+    # # create dataframe with position and coaverage initialized to 0
+    df_cov = pd.DataFrame(cov_pos_raw, columns=["Start", "cov"])
+    df_cov["End"] = df_cov["Start"] + 1
+    df_cov["Chromosome"] = reference
+    df_cov["Strand"] = "+"
+    df_cov = df_cov[["Chromosome", "Start", "End", "Strand", "cov"]]
+    df_cov_raw = df_cov.copy()
+    df_cov_raw["mid_point"] = (df_cov_raw["Start"] + df_cov_raw["End"]) // 2
+
+    df_cov = pr.PyRanges(df_cov).cluster(strand=False)
+    df_cov = df_cov.apply(mean_cov_region).df
+    df_cov["mid_point"] = (df_cov["Start"] + df_cov["End"]) // 2
+    # print(df_cov)
+    print(df_cov)
+    mid_points = df_cov["mid_point"].sort_values().values
+
+    from skspatial.objects import Point
+
+    def project_points_to_origin(rw):
+        dist = np.zeros(len(rw))
+        origin = Point([0, 0])
+        for i in range(len(rw)):
+            x = int(rw[i][0])
+            y = int(rw[i][1])
+            point = Point([x, y])
+            dist[i] = point.distance_point(origin)
+        return dist
+
+    points = [i for i in zip(starts, ends)]
+    dist2ori = np.sort(project_points_to_origin(points))
+    dist2ori = dist2ori
+
+    # calculate coverage values occurrence
+    # round cov_mean to the closer integer
+
+    df_cov_occ = df_cov[["cov_mean"]].values
+    df_cov_occ = np.round(df_cov_occ)
+    df_cov_occ = df_cov_occ.astype(int)
+    unique, counts = np.unique(df_cov_occ, return_counts=True)
+    counts = counts / df_cov.shape[0]
+    cov_occ = dict(zip(unique, counts))
+    df_cov_filt = df_cov.copy()
+    df_cov_filt["cov_round"] = df_cov_filt.cov_mean.round(0).astype(int)
+
+    # filtec cov_occ larger than 0.75
+    cov_occ = {k: v for k, v in cov_occ.items() if v <= 0.5}
+    df_cov_filt = df_cov_filt[df_cov_filt.cov_round.isin(cov_occ.keys())]
+    if df_cov_filt.empty:
+        df_cov_filt = df_cov.copy()
+        df_cov_filt["cov_round"] = df_cov_filt.cov_mean.round(0).astype(int)
+    if df_cov_filt.shape[0] > 1:
+        if (
+            df_cov_filt[
+                df_cov_filt.cov_mean
+                < df_cov_filt[df_cov_filt.cov_mean > 0].cov_mean.quantile(0.95)
+            ].shape[0]
+            > 0
+        ):
+            print("Here")
+            df = df_cov_filt[
+                df_cov_filt.cov_mean
+                < df_cov_filt[df_cov_filt.cov_mean > 0].cov_mean.quantile(0.95)
+            ]
+            points = [(i) for i in zip(df.mid_point, df.cov_mean)]
+            points = PointPattern(points)
+            is_csr = produce_qstats(points, 6, 6)
+
+            fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
+            plt.plot(df.mid_point, df.cov_mean, "o", color="black", ms=0.5)
+            fig.savefig("image-cov-2.png")
+            plt.close(fig)
+
+        else:
+            print("here1")
+            points = [(i) for i in zip(df_cov_filt.mid_point, df_cov_filt.cov_mean)]
+            points = PointPattern(points)
+            is_csr = produce_qstats(points, 6, 6)
+    else:
+        is_csr = None
+
+    # merge with coverage dataframe
+    # df = df.merge(
+    #     pd.DataFrame(cov_pos_raw, columns=["pos", "cov"]), on="pos", how="left"
+    # )
+    # df = df.fillna(0)
+    # df = df.astype(int)
+
+    print(f"##########\nREFERENCE: {reference}\n##############")
+    # if df[df.cov_y < df[df.cov_y > 0].cov_y.quantile(0.95)].shape[0] > 0:
+    #     print("here")
+    #     grid_size = 1
+    #     df = df[df.cov_y < df[df.cov_y > 0].cov_y.quantile(0.95)]
+    #     df = df[df.cov_y > 0]
+    #     if df.empty:
+    #         print("here")
+    #         df = pd.DataFrame(cov_pos_raw, columns=["pos", "cov_y"])
+    #         df = df[df.cov_y > 0]
+    #         grid_size = 3
+
+    # else:
+    #     if df.empty:
+    #         df = pd.DataFrame(cov_pos_raw, columns=["pos", "cov_y"])
+    #         df = df[df.cov_y > 0]
+    #         grid_size = 3
+    # x = df.pos.values
+    # y = df.cov_y.values
+    # find midpoint between start and end coordinates
+
+    x = ranges_raw.df.Start.tolist()
+    x.insert(0, 0)
+    x.append(reference_length)
+    y = ranges_raw.df.End.tolist()
+    y.insert(0, 0)
+    y.append(reference_length)
+    points = np.array([(i) for i in zip(x, y)])
+    points = [int((i[0] + i[1])) // 2 for i in zip(starts, ends)]
+
+    int_start = df_cov_raw.End.values[:-1]
+    int_end = df_cov_raw.Start.values[1:]
+
+    points = np.column_stack((int_start, int_end))
+    print(points)
+    segdists = np.diff(points, axis=1)
+    # print("HereO")
+    # print(mid_points)
+    # print(np.array(mid_points))
+
+    # d[d < 0] = 0
+    # segdists = d
+    # segdists = np.sqrt((d ** 2).sum(axis=1))
+
+    # is_csr = np.var(segdists, ddof=1) / np.mean(segdists)
 
     log.debug(f"Number of reads: {len(set(read_names)):,}")
     log.debug(f"Number of alignments: {n_alns:,}")
@@ -188,12 +359,113 @@ def get_bam_stats(params, ref_lengths=None, scale=1e6):
     log.debug(f"Breadth: {breadth:.2f}")
     log.debug(f"Exp. breadth: {exp_breadth:.2f}")
     log.debug(f"Breadth/exp. ratio: {breadth_exp_ratio:.2f}")
+    log.debug(f"NND z-score: {is_csr}")
+    log.debug(f"Interval var: {np.var(segdists, ddof=1)}")
     log.debug(f"Cov. evenness: {cov_evenness:.2f}")
     log.debug(f"C_v: {c_v:.2f}")
+    log.debug(f"D_i: {d_i:.2f}")
     log.debug(f"Mean mapq: {np.mean(read_mapq):.2f}")
     log.debug(f"GC content: {gc_content:.2f}")
     log.debug(f"Taxonomic abundance (alns): {tax_abund_aln:.2f}")
     log.debug(f"Taxonomic abundance (reads): {tax_abund_read:.2f}")
+    print(dist2ori)
+
+    def kolmogorov_smirnov_uniformity_test(s, low: float = None, high: float = None):
+        low = low or self.expected_min
+        high = high or self.expected_max
+
+        # Using the parameters loc and scale, one obtains the uniform distribution on [loc, loc + scale].
+
+        _stats, p = stats.kstest(s, stats.uniform(loc=low, scale=high - low).cdf)
+
+        return p, p > 0.05
+
+    s = kolmogorov_smirnov_uniformity_test(
+        s=dist2ori, low=min(dist2ori), high=max(dist2ori)
+    )
+
+    fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
+    plt.plot(dist2ori, np.zeros(len(dist2ori)), "o", color="black", ms=0.5)
+    fig.savefig("image-cov-uni.png")  # save the figure to file
+    plt.close(fig)
+    print(s)
+    exit()
+    if (
+        breadth_exp_ratio > 0.75
+        and stats.kstest(dist2ori, "uniform")[1] > 0.05
+        # and is_csr == "CSR"
+    ):
+        # if reference == "GCA_000911955.1":
+        print(np.array(mid_points))
+        print(df_cov)
+        print(segdists)
+        print(ranges)
+        print(np.var(segdists, ddof=1) / np.mean(segdists))
+        print(np.mean(segdists))
+        print(np.min(segdists))
+        print(np.max(segdists))
+        print(np.var(segdists, ddof=1))
+        fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
+        plt.plot(mid_points, np.zeros(len(mid_points)), "o", color="black", ms=0.5)
+        fig.savefig("image-cov-uni.png")  # save the figure to file
+        plt.close(fig)
+
+        fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
+        plt.plot(
+            df_cov.mid_point,
+            df_cov.cov_mean,
+            "o",
+            color="black",
+            ms=0.5,
+        )
+        fig.savefig("image-cov-mid.png")  # save the figure to file
+        plt.close(fig)
+
+        fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
+        plt.plot(
+            [i[0] for i in cov_pos_raw],
+            [i[1] for i in cov_pos_raw],
+            "o",
+            color="black",
+            ms=0.5,
+        )
+        fig.savefig("image-cov.png")  # save the figure to file
+        plt.close(fig)
+        print(mid_points)
+        print(stats.kstest(dist2ori, "uniform"))
+        exit()
+    # GCA_000911955.1
+    # if breadth_exp_ratio > 0.75 and is_csr == "Not CSR":
+    #     # if reference == "NC_050988.1":
+    #     # if is_csr == "Not CSR":
+    #     # if reference == "NC_050988.1":
+    #     #         print(point_pattern.max_nnd)
+    #     #         print(point_pattern.min_nnd)
+    #     #         print(point_pattern.mean_nnd)
+    #     #         exit()
+    #     # print(segdists)
+    #     # print(np.var(segdists, ddof=1) / np.mean(segdists))
+    #     # fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
+    #     # plt.plot(x, y, "o", color="black", ms=0.5)
+    #     # fig.savefig("image.png")  # save the figure to file
+    #     # plt.close(fig)
+    #     fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
+    #     plt.plot(
+    #         df_cov_filt.mid_point, df_cov_filt.cov_mean, "o", color="black", ms=0.5
+    #     )
+    #     fig.savefig("image-cov.png")  # save the figure to file
+    #     plt.close(fig)
+    #     fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
+    #     plt.plot(df_cov.mid_point, df_cov.cov_mean, "o", color="black", ms=0.5)
+    #     fig.savefig("image-cov-1.png")  # save the figure to file
+    #     plt.close(fig)
+    #     print(cov_occ)
+    #     print(np.var(segdists, ddof=1))
+    #     print(np.mean(segdists))
+    #     print(np.var(segdists, ddof=0) / np.mean(segdists))
+    #     exit()
+    #     exit()
+
     data = BamAlignment(
         reference=reference,
         n_alns=n_alns,
@@ -208,6 +480,7 @@ def get_bam_stats(params, ref_lengths=None, scale=1e6):
         breadth=breadth,
         exp_breadth=exp_breadth,
         breadth_exp_ratio=breadth_exp_ratio,
+        is_csr=is_csr,
         c_v=c_v,
         edit_distances=edit_distances,
         # edit_distances_md=edit_distances_md,
@@ -252,6 +525,7 @@ class BamAlignment:
         breadth,
         exp_breadth,
         breadth_exp_ratio,
+        is_csr,
         c_v,
         cov_evenness,
         read_names,
@@ -280,6 +554,7 @@ class BamAlignment:
         self.breadth = breadth
         self.exp_breadth = exp_breadth
         self.breadth_exp_ratio = breadth_exp_ratio
+        self.is_csr = is_csr
         self.c_v = c_v
         self.cov_evenness = cov_evenness
         self.read_names = read_names
@@ -363,7 +638,7 @@ class BamAlignment:
             "breadth": self.breadth,
             "exp_breadth": self.exp_breadth,
             "breadth_exp_ratio": self.breadth_exp_ratio,
-            "c_v": self.c_v,
+            "is_csr" "c_v": self.c_v,
             "cov_evenness": self.cov_evenness,
             "tax_abund_read": self.tax_abund_read,
             "tax_abund_aln": self.tax_abund_aln,
@@ -379,7 +654,7 @@ class BamAlignment:
 
 
 # Inspired from https://gigabaseorgigabyte.wordpress.com/2017/04/14/getting-the-edit-distance-from-a-bam-alignment-a-journey/
-def process_bam(bam, threads=1, reference_lengths=None, scale=1e6):
+def process_bam(bam, threads=1, reference_lengths=None, min_read_count=10, scale=1e6):
     """
     Processing function: calls pool of worker functions
     to extract from a bam file two definitions of the edit distances to the reference genome scaled by read length
@@ -426,19 +701,25 @@ def process_bam(bam, threads=1, reference_lengths=None, scale=1e6):
     total_refs = samfile.nreferences
     logging.info(f"Found {total_refs:,} reference sequences")
     # logging.info(f"Found {samfile.mapped:,} alignments")
-    logging.info(f"Removing references without mappings...")
+    logging.info(
+        f"Removing references without mappings or less than {min_read_count} reads..."
+    )
     # Remove references without mapped reads
-    alns_in_ref = defaultdict(int)
-    for aln in tqdm.tqdm(
-        samfile.fetch(until_eof=True),
-        total=samfile.mapped,
-        leave=False,
-        ncols=80,
-        desc=f"Alignments processed",
-    ):
-        alns_in_ref[aln.reference_name] += 1
+    # alns_in_ref = defaultdict(int)
+    # for aln in tqdm.tqdm(
+    #     samfile.fetch(until_eof=True),
+    #     total=samfile.mapped,
+    #     leave=False,
+    #     ncols=80,
+    #     desc=f"Alignments processed",
+    # ):
+    #     alns_in_ref[aln.reference_name] += 1
 
-    references = [ref for ref, count in alns_in_ref.items() if count > 0]
+    references = [
+        chrom.contig
+        for chrom in samfile.get_index_statistics()
+        if chrom.mapped > min_read_count
+    ]
 
     if len(references) == 0:
         logging.error("No reference sequences with alignments found in the BAM file")
