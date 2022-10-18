@@ -175,7 +175,7 @@ The program will produce two main outputs:
 
 ## Applications and recommendations
 
-One of the main applications of *bam-filter* is to reliably identify which potential organisms are present in a metagenomic ancient sample, and get relatively accurate taxonomic abundances, even when they are present in very low abundances. The resulting BAM file then can be used as input for [metaDMG](https://metadmg-dev.github.io/metaDMG-core/). We rely on several measures to discriminate between noise and a potential signal, analyzing the mapping results at two different levels:
+One of the main applications of **bam-filter** is to reliably identify which potential organisms are present in a metagenomic ancient sample, and get relatively accurate taxonomic abundances, even when they are present in very low abundances. The resulting BAM file then can be used as input for [metaDMG](https://metadmg-dev.github.io/metaDMG-core/). We rely on several measures to discriminate between noise and a potential signal, analyzing the mapping results at two different levels:
 
 - Is the observed breadth aligned with the expected one?
 - Are the reads spread evenly across the reference or they are clumped in a few regions?
