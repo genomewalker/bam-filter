@@ -24,13 +24,6 @@ def is_debug():
 
 
 def check_values(val, minval, maxval, parser, var):
-
-    try:
-        value = float(val)
-    except ValueError:
-        parser.error(
-            f"argument {var}: Invalid value {val}. Value has to be a 'float' between {minval} and {maxval}!"
-        )
     value = float(val)
     if value < minval or value > maxval:
         parser.error(
@@ -42,21 +35,7 @@ def check_values(val, minval, maxval, parser, var):
                 maxval,
             )
         )
-    return float(value)
-
-
-def check_values_auto(val, minval, maxval, parser, var):
-    if val == "auto":
-        return val
-    else:
-        # check if float
-        try:
-            val = float(val)
-        except ValueError:
-            parser.error(
-                f"argument {var}: Invalid value {val}. Value has to be 'auto' or a 'float' between {minval} and {maxval}!"
-            )
-        return check_values(val, minval, maxval, parser, var)
+    return value
 
 
 # From: https://note.nkmk.me/en/python-check-int-float/
@@ -140,8 +119,6 @@ defaults = {
     "min_read_length": 30,
     "min_read_count": 10,
     "min_expected_breadth_ratio": 0.5,
-    "min_norm_entropy": "auto",
-    "min_norm_gini": "auto",
     "min_read_ani": 90.0,
     "min_breadth": 0,
     "min_coverage_evenness": 0,
@@ -149,7 +126,6 @@ defaults = {
     "sort_memory": "1G",
     "reference_lengths": None,
     "scale": 1e6,
-    "plot": False,
 }
 
 help_msg = {
@@ -160,8 +136,6 @@ help_msg = {
     "min_read_count": "Minimum read count",
     "min_breadth": "Minimum breadth",
     "min_expected_breadth_ratio": "Minimum expected breadth ratio",
-    "min_norm_entropy": "Minimum normalized entropy",
-    "min_norm_gini": "Minimum normalized Gini coefficient",
     "min_read_ani": "Minimum average read ANI",
     "min_coverage_evenness": "Minimum coverage evenness",
     "sort_memory": "Set maximum memory per thread for sorting; suffix K/M/G recognized",
@@ -169,12 +143,11 @@ help_msg = {
     "read_length_freqs": "Save a JSON file with the read length frequencies mapped to each reference",
     "only_stats": "Only produce statistics and skip filtering",
     "only_stats_filtered": "Only filter statistics and skip BAM filtering",
-    "plot": "Plot genome coverage plots",
     "sort_by_name": "Sort by read names",
     "help": "Help message",
-    "debug": "Print debug messages",
+    "debug": f"Print debug messages",
     "reference_lengths": "File with references lengths",
-    "version": "Print program version",
+    "version": f"Print program version",
 }
 
 
@@ -241,26 +214,6 @@ def get_arguments(argv=None):
         default=defaults["min_expected_breadth_ratio"],
         dest="min_expected_breadth_ratio",
         help=help_msg["min_expected_breadth_ratio"],
-    )
-    parser.add_argument(
-        "-e",
-        "--min-normalized-entropy",
-        type=lambda x: check_values_auto(
-            x, minval=0, maxval=1, parser=parser, var="--min-normalized-entropy"
-        ),
-        default=defaults["min_norm_entropy"],
-        dest="min_norm_entropy",
-        help=help_msg["min_norm_entropy"],
-    )
-    parser.add_argument(
-        "-g",
-        "--min-normalized-gini",
-        type=lambda x: check_values_auto(
-            x, minval=0, maxval=1, parser=parser, var="--min-normalized-gini"
-        ),
-        default=defaults["min_norm_gini"],
-        dest="min_norm_gini",
-        help=help_msg["min_norm_gini"],
     )
     parser.add_argument(
         "-B",
@@ -336,12 +289,6 @@ def get_arguments(argv=None):
         dest="only_stats",
         action="store_true",
         help=help_msg["only_stats"],
-    )
-    parser.add_argument(
-        "--plot",
-        dest="plot",
-        action="store_true",
-        help=help_msg["plot"],
     )
     parser.add_argument(
         "--only-stats-filtered",
@@ -491,7 +438,5 @@ def create_output_files(prefix, bam):
         "bam_filtered_tmp": f"{prefix}.filtered.tmp.bam",
         "bam_filtered": f"{prefix}.filtered.bam",
         "read_length_freqs": f"{prefix}_read-length-freqs.json",
-        "knee_plot": f"{prefix}_knee-plot.png",
-        "coverage_plot_dir": f"{prefix}_coverage-plots",
     }
     return out_files

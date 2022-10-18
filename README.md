@@ -58,11 +58,8 @@ filterBAM only needs a BAM file. For a complete list of options:
 ```
 $ filterBAM --help
 
-usage: filterBAM [-h] [-t THREADS] [-p PREFIX] [-l MIN_READ_LENGTH] [-n MIN_READ_COUNT]
-                 [-b MIN_EXPECTED_BREADTH_RATIO] [-e MIN_NORM_ENTROPY] [-g MIN_NORM_GINI]
-                 [-B MIN_BREADTH] [-a MIN_READ_ANI] [-c MIN_COVERAGE_EVENNESS] [-m SORT_MEMORY] [-N]
-                 [--scale SCALE] [-r REFERENCE_LENGTHS] [--read-length-freqs] [--only-stats] [--plot]
-                 [--plot-dir PLOTS_DIR] [--only-stats-filtered] [--debug] [--version]
+usage: filterBAM [-h] [-t THREADS] [-p PREFIX] [-l MIN_READ_LENGTH] [-n MIN_READ_COUNT] [-b MIN_EXPECTED_BREADTH_RATIO] [-B MIN_BREADTH] [-a MIN_READ_ANI] [-c MIN_COVERAGE_EVENNESS] [-m SORT_MEMORY] [-N] [--scale SCALE] [-r REFERENCE_LENGTHS]
+                 [--read-length-freqs] [--only-stats] [--only-stats-filtered] [--debug] [--version]
                  bam
 
 A simple tool to calculate metrics from a BAM file and filter with uneven coverage.
@@ -82,10 +79,6 @@ optional arguments:
                         Minimum read count (default: 10)
   -b MIN_EXPECTED_BREADTH_RATIO, --min-expected-breadth-ratio MIN_EXPECTED_BREADTH_RATIO
                         Minimum expected breadth ratio (default: 0.5)
-  -e MIN_NORM_ENTROPY, --min-normalized-entropy MIN_NORM_ENTROPY
-                        Minimum normalized entropy (default: auto)
-  -g MIN_NORM_GINI, --min-normalized-gini MIN_NORM_GINI
-                        Minimum normalized Gini coefficient (default: auto)
   -B MIN_BREADTH, --min-breadth MIN_BREADTH
                         Minimum breadth (default: 0)
   -a MIN_READ_ANI, --min-read-ani MIN_READ_ANI
@@ -93,17 +86,13 @@ optional arguments:
   -c MIN_COVERAGE_EVENNESS, --min-coverage-evenness MIN_COVERAGE_EVENNESS
                         Minimum coverage evenness (default: 0)
   -m SORT_MEMORY, --sort-memory SORT_MEMORY
-                        Set maximum memory per thread for sorting; suffix K/M/G recognized (default:
-                        1G)
-  -N, --sort-by-name    Sort by read names (default: False)
-  --scale SCALE         Scale taxonomic abundance by this factor; suffix K/M recognized (default:
-                        1000000.0)
+                        Set maximum memory per thread for sorting; suffix K/M/G recognized (default: 1G)
+  -N, --sort-by-name          Sort by read names (default: False)
+  --scale SCALE         Scale taxonomic abundance by this factor; suffix K/M recognized (default: 1000000.0)
   -r REFERENCE_LENGTHS, --reference-lengths REFERENCE_LENGTHS
                         File with references lengths (default: None)
-  --read-length-freqs   Save a JSON file with the read length frequencies mapped to each reference
-                        (default: False)
+  --read-length-freqs   Save a JSON file with the read length frequencies mapped to each reference (default: False)
   --only-stats          Only produce statistics and skip filtering (default: False)
-  --plot                Plot genome coverage plots (default: False)
   --only-stats-filtered
                         Only filter statistics and skip BAM filtering (default: False)
   --debug               Print debug messages (default: False)
@@ -118,11 +107,11 @@ filterBAM --min-read-count 100 --min-expected-breadth-ratio 0.75 --min-read-ani 
 
 **--min-read-count**: Minimum number of reads mapped to a reference in the BAM file
 
-**--min-expected-breadth-ratio**: Minimum expected breadth ratio needed to keep a reference.
+**--min-expected-breadth-ratio**: Minimum expected breadth ratio needed to keep a reference. This is based on the concepts defined [here](https://instrain.readthedocs.io/en/latest/important_concepts.html#detecting-organisms-in-metagenomic-data). It basically estimates the ratio between the observed and expected breadth, the closest to 1 the more evenly distributed the mapped reads are and we can be more confident that the genome was detected.
 
 **--min-read-ani**: Minimum average read ANI that a reference has
 
-**--sort-by-name**: Sort filtered BAM file by read name so it can be used in [metaDMG](https://metadmg-dev.github.io/metaDMG-core/)
+**--sort-by-name**: Sort filtered BAM file by read name so it can be used in metaDMG
 
 **--sort-memory**: Memory used for each thread when sorting the filtered BAM file
 
@@ -160,24 +149,8 @@ The program will produce two main outputs:
     - **bam_reference_length**: Length reported by the BAM file
     - **breadth**: Breadth of coverage 
     - **exp_breadth**: Expected breadth of coverage. Using the formula: _expected_breadth = 1 - e<sup>-coverage</sup>_
-    - **breadth_exp_ratio**: Ration between the observed and the expected depth of coverage
-    - **n_bins**: Number of bins used to calculate the read coverage distribution
-    - **site_density**: Site density of the reference
-    - **entropy**: Entropy of the read coverage distribution
-    - **norm_entropy**: Normalized entropy of the read coverage distribution
-    - **gini**: Gini coefficient of the read coverage distribution
-    - **norm_gini**: Normalized Gini coefficient of the read coverage distribution
+    - **breadth_exp_ratio**: Ration between the obsrved and the expected depth of coverage
     - **c_v**: Coefficient of variation of the coverage
-    - **d_i**: Dispersion index
     - **cov_evenness**: Eveness of coverage as calculated [here](https://www.nature.com/articles/jhg201621).
-    - **tax_abund_read**: Counts estimated using the number of reads and normalized by the reference length.
-    - **tax_abund_aln**: Counts estimated using the number of alignments and normalized by the reference length.
-
-## Applications and recommendations
-
-One of the main applications of *bam-filter* is to reliably identify which potential organisms are present in a metagenomic ancient sample, and get relatively accurate taxonomic abundances, even when they are present in very low abundances. The resulting BAM file then can be used as input for [metaDMG](https://metadmg-dev.github.io/metaDMG-core/). We rely on several measures to discriminate between noise and a potential signal, analyzing the mapping results at two different levels:
-
-- Is the observed breadth aligned with the expected one?
-- Are the reads spread evenly across the reference or they are clumped in a few regions?
-
-To assess the first question we use the concepts defined [here](https://doi.org/10.1016/0888-7543(88)90007-9). We estimate the ratio between the observed and expected breadth as a function of the coverage. If we get a **breadth_exp_ratio** close to 1, it means that the coverage we observed is close to the one we expect based on the calculated coverage. While this measure is already a strong indicator of a potential signal, we complement it with the metrics that measure the **normalized positional entropy** and the **normalized distribution inequality** (Gini coefficient) of the positions in the coverage. For details on how are calculated check [here](https://www.frontiersin.org/articles/10.3389/fmicb.2022.918015/full). These two metrics will help to identify those cases where we get a high **breadth_exp_ratio** but the coverage is not evenly distributed across the reference but instead is clumped in a few regions. One thing to be aware of is that we need to bin the reference to calculate those metrics. In our case, we use the ability of [numpy.histogram](https://numpy.org/doc/stable/reference/generated/numpy.histogram.html) to identify the [numbers of bins](https://numpy.org/doc/stable/reference/generated/numpy.histogram_bin_edges.html#numpy.histogram_bin_edges), either using the Sturges or the Freedman-Diaconis rule. Finally, we use the [knee point detection algorithm](https://github.com/arvkevi/kneed) to identify the optimal values where to filter the Gini coefficient as a function of the positional entropy.
+    - **tax_abund_read**: Counts estimated like Woltka but using number of reads.
+    - **tax_abund_aln**: Counts estimated like Woltka.

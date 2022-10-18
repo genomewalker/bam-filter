@@ -1,6 +1,6 @@
 import pysam
 import numpy as np
-import os, sys
+import re, os, sys
 import pandas as pd
 from multiprocessing import Pool
 import functools
@@ -9,17 +9,12 @@ import pysam
 import tqdm
 import logging
 import warnings
-from bam_filter.utils import is_debug, calc_chunksize, initializer
-from bam_filter.entropy import entropy, norm_entropy, gini_coeff, norm_gini_coeff
-
+from bam_filter.utils import is_debug, calc_chunksize, fast_flatten, initializer
 import pyranges as pr
-
-
-import matplotlib.pyplot as plt
+from collections import defaultdict
 
 log = logging.getLogger("my_logger")
 
-logging.getLogger("matplotlib").setLevel(logging.WARNING)
 sys.setrecursionlimit(10 ** 6)
 
 # Function to calculate evenness of coverage
@@ -82,9 +77,7 @@ def create_pyranges(reference, starts, ends, strands):
     )
 
 
-def get_bam_stats(
-    params, ref_lengths=None, scale=1e6, plot=False, plots_dir="coverage-plots"
-):
+def get_bam_stats(params, ref_lengths=None, scale=1e6):
     """
     Worker function per chromosome
     loop over a bam file and create tuple with lists containing metrics:
@@ -145,8 +138,8 @@ def get_bam_stats(
         strands.append(strand)
 
     # get bases covered by reads pileup
-    cov_pos_raw = [
-        (pileupcolumn.pos, pileupcolumn.n)
+    cov_pos = [
+        pileupcolumn.n
         for pileupcolumn in samfile.pileup(
             reference,
             start=None,
@@ -157,19 +150,14 @@ def get_bam_stats(
         )
     ]
     samfile.close()
-    cov_pos = [i[1] for i in cov_pos_raw]
     # convert datafrane to pyranges
     ranges = create_pyranges(reference, starts, ends, strands)
-
-    ranges_raw = ranges.merge(strand=False)
-    ranges = ranges_raw.lengths().to_list()
-
+    ranges = ranges.merge(strand=False).lengths().to_list()
     max_covered_bases = np.max(ranges)
     mean_covered_bases = np.mean(ranges)
     bases_covered = int(len(cov_pos))
     # get SD from covered bases
     cov_sd = np.std(cov_pos, ddof=1)
-    cov_var = np.var(cov_pos, ddof=1)
     # get average coverage
     mean_coverage = sum(cov_pos) / reference_length
     mean_coverage_covered = sum(cov_pos) / bases_covered
@@ -184,39 +172,10 @@ def get_bam_stats(
     cov_evenness = coverage_evenness(cov_pos)
     gc_content = (np.sum(read_gc_content) / np.sum(read_length)) * 100
     c_v = cov_sd / mean_coverage
-    d_i = cov_var / mean_coverage
-
     read_mapq = [np.nan if x == 255 else x for x in read_mapq]
 
     tax_abund_aln = round((n_alns / reference_length) * scale)
     tax_abund_read = round((len(set(read_names)) / reference_length) * scale)
-
-    # Analyse site distribution
-    cov_positions = [i[0] for i in cov_pos_raw]
-    n_sites = len(cov_positions)
-    genome_length = reference_length
-    # Site density (sites per thousand bp)
-    site_density = 1000 * n_sites / genome_length
-
-    # infer number of bins using Freedman-Diaconis rule
-    positions_cov_zeros = pd.DataFrame({"pos": range(1, reference_length + 1)})
-    positions_cov = pd.DataFrame(
-        {"pos": [i[0] for i in cov_pos_raw], "cov": [i[1] for i in cov_pos_raw]}
-    )
-    positions_cov = positions_cov_zeros.merge(positions_cov, on="pos", how="left")
-    positions_cov["cov"] = positions_cov["cov"].fillna(0)
-    positions_cov["cov"] = positions_cov["cov"].astype(int)
-    positions_cov["cov_binary"] = positions_cov["cov"].apply(
-        lambda x: 1 if x > 0 else 0
-    )
-    counts, bins = np.histogram(cov_positions, bins="auto", range=(0, genome_length))
-
-    n_bins = len(bins)
-
-    entr = entropy(counts)  # Positional entropy
-    norm_entr = norm_entropy(counts)  # Normalized positional entropy
-    gini = gini_coeff(counts)  # Gini coefficient
-    norm_gini = norm_gini_coeff(counts)  # Normalized Gini coefficient
 
     log.debug(f"Number of reads: {len(set(read_names)):,}")
     log.debug(f"Number of alignments: {n_alns:,}")
@@ -229,35 +188,12 @@ def get_bam_stats(
     log.debug(f"Breadth: {breadth:.2f}")
     log.debug(f"Exp. breadth: {exp_breadth:.2f}")
     log.debug(f"Breadth/exp. ratio: {breadth_exp_ratio:.2f}")
-    log.debug(f"Number of bins: {n_bins}")
-    log.debug(f"Site density: {site_density:.2f}")
-    log.debug(f"Entropy (H): {entr:.2f}")
-    log.debug(f"Normalized entropy (H*): {norm_entr:.2f}")
-    log.debug(f"Gini coefficient (G): {gini:.2f}")
-    log.debug(f"Normalized Gini coefficient (G*): {norm_gini:.2f}")
     log.debug(f"Cov. evenness: {cov_evenness:.2f}")
     log.debug(f"C_v: {c_v:.2f}")
-    log.debug(f"D_i: {d_i:.2f}")
     log.debug(f"Mean mapq: {np.mean(read_mapq):.2f}")
     log.debug(f"GC content: {gc_content:.2f}")
     log.debug(f"Taxonomic abundance (alns): {tax_abund_aln:.2f}")
     log.debug(f"Taxonomic abundance (reads): {tax_abund_read:.2f}")
-
-    if plot:
-        fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
-        plt.plot(
-            positions_cov["pos"],
-            positions_cov["cov"],
-            color="c",
-            ms=0.5,
-        )
-        plt.suptitle(f"{reference}")
-        plt.title(
-            f"cov:{mean_coverage:.4f} b/e:{breadth_exp_ratio:.2f} cov_e:{cov_evenness:.2f} entropy:{norm_entr:.2f} gini:{norm_gini:.2f}"
-        )
-        fig.savefig(f"{plots_dir}/{reference}_coverage.png", dpi=300)
-        plt.close(fig)
-
     data = BamAlignment(
         reference=reference,
         n_alns=n_alns,
@@ -272,14 +208,7 @@ def get_bam_stats(
         breadth=breadth,
         exp_breadth=exp_breadth,
         breadth_exp_ratio=breadth_exp_ratio,
-        n_bins=n_bins,
-        site_density=site_density,
-        entropy=entr,
-        norm_entropy=norm_entr,
-        gini=gini,
-        norm_gini=norm_gini,
         c_v=c_v,
-        d_i=d_i,
         edit_distances=edit_distances,
         # edit_distances_md=edit_distances_md,
         ani_nm=ani_nm,
@@ -323,14 +252,7 @@ class BamAlignment:
         breadth,
         exp_breadth,
         breadth_exp_ratio,
-        n_bins,
-        site_density,
-        entropy,
-        norm_entropy,
-        gini,
-        norm_gini,
         c_v,
-        d_i,
         cov_evenness,
         read_names,
         read_aln_score,
@@ -358,14 +280,7 @@ class BamAlignment:
         self.breadth = breadth
         self.exp_breadth = exp_breadth
         self.breadth_exp_ratio = breadth_exp_ratio
-        self.n_bins = n_bins
-        self.site_density = site_density
-        self.entropy = entropy
-        self.norm_entropy = norm_entropy
-        self.gini = gini
-        self.norm_gini = norm_gini
         self.c_v = c_v
-        self.d_i = d_i
         self.cov_evenness = cov_evenness
         self.read_names = read_names
         self.tax_abund_aln = tax_abund_aln
@@ -395,14 +310,7 @@ class BamAlignment:
             "breadth": self.breadth,
             "exp_breadth": self.exp_breadth,
             "breadth_exp_ratio": self.breadth_exp_ratio,
-            "n_bins": self.n_bins,
-            "site_density": self.site_density,
-            "entropy": self.entropy,
-            "norm_entropy": self.norm_entropy,
-            "gini": self.gini,
-            "norm_gini": self.norm_gini,
             "c_v": self.c_v,
-            "d_i": self.d_i,
             "cov_evenness": self.cov_evenness,
             "tax_abund_read": self.tax_abund_read,
             "tax_abund_aln": self.tax_abund_aln,
@@ -455,14 +363,7 @@ class BamAlignment:
             "breadth": self.breadth,
             "exp_breadth": self.exp_breadth,
             "breadth_exp_ratio": self.breadth_exp_ratio,
-            "n_bins": self.n_bins,
-            "site_density": self.site_density,
-            "entropy": self.entropy,
-            "norm_entropy": self.norm_entropy,
-            "gini": self.gini,
-            "norm_gini": self.norm_gini,
             "c_v": self.c_v,
-            "d_i": self.d_i,
             "cov_evenness": self.cov_evenness,
             "tax_abund_read": self.tax_abund_read,
             "tax_abund_aln": self.tax_abund_aln,
@@ -478,15 +379,7 @@ class BamAlignment:
 
 
 # Inspired from https://gigabaseorgigabyte.wordpress.com/2017/04/14/getting-the-edit-distance-from-a-bam-alignment-a-journey/
-def process_bam(
-    bam,
-    threads=1,
-    reference_lengths=None,
-    min_read_count=10,
-    scale=1e6,
-    plot=False,
-    plots_dir="coverage-plots",
-):
+def process_bam(bam, threads=1, reference_lengths=None, scale=1e6, min_read_count=0):
     """
     Processing function: calls pool of worker functions
     to extract from a bam file two definitions of the edit distances to the reference genome scaled by read length
@@ -533,24 +426,10 @@ def process_bam(
     total_refs = samfile.nreferences
     logging.info(f"Found {total_refs:,} reference sequences")
     # logging.info(f"Found {samfile.mapped:,} alignments")
+
     logging.info(
         f"Removing references without mappings or less than {min_read_count} reads..."
     )
-    # Remove references without mapped reads
-    # alns_in_ref = defaultdict(int)
-    # for aln in tqdm.tqdm(
-    #     samfile.fetch(until_eof=True),
-    #     total=samfile.mapped,
-    #     leave=False,
-    #     ncols=80,
-    #     desc=f"Alignments processed",
-    # ):
-    #     alns_in_ref[aln.reference_name] += 1
-
-    if plot:
-        # Check if image folder exists
-        if not os.path.exists(plots_dir):
-            os.makedirs(plots_dir)
 
     references = [
         chrom.contig
@@ -563,8 +442,9 @@ def process_bam(
         sys.exit(1)
 
     logging.info(f"Keeping {len(references):,} references")
-
+    
     params = zip([bam] * len(references), references)
+
     try:
         logging.info(f"Getting stats for each reference...")
 
@@ -572,11 +452,7 @@ def process_bam(
             data = list(
                 map(
                     functools.partial(
-                        get_bam_stats,
-                        ref_lengths=ref_lengths,
-                        scale=scale,
-                        plot=plot,
-                        plots_dir=plots_dir,
+                        get_bam_stats, ref_lengths=ref_lengths, scale=scale
                     ),
                     params,
                 )
@@ -595,11 +471,7 @@ def process_bam(
                 tqdm.tqdm(
                     p.imap_unordered(
                         functools.partial(
-                            get_bam_stats,
-                            ref_lengths=ref_lengths,
-                            scale=scale,
-                            plot=plot,
-                            plots_dir=plots_dir,
+                            get_bam_stats, ref_lengths=ref_lengths, scale=scale
                         ),
                         params,
                         chunksize=20,
@@ -642,7 +514,7 @@ def filter_reference_BAM(
     """
     logging.info("Filtering stats...")
     logging.info(
-        f"min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_read_ani >= {filter_conditions['min_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} &  min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} & min_norm_entropy >= {filter_conditions['min_norm_entropy']} & min_norm_gini <= {filter_conditions['min_norm_gini']}"
+        f"min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_read_ani >= {filter_conditions['min_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} &  min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']}"
     )
     df_filtered = df.loc[
         (df["n_reads"] >= filter_conditions["min_read_count"])
@@ -651,8 +523,6 @@ def filter_reference_BAM(
         & (df["breadth_exp_ratio"] >= filter_conditions["min_expected_breadth_ratio"])
         & (df["breadth"] >= filter_conditions["min_breadth"])
         & (df["cov_evenness"] >= filter_conditions["min_coverage_evenness"])
-        & (df["norm_entropy"] >= filter_conditions["min_norm_entropy"])
-        & (df["norm_gini"] <= filter_conditions["min_norm_gini"])
     ]
     if len(df_filtered.index) > 0:
         logging.info(f"Saving filtered stats...")

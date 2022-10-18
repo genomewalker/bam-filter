@@ -11,8 +11,6 @@ requirements = [
     "pyrle>=0.0.31",
     "sorted-nearest<=0.0.33",
     "pyranges>=0.0.112",
-    "kneed>=0.8.1",
-    "matplotlib>=3.6.0",
 ]
 
 setup(
