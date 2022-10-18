@@ -11,16 +11,11 @@ import tqdm
 import logging
 import warnings
 from bam_filter.utils import is_debug, calc_chunksize, fast_flatten, initializer
+from bam_filter.entropy import entropy, norm_entropy, gini_coeff, norm_gini_coeff
+
 import pyranges as pr
 from collections import defaultdict
 
-from sklearn import preprocessing, cluster
-
-import scipy.spatial
-import libpysal as ps
-from pointpats import PointPattern, ripley, quadrat_statistics
-
-from scipy import fftpack
 
 import matplotlib.pyplot as plt
 
@@ -108,7 +103,9 @@ def mean_cov_region(df):
     return df.df.merge(prob, on="Cluster")
 
 
-def get_bam_stats(params, ref_lengths=None, scale=1e6):
+def get_bam_stats(
+    params, ref_lengths=None, scale=1e6, plot=False, plots_dir="coverage-plots"
+):
     """
     Worker function per chromosome
     loop over a bam file and create tuple with lists containing metrics:
@@ -215,138 +212,32 @@ def get_bam_stats(params, ref_lengths=None, scale=1e6):
     tax_abund_aln = round((n_alns / reference_length) * scale)
     tax_abund_read = round((len(set(read_names)) / reference_length) * scale)
 
-    # # create dataframe with position and coaverage initialized to 0
-    df_cov = pd.DataFrame(cov_pos_raw, columns=["Start", "cov"])
-    df_cov["End"] = df_cov["Start"] + 1
-    df_cov["Chromosome"] = reference
-    df_cov["Strand"] = "+"
-    df_cov = df_cov[["Chromosome", "Start", "End", "Strand", "cov"]]
-    df_cov_raw = df_cov.copy()
-    df_cov_raw["mid_point"] = (df_cov_raw["Start"] + df_cov_raw["End"]) // 2
+    # Analyse site distribution
+    cov_positions = [i[0] for i in cov_pos_raw]
+    n_sites = len(cov_positions)
+    genome_length = reference_length
+    # Site density (sites per thousand bp)
+    site_density = 1000 * n_sites / genome_length
 
-    df_cov = pr.PyRanges(df_cov).cluster(strand=False)
-    df_cov = df_cov.apply(mean_cov_region).df
-    df_cov["mid_point"] = (df_cov["Start"] + df_cov["End"]) // 2
-    # print(df_cov)
-    print(df_cov)
-    mid_points = df_cov["mid_point"].sort_values().values
+    # infer number of bins using Freedman-Diaconis rule
+    positions_cov_zeros = pd.DataFrame({"pos": range(1, reference_length + 1)})
+    positions_cov = pd.DataFrame(
+        {"pos": [i[0] for i in cov_pos_raw], "cov": [i[1] for i in cov_pos_raw]}
+    )
+    positions_cov = positions_cov_zeros.merge(positions_cov, on="pos", how="left")
+    positions_cov["cov"] = positions_cov["cov"].fillna(0)
+    positions_cov["cov"] = positions_cov["cov"].astype(int)
+    positions_cov["cov_binary"] = positions_cov["cov"].apply(
+        lambda x: 1 if x > 0 else 0
+    )
+    counts, bins = np.histogram(cov_positions, bins="auto", range=(0, genome_length))
 
-    from skspatial.objects import Point
+    n_bins = len(bins)
 
-    def project_points_to_origin(rw):
-        dist = np.zeros(len(rw))
-        origin = Point([0, 0])
-        for i in range(len(rw)):
-            x = int(rw[i][0])
-            y = int(rw[i][1])
-            point = Point([x, y])
-            dist[i] = point.distance_point(origin)
-        return dist
-
-    points = [i for i in zip(starts, ends)]
-    dist2ori = np.sort(project_points_to_origin(points))
-    dist2ori = dist2ori
-
-    # calculate coverage values occurrence
-    # round cov_mean to the closer integer
-
-    df_cov_occ = df_cov[["cov_mean"]].values
-    df_cov_occ = np.round(df_cov_occ)
-    df_cov_occ = df_cov_occ.astype(int)
-    unique, counts = np.unique(df_cov_occ, return_counts=True)
-    counts = counts / df_cov.shape[0]
-    cov_occ = dict(zip(unique, counts))
-    df_cov_filt = df_cov.copy()
-    df_cov_filt["cov_round"] = df_cov_filt.cov_mean.round(0).astype(int)
-
-    # filtec cov_occ larger than 0.75
-    cov_occ = {k: v for k, v in cov_occ.items() if v <= 0.5}
-    df_cov_filt = df_cov_filt[df_cov_filt.cov_round.isin(cov_occ.keys())]
-    if df_cov_filt.empty:
-        df_cov_filt = df_cov.copy()
-        df_cov_filt["cov_round"] = df_cov_filt.cov_mean.round(0).astype(int)
-    if df_cov_filt.shape[0] > 1:
-        if (
-            df_cov_filt[
-                df_cov_filt.cov_mean
-                < df_cov_filt[df_cov_filt.cov_mean > 0].cov_mean.quantile(0.95)
-            ].shape[0]
-            > 0
-        ):
-            print("Here")
-            df = df_cov_filt[
-                df_cov_filt.cov_mean
-                < df_cov_filt[df_cov_filt.cov_mean > 0].cov_mean.quantile(0.95)
-            ]
-            points = [(i) for i in zip(df.mid_point, df.cov_mean)]
-            points = PointPattern(points)
-            is_csr = produce_qstats(points, 6, 6)
-
-            fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
-            plt.plot(df.mid_point, df.cov_mean, "o", color="black", ms=0.5)
-            fig.savefig("image-cov-2.png")
-            plt.close(fig)
-
-        else:
-            print("here1")
-            points = [(i) for i in zip(df_cov_filt.mid_point, df_cov_filt.cov_mean)]
-            points = PointPattern(points)
-            is_csr = produce_qstats(points, 6, 6)
-    else:
-        is_csr = None
-
-    # merge with coverage dataframe
-    # df = df.merge(
-    #     pd.DataFrame(cov_pos_raw, columns=["pos", "cov"]), on="pos", how="left"
-    # )
-    # df = df.fillna(0)
-    # df = df.astype(int)
-
-    print(f"##########\nREFERENCE: {reference}\n##############")
-    # if df[df.cov_y < df[df.cov_y > 0].cov_y.quantile(0.95)].shape[0] > 0:
-    #     print("here")
-    #     grid_size = 1
-    #     df = df[df.cov_y < df[df.cov_y > 0].cov_y.quantile(0.95)]
-    #     df = df[df.cov_y > 0]
-    #     if df.empty:
-    #         print("here")
-    #         df = pd.DataFrame(cov_pos_raw, columns=["pos", "cov_y"])
-    #         df = df[df.cov_y > 0]
-    #         grid_size = 3
-
-    # else:
-    #     if df.empty:
-    #         df = pd.DataFrame(cov_pos_raw, columns=["pos", "cov_y"])
-    #         df = df[df.cov_y > 0]
-    #         grid_size = 3
-    # x = df.pos.values
-    # y = df.cov_y.values
-    # find midpoint between start and end coordinates
-
-    x = ranges_raw.df.Start.tolist()
-    x.insert(0, 0)
-    x.append(reference_length)
-    y = ranges_raw.df.End.tolist()
-    y.insert(0, 0)
-    y.append(reference_length)
-    points = np.array([(i) for i in zip(x, y)])
-    points = [int((i[0] + i[1])) // 2 for i in zip(starts, ends)]
-
-    int_start = df_cov_raw.End.values[:-1]
-    int_end = df_cov_raw.Start.values[1:]
-
-    points = np.column_stack((int_start, int_end))
-    print(points)
-    segdists = np.diff(points, axis=1)
-    # print("HereO")
-    # print(mid_points)
-    # print(np.array(mid_points))
-
-    # d[d < 0] = 0
-    # segdists = d
-    # segdists = np.sqrt((d ** 2).sum(axis=1))
-
-    # is_csr = np.var(segdists, ddof=1) / np.mean(segdists)
+    entr = entropy(counts)  # Positional entropy
+    norm_entr = norm_entropy(counts)  # Normalized positional entropy
+    gini = gini_coeff(counts)  # Gini coefficient
+    norm_gini = norm_gini_coeff(counts)  # Normalized Gini coefficient
 
     log.debug(f"Number of reads: {len(set(read_names)):,}")
     log.debug(f"Number of alignments: {n_alns:,}")
@@ -359,8 +250,12 @@ def get_bam_stats(params, ref_lengths=None, scale=1e6):
     log.debug(f"Breadth: {breadth:.2f}")
     log.debug(f"Exp. breadth: {exp_breadth:.2f}")
     log.debug(f"Breadth/exp. ratio: {breadth_exp_ratio:.2f}")
-    log.debug(f"NND z-score: {is_csr}")
-    log.debug(f"Interval var: {np.var(segdists, ddof=1)}")
+    log.debug(f"Number of bins: {n_bins}")
+    log.debug(f"Site density: {site_density:.2f}")
+    log.debug(f"Entropy (H): {entr:.2f}")
+    log.debug(f"Normalized entropy (H*): {norm_entr:.2f}")
+    log.debug(f"Gini coefficient (G): {gini:.2f}")
+    log.debug(f"Normalized Gini coefficient (G*): {norm_gini:.2f}")
     log.debug(f"Cov. evenness: {cov_evenness:.2f}")
     log.debug(f"C_v: {c_v:.2f}")
     log.debug(f"D_i: {d_i:.2f}")
@@ -368,103 +263,21 @@ def get_bam_stats(params, ref_lengths=None, scale=1e6):
     log.debug(f"GC content: {gc_content:.2f}")
     log.debug(f"Taxonomic abundance (alns): {tax_abund_aln:.2f}")
     log.debug(f"Taxonomic abundance (reads): {tax_abund_read:.2f}")
-    print(dist2ori)
 
-    def kolmogorov_smirnov_uniformity_test(s, low: float = None, high: float = None):
-        low = low or self.expected_min
-        high = high or self.expected_max
-
-        # Using the parameters loc and scale, one obtains the uniform distribution on [loc, loc + scale].
-
-        _stats, p = stats.kstest(s, stats.uniform(loc=low, scale=high - low).cdf)
-
-        return p, p > 0.05
-
-    s = kolmogorov_smirnov_uniformity_test(
-        s=dist2ori, low=min(dist2ori), high=max(dist2ori)
-    )
-
-    fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
-    plt.plot(dist2ori, np.zeros(len(dist2ori)), "o", color="black", ms=0.5)
-    fig.savefig("image-cov-uni.png")  # save the figure to file
-    plt.close(fig)
-    print(s)
-    exit()
-    if (
-        breadth_exp_ratio > 0.75
-        and stats.kstest(dist2ori, "uniform")[1] > 0.05
-        # and is_csr == "CSR"
-    ):
-        # if reference == "GCA_000911955.1":
-        print(np.array(mid_points))
-        print(df_cov)
-        print(segdists)
-        print(ranges)
-        print(np.var(segdists, ddof=1) / np.mean(segdists))
-        print(np.mean(segdists))
-        print(np.min(segdists))
-        print(np.max(segdists))
-        print(np.var(segdists, ddof=1))
-        fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
-        plt.plot(mid_points, np.zeros(len(mid_points)), "o", color="black", ms=0.5)
-        fig.savefig("image-cov-uni.png")  # save the figure to file
-        plt.close(fig)
-
+    if plot:
         fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
         plt.plot(
-            df_cov.mid_point,
-            df_cov.cov_mean,
-            "o",
-            color="black",
+            positions_cov["pos"],
+            positions_cov["cov"],
+            color="c",
             ms=0.5,
         )
-        fig.savefig("image-cov-mid.png")  # save the figure to file
-        plt.close(fig)
-
-        fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
-        plt.plot(
-            [i[0] for i in cov_pos_raw],
-            [i[1] for i in cov_pos_raw],
-            "o",
-            color="black",
-            ms=0.5,
+        plt.suptitle(f"{reference}")
+        plt.title(
+            f"b/e:{breadth_exp_ratio:.2f} cov_e:{cov_evenness:.2f} entropy:{norm_entr:.2f} gini:{norm_gini:.2f}"
         )
-        fig.savefig("image-cov.png")  # save the figure to file
+        fig.savefig(f"{plots_dir}/{reference}_coverage.png", dpi=300)
         plt.close(fig)
-        print(mid_points)
-        print(stats.kstest(dist2ori, "uniform"))
-        exit()
-    # GCA_000911955.1
-    # if breadth_exp_ratio > 0.75 and is_csr == "Not CSR":
-    #     # if reference == "NC_050988.1":
-    #     # if is_csr == "Not CSR":
-    #     # if reference == "NC_050988.1":
-    #     #         print(point_pattern.max_nnd)
-    #     #         print(point_pattern.min_nnd)
-    #     #         print(point_pattern.mean_nnd)
-    #     #         exit()
-    #     # print(segdists)
-    #     # print(np.var(segdists, ddof=1) / np.mean(segdists))
-    #     # fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
-    #     # plt.plot(x, y, "o", color="black", ms=0.5)
-    #     # fig.savefig("image.png")  # save the figure to file
-    #     # plt.close(fig)
-    #     fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
-    #     plt.plot(
-    #         df_cov_filt.mid_point, df_cov_filt.cov_mean, "o", color="black", ms=0.5
-    #     )
-    #     fig.savefig("image-cov.png")  # save the figure to file
-    #     plt.close(fig)
-    #     fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
-    #     plt.plot(df_cov.mid_point, df_cov.cov_mean, "o", color="black", ms=0.5)
-    #     fig.savefig("image-cov-1.png")  # save the figure to file
-    #     plt.close(fig)
-    #     print(cov_occ)
-    #     print(np.var(segdists, ddof=1))
-    #     print(np.mean(segdists))
-    #     print(np.var(segdists, ddof=0) / np.mean(segdists))
-    #     exit()
-    #     exit()
 
     data = BamAlignment(
         reference=reference,
@@ -480,8 +293,14 @@ def get_bam_stats(params, ref_lengths=None, scale=1e6):
         breadth=breadth,
         exp_breadth=exp_breadth,
         breadth_exp_ratio=breadth_exp_ratio,
-        is_csr=is_csr,
+        n_bins=n_bins,
+        site_density=site_density,
+        entropy=entr,
+        norm_entropy=norm_entr,
+        gini=gini,
+        norm_gini=norm_gini,
         c_v=c_v,
+        d_i=d_i,
         edit_distances=edit_distances,
         # edit_distances_md=edit_distances_md,
         ani_nm=ani_nm,
@@ -525,8 +344,14 @@ class BamAlignment:
         breadth,
         exp_breadth,
         breadth_exp_ratio,
-        is_csr,
+        n_bins,
+        site_density,
+        entropy,
+        norm_entropy,
+        gini,
+        norm_gini,
         c_v,
+        d_i,
         cov_evenness,
         read_names,
         read_aln_score,
@@ -554,8 +379,14 @@ class BamAlignment:
         self.breadth = breadth
         self.exp_breadth = exp_breadth
         self.breadth_exp_ratio = breadth_exp_ratio
-        self.is_csr = is_csr
+        self.n_bins = n_bins
+        self.site_density = site_density
+        self.entropy = entropy
+        self.norm_entropy = norm_entropy
+        self.gini = gini
+        self.norm_gini = norm_gini
         self.c_v = c_v
+        self.d_i = d_i
         self.cov_evenness = cov_evenness
         self.read_names = read_names
         self.tax_abund_aln = tax_abund_aln
@@ -585,7 +416,14 @@ class BamAlignment:
             "breadth": self.breadth,
             "exp_breadth": self.exp_breadth,
             "breadth_exp_ratio": self.breadth_exp_ratio,
+            "n_bins": self.n_bins,
+            "site_density": self.site_density,
+            "entropy": self.entropy,
+            "norm_entropy": self.norm_entropy,
+            "gini": self.gini,
+            "norm_gini": self.norm_gini,
             "c_v": self.c_v,
+            "d_i": self.d_i,
             "cov_evenness": self.cov_evenness,
             "tax_abund_read": self.tax_abund_read,
             "tax_abund_aln": self.tax_abund_aln,
@@ -638,7 +476,14 @@ class BamAlignment:
             "breadth": self.breadth,
             "exp_breadth": self.exp_breadth,
             "breadth_exp_ratio": self.breadth_exp_ratio,
-            "is_csr" "c_v": self.c_v,
+            "n_bins": self.n_bins,
+            "site_density": self.site_density,
+            "entropy": self.entropy,
+            "norm_entropy": self.norm_entropy,
+            "gini": self.gini,
+            "norm_gini": self.norm_gini,
+            "c_v": self.c_v,
+            "d_i": self.d_i,
             "cov_evenness": self.cov_evenness,
             "tax_abund_read": self.tax_abund_read,
             "tax_abund_aln": self.tax_abund_aln,
@@ -654,7 +499,15 @@ class BamAlignment:
 
 
 # Inspired from https://gigabaseorgigabyte.wordpress.com/2017/04/14/getting-the-edit-distance-from-a-bam-alignment-a-journey/
-def process_bam(bam, threads=1, reference_lengths=None, min_read_count=10, scale=1e6):
+def process_bam(
+    bam,
+    threads=1,
+    reference_lengths=None,
+    min_read_count=10,
+    scale=1e6,
+    plot=False,
+    plots_dir="coverage-plots",
+):
     """
     Processing function: calls pool of worker functions
     to extract from a bam file two definitions of the edit distances to the reference genome scaled by read length
@@ -715,6 +568,11 @@ def process_bam(bam, threads=1, reference_lengths=None, min_read_count=10, scale
     # ):
     #     alns_in_ref[aln.reference_name] += 1
 
+    if plot:
+        # Check if image folder exists
+        if not os.path.exists(plots_dir):
+            os.makedirs(plots_dir)
+
     references = [
         chrom.contig
         for chrom in samfile.get_index_statistics()
@@ -735,7 +593,11 @@ def process_bam(bam, threads=1, reference_lengths=None, min_read_count=10, scale
             data = list(
                 map(
                     functools.partial(
-                        get_bam_stats, ref_lengths=ref_lengths, scale=scale
+                        get_bam_stats,
+                        ref_lengths=ref_lengths,
+                        scale=scale,
+                        plot=plot,
+                        plots_dir=plots_dir,
                     ),
                     params,
                 )
@@ -754,7 +616,11 @@ def process_bam(bam, threads=1, reference_lengths=None, min_read_count=10, scale
                 tqdm.tqdm(
                     p.imap_unordered(
                         functools.partial(
-                            get_bam_stats, ref_lengths=ref_lengths, scale=scale
+                            get_bam_stats,
+                            ref_lengths=ref_lengths,
+                            scale=scale,
+                            plot=plot,
+                            plots_dir=plots_dir,
                         ),
                         params,
                         chunksize=20,
@@ -797,7 +663,7 @@ def filter_reference_BAM(
     """
     logging.info("Filtering stats...")
     logging.info(
-        f"min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_read_ani >= {filter_conditions['min_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} &  min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']}"
+        f"min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_read_ani >= {filter_conditions['min_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} &  min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} & min_norm_entropy >= {filter_conditions['min_norm_entropy']} & min_norm_gini <= {filter_conditions['min_norm_gini']}"
     )
     df_filtered = df.loc[
         (df["n_reads"] >= filter_conditions["min_read_count"])
@@ -806,6 +672,8 @@ def filter_reference_BAM(
         & (df["breadth_exp_ratio"] >= filter_conditions["min_expected_breadth_ratio"])
         & (df["breadth"] >= filter_conditions["min_breadth"])
         & (df["cov_evenness"] >= filter_conditions["min_coverage_evenness"])
+        & (df["norm_entropy"] >= filter_conditions["min_norm_entropy"])
+        & (df["norm_gini"] <= filter_conditions["min_norm_gini"])
     ]
     if len(df_filtered.index) > 0:
         logging.info(f"Saving filtered stats...")

@@ -17,6 +17,7 @@ import pandas as pd
 from bam_filter.sam_utils import process_bam, filter_reference_BAM
 import numpy as np
 from bam_filter.utils import get_arguments, create_output_files
+from bam_filter.entropy import find_knee
 import json
 
 log = logging.getLogger("my_logger")
@@ -47,6 +48,8 @@ def main():
         reference_lengths=args.reference_lengths,
         min_read_count=args.min_read_count,
         scale=args.scale,
+        plot=args.plot,
+        plots_dir=out_files["coverage_plot_dir"],
     )
 
     data = list(filter(None, data))
@@ -62,6 +65,13 @@ def main():
     logging.info(f"Writing reference statistics to {out_files['stats']}")
     data_df.to_csv(out_files["stats"], sep="\t", index=False, compression="gzip")
 
+    if args.min_norm_entropy == "auto" or args.min_norm_gini == "auto":
+        min_norm_gini, min_norm_entropy = find_knee(
+            data_df, out_plot_name=out_files["knee_plot"]
+        )
+    else:
+        min_norm_gini, min_norm_entropy = args.min_norm_gini, args.min_norm_entropy
+
     filter_conditions = {
         "min_read_length": args.min_read_length,
         "min_read_count": args.min_read_count,
@@ -69,6 +79,8 @@ def main():
         "min_breadth": args.min_breadth,
         "min_read_ani": args.min_read_ani,
         "min_coverage_evenness": args.min_coverage_evenness,
+        "min_norm_entropy": min_norm_entropy,
+        "min_norm_gini": min_norm_gini,
     }
     if args.only_stats:
         logging.info("Skipping filtering...")
