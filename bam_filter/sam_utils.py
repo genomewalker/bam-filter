@@ -253,7 +253,7 @@ def get_bam_stats(
         )
         plt.suptitle(f"{reference}")
         plt.title(
-            f"b/e:{breadth_exp_ratio:.2f} cov_e:{cov_evenness:.2f} entropy:{norm_entr:.2f} gini:{norm_gini:.2f}"
+            f"cov:{mean_coverage:.4f} b/e:{breadth_exp_ratio:.2f} cov_e:{cov_evenness:.2f} entropy:{norm_entr:.2f} gini:{norm_gini:.2f}"
         )
         fig.savefig(f"{plots_dir}/{reference}_coverage.png", dpi=300)
         plt.close(fig)
