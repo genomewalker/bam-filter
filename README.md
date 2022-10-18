@@ -122,7 +122,7 @@ filterBAM --min-read-count 100 --min-expected-breadth-ratio 0.75 --min-read-ani 
 
 **--min-read-ani**: Minimum average read ANI that a reference has
 
-**--sort-by-name**: Sort filtered BAM file by read name so it can be used in metaDMG
+**--sort-by-name**: Sort filtered BAM file by read name so it can be used in [metaDMG](https://metadmg-dev.github.io/metaDMG-core/)
 
 **--sort-memory**: Memory used for each thread when sorting the filtered BAM file
 
@@ -175,5 +175,9 @@ The program will produce two main outputs:
 
 ## Applications and recommendations
 
-One of the main applications of *bam-filter* is to reliably identify which potential organisms are present in a metagenomic ancient sample, and get relatively accurate taxonomic abundances, even when they are present in very low abundances. The resulting BAM file then can be used as input for [metaDMG](). We rely on several measures to discriminate between noise and a potential signal. 
-This is based on the concepts defined [here](https://doi.org/10.1016/0888-7543(88)90007-9). It estimates the ratio between the observed and expected breadth, the closest to 1 the more evenly distributed is the coverage are and we can be more confident that the genome was detected.
+One of the main applications of *bam-filter* is to reliably identify which potential organisms are present in a metagenomic ancient sample, and get relatively accurate taxonomic abundances, even when they are present in very low abundances. The resulting BAM file then can be used as input for [metaDMG](https://metadmg-dev.github.io/metaDMG-core/). We rely on several measures to discriminate between noise and a potential signal, analyzing the mapping results at two different levels:
+
+- Is the observed breadth aligned with the expected one?
+- Are the reads spread evenly across the reference or they are clumped in a few regions?
+
+To assess the first question we use the concepts defined [here](https://doi.org/10.1016/0888-7543(88)90007-9). We estimate the ratio between the observed and expected breadth as a function of the coverage. If we get a **breadth_exp_ratio** close to 1, it means that the coverage we observed is close to the one we expect based on the calculated coverage. While this measure is already a strong indicator of a potential signal, we complement it with the metrics that measure the **normalized positional entropy** and the **normalized distribution inequality** (Gini coefficient) of the positions in the coverage. For details on how are calculated check [here](https://www.frontiersin.org/articles/10.3389/fmicb.2022.918015/full). These two metrics will help to identify those cases where we get a high **breadth_exp_ratio** but the coverage is not evenly distributed across the reference but instead is clumped in a few regions. One thing to be aware of is that we need to bin the reference to calculate those metrics. In our case, we use the ability of [numpy.histogram](https://numpy.org/doc/stable/reference/generated/numpy.histogram.html) to identify the [numbers of bins](https://numpy.org/doc/stable/reference/generated/numpy.histogram_bin_edges.html#numpy.histogram_bin_edges), either using the Sturges or the Freedman-Diaconis rule. Finally, we use the [knee point detection algorithm](https://github.com/arvkevi/kneed) to identify the optimal values where to filter the Gini coefficient as a function of the positional entropy.
