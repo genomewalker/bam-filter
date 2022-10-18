@@ -1,20 +1,18 @@
 import pysam
 import numpy as np
-import re, os, sys
+import os, sys
 import pandas as pd
 from multiprocessing import Pool
 import functools
-from regex import P
 from scipy import stats
 import pysam
 import tqdm
 import logging
 import warnings
-from bam_filter.utils import is_debug, calc_chunksize, fast_flatten, initializer
+from bam_filter.utils import is_debug, calc_chunksize, initializer
 from bam_filter.entropy import entropy, norm_entropy, gini_coeff, norm_gini_coeff
 
 import pyranges as pr
-from collections import defaultdict
 
 
 import matplotlib.pyplot as plt

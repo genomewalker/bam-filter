@@ -15,7 +15,6 @@ see <https://www.gnu.org/licenses/>.
 import logging
 import pandas as pd
 from bam_filter.sam_utils import process_bam, filter_reference_BAM
-import numpy as np
 from bam_filter.utils import get_arguments, create_output_files
 from bam_filter.entropy import find_knee
 import json
