@@ -84,25 +84,6 @@ def create_pyranges(reference, starts, ends, strands):
     )
 
 
-def produce_qstats(point_pattern, nx, ny):
-    # Rectangular quadrats
-    qstat = quadrat_statistics.QStatistic(point_pattern, nx=nx, ny=ny)
-
-    if qstat.chi2_pvalue < 0.05:
-        return "Not CSR"
-    else:
-        return "CSR"
-
-
-def mean_cov_region(df):
-    grpby = df.groupby("Cluster")
-    prob = grpby["cov"].mean()
-    prob = pd.DataFrame({"cov_mean": prob}).reset_index()
-    df = pr.PyRanges(df).merge(by="Cluster")
-
-    return df.df.merge(prob, on="Cluster")
-
-
 def get_bam_stats(
     params, ref_lengths=None, scale=1e6, plot=False, plots_dir="coverage-plots"
 ):
