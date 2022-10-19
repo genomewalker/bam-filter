@@ -65,9 +65,16 @@ def main():
     data_df.to_csv(out_files["stats"], sep="\t", index=False, compression="gzip")
 
     if args.min_norm_entropy == "auto" or args.min_norm_gini == "auto":
-        min_norm_gini, min_norm_entropy = find_knee(
-            data_df, out_plot_name=out_files["knee_plot"]
-        )
+        if data_df.shape[0] > 1:
+            min_norm_gini, min_norm_entropy = find_knee(
+                data_df, out_plot_name=out_files["knee_plot"]
+            )
+        else:
+            min_norm_gini = 0.5
+            min_norm_entropy = 0.75
+            logging.warning(
+                f"There's only one genome. Using min_norm_gini={min_norm_gini} and min_norm_entropy={min_norm_entropy}. Please check the results."
+            )
     else:
         min_norm_gini, min_norm_entropy = args.min_norm_gini, args.min_norm_entropy
 

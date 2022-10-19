@@ -194,12 +194,12 @@ def get_bam_stats(
     # Analyse site distribution
     cov_positions = [i[0] for i in cov_pos_raw]
     n_sites = len(cov_positions)
-    genome_length = reference_length
+    genome_length = bam_reference_length
     # Site density (sites per thousand bp)
     site_density = 1000 * n_sites / genome_length
 
     # infer number of bins using Freedman-Diaconis rule
-    positions_cov_zeros = pd.DataFrame({"pos": range(1, reference_length + 1)})
+    positions_cov_zeros = pd.DataFrame({"pos": range(1, bam_reference_length + 1)})
     positions_cov = pd.DataFrame(
         {"pos": [i[0] for i in cov_pos_raw], "cov": [i[1] for i in cov_pos_raw]}
     )
@@ -209,8 +209,8 @@ def get_bam_stats(
     positions_cov["cov_binary"] = positions_cov["cov"].apply(
         lambda x: 1 if x > 0 else 0
     )
-    counts, bins = np.histogram(cov_positions, bins="auto", range=(0, genome_length))
 
+    counts, bins = np.histogram(cov_positions, bins="auto", range=(0, genome_length))
     n_bins = len(bins)
 
     entr = entropy(counts)  # Positional entropy
@@ -563,7 +563,6 @@ def process_bam(
         sys.exit(1)
 
     logging.info(f"Keeping {len(references):,} references")
-
     params = zip([bam] * len(references), references)
     try:
         logging.info(f"Getting stats for each reference...")
