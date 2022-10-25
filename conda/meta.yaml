@@ -36,6 +36,6 @@ test:
 
 about:
   home: https://github.com/genomewalker/bam-filter
-  summary: "A simple tool to identify and clean misassemblies for ancient metagenomics"
+  summary: "A simple tool to filter references from a BAM  file using different filter types"
   license: {{ setup_data['license'] }}
   license_file: LICENSE

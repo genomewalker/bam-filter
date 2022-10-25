@@ -24,7 +24,7 @@ setup(
     name="bam-filter",
     version=versioneer.get_version(),
     cmdclass=versioneer.get_cmdclass(),
-    description="A simple tool to filter references from a BAM  file using different filter types",
+    description="A simple tool to filter references from a BAM file using different filter types",
     license="GNUv3",
     author="Antonio Fernandez-Guerra",
     author_email="antonio@metagenomics.eu",
