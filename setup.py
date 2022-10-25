@@ -5,7 +5,7 @@ requirements = [
     "Cython>=0.29.24",
     "pandas>=1.3.3",
     "scipy>=1.9.0",
-    "tqdm==4.50.0",
+    "tqdm>=4.64.1",
     "pysam>=0.17.0",
     "numpy>=1.21.2",
     "pyrle>=0.0.31",
