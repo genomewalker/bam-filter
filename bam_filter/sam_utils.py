@@ -521,7 +521,7 @@ def process_bam(
     # Check if BAM files is not sorted by coordinates, sort it by coordinates
     if not samfile.header["HD"]["SO"] == "coordinate":
         log.info("BAM file is not sorted by coordinates, sorting it...")
-        sorted_bam = bam.replace(".bam", ".sorted.bam")
+        sorted_bam = bam.replace(".bam", ".bf-sorted.bam")
         pysam.sort("-@", str(threads), "-m", str(sort_memory), "-o", sorted_bam, bam)
         bam = sorted_bam
         samfile = pysam.AlignmentFile(bam, "rb")
