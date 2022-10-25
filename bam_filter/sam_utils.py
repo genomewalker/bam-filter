@@ -484,6 +484,7 @@ def process_bam(
     reference_lengths=None,
     min_read_count=10,
     scale=1e6,
+    sort_memory="1G",
     plot=False,
     plots_dir="coverage-plots",
 ):
@@ -516,6 +517,14 @@ def process_bam(
             )
             sys.exit(1)
         max_chr_length = np.max(ref_lengths["length"].tolist())
+
+    # Check if BAM files is not sorted by coordinates, sort it by coordinates
+    if not samfile.header["HD"]["SO"] == "coordinate":
+        log.info("BAM file is not sorted by coordinates, sorting it...")
+        sorted_bam = bam.replace(".bam", ".sorted.bam")
+        pysam.sort("-@", str(threads), "-m", str(sort_memory), "-o", sorted_bam, bam)
+        bam = sorted_bam
+        samfile = pysam.AlignmentFile(bam, "rb")
 
     if not samfile.has_index():
         logging.info(f"BAM index not found. Indexing...")

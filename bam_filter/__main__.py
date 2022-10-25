@@ -47,6 +47,7 @@ def main():
         reference_lengths=args.reference_lengths,
         min_read_count=args.min_read_count,
         scale=args.scale,
+        sort_memory=args.sort_memory,
         plot=args.plot,
         plots_dir=out_files["coverage_plot_dir"],
     )
