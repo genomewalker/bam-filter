@@ -530,9 +530,9 @@ def process_bam(
         logging.info(f"BAM index not found. Indexing...")
         if max_chr_length > 536870912:
             logging.info(f"A reference is longer than 2^29, indexing with csi")
-            pysam.index(bam, "-c")
+            pysam.index(bam, "-c", "-@", str(threads), "-m", str(sort_memory))
         else:
-            pysam.index(bam)
+            pysam.index(bam, "-@", str(threads), "-m", str(sort_memory))
 
         logging.info(f"Reloading BAM file")
         samfile = pysam.AlignmentFile(
@@ -610,7 +610,7 @@ def process_bam(
                             plots_dir=plots_dir,
                         ),
                         params,
-                        chunksize=20,
+                        chunksize=c_size,
                     ),
                     total=len(references),
                     leave=False,
