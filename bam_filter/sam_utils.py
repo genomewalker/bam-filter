@@ -487,7 +487,7 @@ def process_bam(
     sort_memory="1G",
     plot=False,
     plots_dir="coverage-plots",
-    chunk_size=None,
+    chunksize=None,
 ):
     """
     Processing function: calls pool of worker functions
@@ -598,8 +598,8 @@ def process_bam(
                 initargs=([params, ref_lengths, scale],),
             )
 
-            if chunk_size is not None:
-                c_size = chunk_size
+            if chunksize is not None:
+                c_size = chunksize
             else:
                 c_size = calc_chunksize(
                     n_workers=threads, len_iterable=len(references), factor=4
