@@ -198,18 +198,6 @@ def get_bam_stats(
     # Site density (sites per thousand bp)
     site_density = 1000 * n_sites / genome_length
 
-    # infer number of bins using Freedman-Diaconis rule
-    positions_cov_zeros = pd.DataFrame({"pos": range(1, bam_reference_length + 1)})
-    positions_cov = pd.DataFrame(
-        {"pos": [i[0] for i in cov_pos_raw], "cov": [i[1] for i in cov_pos_raw]}
-    )
-    positions_cov = positions_cov_zeros.merge(positions_cov, on="pos", how="left")
-    positions_cov["cov"] = positions_cov["cov"].fillna(0)
-    positions_cov["cov"] = positions_cov["cov"].astype(int)
-    positions_cov["cov_binary"] = positions_cov["cov"].apply(
-        lambda x: 1 if x > 0 else 0
-    )
-
     counts, bins = np.histogram(cov_positions, bins="auto", range=(0, genome_length))
     n_bins = len(bins)
 
@@ -245,6 +233,17 @@ def get_bam_stats(
 
     if plot:
         fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
+        # infer number of bins using Freedman-Diaconis rule
+        positions_cov_zeros = pd.DataFrame({"pos": range(1, bam_reference_length + 1)})
+        positions_cov = pd.DataFrame(
+            {"pos": [i[0] for i in cov_pos_raw], "cov": [i[1] for i in cov_pos_raw]}
+        )
+        positions_cov = positions_cov_zeros.merge(positions_cov, on="pos", how="left")
+        positions_cov["cov"] = positions_cov["cov"].fillna(0)
+        positions_cov["cov"] = positions_cov["cov"].astype(int)
+        positions_cov["cov_binary"] = positions_cov["cov"].apply(
+            lambda x: 1 if x > 0 else 0
+        )
         plt.plot(
             positions_cov["pos"],
             positions_cov["cov"],
