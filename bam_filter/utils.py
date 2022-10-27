@@ -149,6 +149,7 @@ defaults = {
     "sort_memory": "1G",
     "reference_lengths": None,
     "scale": 1e6,
+    "chunk_size": None,
     "plot": False,
 }
 
@@ -171,6 +172,7 @@ help_msg = {
     "only_stats_filtered": "Only filter statistics and skip BAM filtering",
     "plot": "Plot genome coverage plots",
     "sort_by_name": "Sort by read names",
+    "chunk_size": "Chunk size for parallel processing",
     "help": "Help message",
     "debug": "Print debug messages",
     "reference_lengths": "File with references lengths",
@@ -348,6 +350,15 @@ def get_arguments(argv=None):
         dest="only_stats_filtered",
         action="store_true",
         help=help_msg["only_stats_filtered"],
+    )
+    parser.add_argument(
+        "--chunk-size",
+        type=lambda x: int(
+            check_values(x, minval=1, maxval=100000, parser=parser, var="--chunk-size")
+        ),
+        default=defaults["chunk_size"],
+        dest="chunk_size",
+        help=help_msg["chunk_size"],
     )
     parser.add_argument(
         "--debug", dest="debug", action="store_true", help=help_msg["debug"]

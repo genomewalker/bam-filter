@@ -50,6 +50,7 @@ def main():
         sort_memory=args.sort_memory,
         plot=args.plot,
         plots_dir=out_files["coverage_plot_dir"],
+        chunksize=args.chunk_size,
     )
 
     data = list(filter(None, data))
