@@ -18,8 +18,25 @@ from bam_filter.sam_utils import process_bam, filter_reference_BAM
 from bam_filter.utils import get_arguments, create_output_files
 from bam_filter.entropy import find_knee
 import json
+import warnings
 
 log = logging.getLogger("my_logger")
+
+
+def handle_warning(message, category, filename, lineno, file=None, line=None):
+    print("A warning occurred:")
+    print(message)
+    print("Do you wish to continue?")
+
+    while True:
+        response = input("y/n: ").lower()
+        if response not in {"y", "n"}:
+            print("Not understood.")
+        else:
+            break
+
+    if response == "n":
+        raise category(message)
 
 
 def obj_dict(obj):
@@ -38,6 +55,11 @@ def main():
     logging.getLogger("my_logger").setLevel(
         logging.DEBUG if args.debug else logging.INFO
     )
+
+    if args.debug:
+        warnings.showwarning = handle_warning
+    else:
+        warnings.filterwarnings("ignore")
 
     out_files = create_output_files(prefix=args.prefix, bam=args.bam)
 
@@ -71,6 +93,11 @@ def main():
             min_norm_gini, min_norm_entropy = find_knee(
                 data_df, out_plot_name=out_files["knee_plot"]
             )
+            if min_norm_gini is None:
+                min_norm_gini, min_norm_entropy = (
+                    args.min_norm_gini,
+                    args.min_norm_entropy,
+                )
         else:
             min_norm_gini = 0.5
             min_norm_entropy = 0.75

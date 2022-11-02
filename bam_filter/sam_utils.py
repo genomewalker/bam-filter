@@ -36,7 +36,7 @@ def coverage_evenness(coverage):
     # N = len(X)
     # n = len(D2)
     # E = 1 - (n - sum(D2) / C) / N
-    C = float(round(np.mean(coverage)))
+    C = float(np.rint(np.mean(coverage)))
     D2 = [x for x in coverage if x <= C]
     if len(D2) == 0:  # pragma: no cover
         covEvenness = 1.0
@@ -181,7 +181,9 @@ def get_bam_stats(
     if breadth_exp_ratio > 1:
         breadth_exp_ratio = 1.0
 
-    cov_evenness = coverage_evenness(cov_pos)
+    # fill vector with zeros to match reference length
+    cov_pos_zeroes = np.pad(cov_pos, (0, reference_length - len(cov_pos)), "constant")
+    cov_evenness = coverage_evenness(cov_pos_zeroes)
     gc_content = (np.sum(read_gc_content) / np.sum(read_length)) * 100
     c_v = cov_sd / mean_coverage
     d_i = cov_var / mean_coverage

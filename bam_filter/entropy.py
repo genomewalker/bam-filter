@@ -2,30 +2,11 @@ import numpy as np
 from kneed import KneeLocator
 import matplotlib.pyplot as plt
 import logging
-import warnings
-
-
-def handle_warning(message, category, filename, lineno, file=None, line=None):
-    print("A warning occurred:")
-    print(message)
-    print("Do you wish to continue?")
-
-    while True:
-        response = input("y/n: ").lower()
-        if response not in {"y", "n"}:
-            print("Not understood.")
-        else:
-            break
-
-    if response == "n":
-        raise category(message)
-
-
-warnings.showwarning = handle_warning
 
 log = logging.getLogger("my_logger")
 
 logging.getLogger("matplotlib").setLevel(logging.WARNING)
+
 
 # Code from: https://www.frontiersin.org/articles/10.3389/fmicb.2022.918015/full
 def entropy(counts):
@@ -188,10 +169,14 @@ def find_knee(df, out_plot_name):
     kneedle = KneeLocator(
         x, y, S=1.0, curve="concave", direction="decreasing", online=True
     )
+
+    if kneedle.knee is None:
+        return None, None
+
     min_gini = round(kneedle.elbow, 3)
     min_entropy = round(kneedle.knee_y, 3)
     logging.info(f"Knee point found: gini={min_gini}, entropy={min_entropy}")
-    logging.info(f"Knee point figure saved at kneedle.png")
+    logging.info("Knee point figure saved at kneedle.png")
     fig, ax = plt.subplots(nrows=1, ncols=1)
     plt.suptitle("Knee Point")
     plt.title(f"Knee point: gini={min_gini}, entropy={min_entropy}")
