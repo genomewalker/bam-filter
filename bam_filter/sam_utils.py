@@ -41,7 +41,10 @@ def coverage_evenness(coverage):
     if len(D2) == 0:  # pragma: no cover
         covEvenness = 1.0
     else:
-        covEvenness = 1.0 - (len(D2) - sum(D2) / C) / len(coverage)
+        if C > 0:
+            covEvenness = 1.0 - (len(D2) - sum(D2) / C) / len(coverage)
+        else:
+            covEvenness = 0.0
 
     return covEvenness
 
