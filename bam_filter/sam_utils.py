@@ -190,8 +190,6 @@ def get_bam_stats(
         breadth_exp_ratio = 1.0
 
     # fill vector with zeros to match reference length
-    print(reference_length)
-    print(len(cov_pos))
     cov_pos_zeroes = np.pad(cov_pos, (0, reference_length - len(cov_pos)), "constant")
     cov_evenness = coverage_evenness(cov_pos_zeroes)
     gc_content = (np.sum(read_gc_content) / np.sum(read_length)) * 100
