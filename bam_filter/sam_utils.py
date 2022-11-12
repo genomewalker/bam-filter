@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 log = logging.getLogger("my_logger")
 
 logging.getLogger("matplotlib").setLevel(logging.WARNING)
-sys.setrecursionlimit(10 ** 6)
+sys.setrecursionlimit(10**6)
 
 # Function to calculate evenness of coverage
 def coverage_evenness(coverage):
@@ -532,9 +532,9 @@ def process_bam(
         logging.info(f"BAM index not found. Indexing...")
         if max_chr_length > 536870912:
             logging.info(f"A reference is longer than 2^29, indexing with csi")
-            pysam.index(bam, "-c", "-@", str(threads), "-m", str(sort_memory))
+            pysam.index(bam, "-c")
         else:
-            pysam.index(bam, "-@", str(threads), "-m", str(sort_memory))
+            pysam.index(bam)
 
         logging.info(f"Reloading BAM file")
         samfile = pysam.AlignmentFile(
