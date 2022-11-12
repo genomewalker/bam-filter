@@ -142,6 +142,7 @@ defaults = {
     "min_expected_breadth_ratio": 0.5,
     "min_norm_entropy": "auto",
     "min_norm_gini": "auto",
+    "min_avg_read_ani": 90.0,
     "min_read_ani": 90.0,
     "min_breadth": 0,
     "min_coverage_evenness": 0,
@@ -163,7 +164,8 @@ help_msg = {
     "min_expected_breadth_ratio": "Minimum expected breadth ratio",
     "min_norm_entropy": "Minimum normalized entropy",
     "min_norm_gini": "Minimum normalized Gini coefficient",
-    "min_read_ani": "Minimum average read ANI",
+    "min_read_ani": "Minimum read ANI to keep a read",
+    "min_avg_read_ani": "Minimum average read ANI",
     "min_coverage_evenness": "Minimum coverage evenness",
     "sort_memory": "Set maximum memory per thread for sorting; suffix K/M/G recognized",
     "scale": "Scale taxonomic abundance by this factor; suffix K/M recognized",
@@ -207,6 +209,16 @@ def get_arguments(argv=None):
         default=defaults["prefix"],
         dest="prefix",
         help=help_msg["prefix"],
+    )
+    parser.add_argument(
+        "-A",
+        "--min-read-ani",
+        type=lambda x: float(
+            check_values(x, minval=0, maxval=100, parser=parser, var="--min-read-ani")
+        ),
+        default=defaults["min_read_ani"],
+        dest="min_read_ani",
+        help=help_msg["min_read_ani"],
     )
     parser.add_argument(
         "-l",
@@ -276,13 +288,13 @@ def get_arguments(argv=None):
     )
     parser.add_argument(
         "-a",
-        "--min-read-ani",
+        "--min-avg-read-ani",
         type=lambda x: float(
-            check_values(x, minval=0, maxval=100, parser=parser, var="--min-read-ani")
+            check_values(x, minval=0, maxval=100, parser=parser, var="--min-avg-read-ani")
         ),
-        default=defaults["min_read_ani"],
-        dest="min_read_ani",
-        help=help_msg["min_read_ani"],
+        default=defaults["min_avg_read_ani"],
+        dest="min_avg_read_ani",
+        help=help_msg["min_avg_read_ani"],
     )
     parser.add_argument(
         "-c",

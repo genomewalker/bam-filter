@@ -83,7 +83,12 @@ def create_pyranges(reference, starts, ends, strands):
 
 
 def get_bam_stats(
-    params, ref_lengths=None, scale=1e6, plot=False, plots_dir="coverage-plots"
+    params,
+    ref_lengths=None,
+    min_read_ani=90.0,
+    scale=1e6,
+    plot=False,
+    plots_dir="coverage-plots",
 ):
     """
     Worker function per chromosome
@@ -117,32 +122,34 @@ def get_bam_stats(
     ends = []
     strands = []
     for aln in samfile.fetch(reference=reference, multiple_iterators=False):
-        n_alns += 1
-        if aln.has_tag("AS"):
-            read_aln_score.append(aln.get_tag("AS"))
-        else:
-            read_aln_score.append(np.nan)
+        ani_read = (1 - ((aln.get_tag("NM") / aln.infer_query_length()))) * 100
+        if ani_read >= min_read_ani:
+            n_alns += 1
+            if aln.has_tag("AS"):
+                read_aln_score.append(aln.get_tag("AS"))
+            else:
+                read_aln_score.append(np.nan)
 
-        if aln.has_tag("AS"):
-            edit_distances.append(aln.get_tag("NM"))
-            ani_nm.append((1 - ((aln.get_tag("NM") / aln.infer_query_length()))) * 100)
-        else:
-            edit_distances.append(np.nan)
-            ani_nm.append(np.nan)
+            if aln.has_tag("AS"):
+                edit_distances.append(aln.get_tag("NM"))
+                ani_nm.append(ani_read)
+            else:
+                edit_distances.append(np.nan)
+                ani_nm.append(np.nan)
 
-        read_gc_content.append(calc_gc_content(aln.query_sequence))
-        read_length.append(aln.infer_read_length())
-        read_aligned_length.append(aln.query_alignment_length)
-        read_mapq.append(aln.mapping_quality)
-        read_names.append(aln.query_name)
-        # check if strand is reverse
-        if aln.is_reverse:
-            strand = "-"
-        else:
-            strand = "+"
-        starts.append(aln.reference_start)
-        ends.append(aln.reference_end)
-        strands.append(strand)
+            read_gc_content.append(calc_gc_content(aln.query_sequence))
+            read_length.append(aln.infer_read_length())
+            read_aligned_length.append(aln.query_alignment_length)
+            read_mapq.append(aln.mapping_quality)
+            read_names.append(aln.query_name)
+            # check if strand is reverse
+            if aln.is_reverse:
+                strand = "-"
+            else:
+                strand = "+"
+            starts.append(aln.reference_start)
+            ends.append(aln.reference_end)
+            strands.append(strand)
 
     # get bases covered by reads pileup
     cov_pos_raw = [
@@ -158,6 +165,7 @@ def get_bam_stats(
     ]
     samfile.close()
     cov_pos = [i[1] for i in cov_pos_raw]
+
     # convert datafrane to pyranges
     ranges = create_pyranges(reference, starts, ends, strands)
 
@@ -182,6 +190,8 @@ def get_bam_stats(
         breadth_exp_ratio = 1.0
 
     # fill vector with zeros to match reference length
+    print(reference_length)
+    print(len(cov_pos))
     cov_pos_zeroes = np.pad(cov_pos, (0, reference_length - len(cov_pos)), "constant")
     cov_evenness = coverage_evenness(cov_pos_zeroes)
     gc_content = (np.sum(read_gc_content) / np.sum(read_length)) * 100
@@ -483,6 +493,7 @@ def process_bam(
     bam,
     threads=1,
     reference_lengths=None,
+    min_read_ani=90.0,
     min_read_count=10,
     scale=1e6,
     sort_memory="1G",
@@ -584,6 +595,7 @@ def process_bam(
                     functools.partial(
                         get_bam_stats,
                         ref_lengths=ref_lengths,
+                        min_read_ani=min_read_ani,
                         scale=scale,
                         plot=plot,
                         plots_dir=plots_dir,
@@ -612,6 +624,7 @@ def process_bam(
                         functools.partial(
                             get_bam_stats,
                             ref_lengths=ref_lengths,
+                            min_read_ani=min_read_ani,
                             scale=scale,
                             plot=plot,
                             plots_dir=plots_dir,
@@ -657,12 +670,12 @@ def filter_reference_BAM(
     """
     logging.info("Filtering stats...")
     logging.info(
-        f"min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_read_ani >= {filter_conditions['min_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} &  min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} & min_norm_entropy >= {filter_conditions['min_norm_entropy']} & min_norm_gini <= {filter_conditions['min_norm_gini']}"
+        f"min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_avg_read_ani >= {filter_conditions['min_avg_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} &  min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} & min_norm_entropy >= {filter_conditions['min_norm_entropy']} & min_norm_gini <= {filter_conditions['min_norm_gini']}"
     )
     df_filtered = df.loc[
         (df["n_reads"] >= filter_conditions["min_read_count"])
         & (df["read_length_mean"] >= filter_conditions["min_read_length"])
-        & (df["read_ani_mean"] >= filter_conditions["min_read_ani"])
+        & (df["read_ani_mean"] >= filter_conditions["min_avg_read_ani"])
         & (df["breadth_exp_ratio"] >= filter_conditions["min_expected_breadth_ratio"])
         & (df["breadth"] >= filter_conditions["min_breadth"])
         & (df["cov_evenness"] >= filter_conditions["min_coverage_evenness"])
