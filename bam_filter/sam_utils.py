@@ -791,9 +791,18 @@ def filter_reference_BAM(
                 logging.info("BAM index not found. Indexing...")
                 if max_chr_length > 536870912:
                     logging.info("A reference is longer than 2^29, indexing with csi")
-                    pysam.index(out_files["bam_filtered"], "-c")
+                    pysam.index(
+                        out_files["bam_filtered"],
+                        "-c",
+                        "-@",
+                        str(threads),
+                    )
                 else:
-                    pysam.index(out_files["bam_filtered"])
+                    pysam.index(
+                        out_files["bam_filtered"],
+                        "-@",
+                        str(threads),
+                    )
 
             os.remove(out_files["bam_filtered_tmp"])
     else:
