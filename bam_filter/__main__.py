@@ -15,7 +15,7 @@ see <https://www.gnu.org/licenses/>.
 import logging
 import pandas as pd
 from bam_filter.sam_utils import process_bam, filter_reference_BAM
-from bam_filter.utils import get_arguments, create_output_files
+from bam_filter.utils import get_arguments, create_output_files, concat_df
 from bam_filter.entropy import find_knee
 import json
 import warnings
@@ -75,9 +75,7 @@ def main():
         chunksize=args.chunk_size,
     )
 
-    data = list(filter(None, data))
-
-    data_df = pd.DataFrame([x.to_summary() for x in data])
+    data_df = concat_df(data)
 
     if args.read_length_freqs:
         lens = [x.get_read_length_freqs() for x in data]

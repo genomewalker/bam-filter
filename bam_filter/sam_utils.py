@@ -14,7 +14,7 @@ from bam_filter.entropy import entropy, norm_entropy, gini_coeff, norm_gini_coef
 
 import pyranges as pr
 
-# import cProfile as profile
+import cProfile as profile
 import pstats
 
 import matplotlib.pyplot as plt
@@ -106,221 +106,235 @@ def get_bam_stats(
     """
     # prof = profile.Profile()
     # prof.enable()
-    bam, reference = params
+    bam, references = params
     samfile = pysam.AlignmentFile(bam, "rb")
-    edit_distances = []
-    # edit_distances_md = []
-    ani_nm = []
-    # ani_md = []
-    read_length = []
-    read_aligned_length = []
-    read_mapq = []
-    read_aln_score = []
-    read_names = []
-    read_gc_content = []
-    n_alns = 0
-    if ref_lengths is None:
-        reference_length = int(samfile.get_reference_length(reference))
-        bam_reference_length = reference_length
-    else:
-        reference_length = int(ref_lengths.loc[reference, "length"])
-        bam_reference_length = int(samfile.get_reference_length(reference))
+    results = []
+    for reference in references:
+        edit_distances = []
+        # edit_distances_md = []
+        ani_nm = []
+        # ani_md = []
+        read_length = []
+        read_aligned_length = []
+        read_mapq = []
+        read_aln_score = []
+        read_names = []
+        read_gc_content = []
+        n_alns = 0
+        if ref_lengths is None:
+            reference_length = int(samfile.get_reference_length(reference))
+            bam_reference_length = reference_length
+        else:
+            reference_length = int(ref_lengths.loc[reference, "length"])
+            bam_reference_length = int(samfile.get_reference_length(reference))
 
-    log.debug(f"Processing reference {reference}")
-    log.debug(f"Reference length: {reference_length:,}")
-    log.debug(f"BAM reference length: {bam_reference_length:,}")
-    starts = []
-    ends = []
-    strands = []
-    for aln in samfile.fetch(reference=reference, multiple_iterators=False):
-        ani_read = (1 - ((aln.get_tag("NM") / aln.infer_query_length()))) * 100
-        if ani_read >= min_read_ani:
-            n_alns += 1
-            if aln.has_tag("AS"):
-                read_aln_score.append(aln.get_tag("AS"))
-            else:
-                read_aln_score.append(np.nan)
+        log.debug(f"Processing reference {reference}")
+        log.debug(f"Reference length: {reference_length:,}")
+        log.debug(f"BAM reference length: {bam_reference_length:,}")
+        starts = []
+        ends = []
+        strands = []
+        for aln in samfile.fetch(reference=reference, multiple_iterators=True):
+            ani_read = (1 - ((aln.get_tag("NM") / aln.infer_query_length()))) * 100
+            if ani_read >= min_read_ani:
+                n_alns += 1
+                if aln.has_tag("AS"):
+                    read_aln_score.append(aln.get_tag("AS"))
+                else:
+                    read_aln_score.append(np.nan)
 
-            if aln.has_tag("AS"):
-                edit_distances.append(aln.get_tag("NM"))
-                ani_nm.append(ani_read)
-            else:
-                edit_distances.append(np.nan)
-                ani_nm.append(np.nan)
+                if aln.has_tag("AS"):
+                    edit_distances.append(aln.get_tag("NM"))
+                    ani_nm.append(ani_read)
+                else:
+                    edit_distances.append(np.nan)
+                    ani_nm.append(np.nan)
 
-            read_gc_content.append(calc_gc_content(aln.query_sequence))
-            read_length.append(aln.infer_read_length())
-            read_aligned_length.append(aln.query_alignment_length)
-            read_mapq.append(aln.mapping_quality)
-            read_names.append(aln.query_name)
-            # check if strand is reverse
-            if aln.is_reverse:
-                strand = "-"
-            else:
-                strand = "+"
-            starts.append(aln.reference_start)
-            ends.append(aln.reference_end)
-            strands.append(strand)
+                read_gc_content.append(calc_gc_content(aln.query_sequence))
+                read_length.append(aln.infer_read_length())
+                read_aligned_length.append(aln.query_alignment_length)
+                read_mapq.append(aln.mapping_quality)
+                read_names.append(aln.query_name)
+                # check if strand is reverse
+                if aln.is_reverse:
+                    strand = "-"
+                else:
+                    strand = "+"
+                starts.append(aln.reference_start)
+                ends.append(aln.reference_end)
+                strands.append(strand)
 
-    # get bases covered by reads pileup
+        # get bases covered by reads pileup
 
-    cov_pos_raw = [
-        (pileupcolumn.pos, pileupcolumn.n)
-        for pileupcolumn in samfile.pileup(
-            reference,
-            start=None,
-            stop=None,
-            region=None,
-            stepper="nofilter",
-            min_mapping_quality=0,
+        cov_pos_raw = [
+            (pileupcolumn.pos, pileupcolumn.n)
+            for pileupcolumn in samfile.pileup(
+                reference,
+                start=None,
+                stop=None,
+                region=None,
+                stepper="nofilter",
+                min_mapping_quality=0,
+            )
+        ]
+        # samfile.close()
+
+        cov_pos = [i[1] for i in cov_pos_raw]
+        # convert datafrane to pyranges
+        ranges = create_pyranges(reference, starts, ends, strands)
+        if ranges.df.shape[0] == 0:
+            log.debug(f"No alignments found for {reference}")
+            return None
+        ranges_raw = ranges.merge(strand=False)
+        ranges = ranges_raw.lengths().to_list()
+
+        max_covered_bases = np.max(ranges)
+        mean_covered_bases = np.mean(ranges)
+        bases_covered = int(len(cov_pos))
+        # get SD from covered bases
+        cov_sd = np.std(cov_pos, ddof=1)
+        cov_var = np.var(cov_pos, ddof=1)
+        # get average coverage
+        mean_coverage = sum(cov_pos) / reference_length
+        mean_coverage_covered = sum(cov_pos) / bases_covered
+
+        breadth = bases_covered / reference_length
+        exp_breadth = 1 - np.exp(-mean_coverage)
+        breadth_exp_ratio = breadth / exp_breadth
+
+        if breadth_exp_ratio > 1:
+            breadth_exp_ratio = 1.0
+
+        # fill vector with zeros to match reference length
+        cov_pos_zeroes = np.pad(
+            cov_pos, (0, reference_length - len(cov_pos)), "constant"
         )
-    ]
+        cov_evenness = coverage_evenness(cov_pos_zeroes)
+        gc_content = (np.sum(read_gc_content) / np.sum(read_length)) * 100
+        c_v = cov_sd / mean_coverage
+        d_i = cov_var / mean_coverage
+
+        read_mapq = [np.nan if x == 255 else x for x in read_mapq]
+
+        tax_abund_aln = round((n_alns / reference_length) * scale)
+        tax_abund_read = round((len(set(read_names)) / reference_length) * scale)
+
+        # Analyse site distribution
+        cov_positions = [i[0] for i in cov_pos_raw]
+        n_sites = len(cov_positions)
+        genome_length = bam_reference_length
+        # Site density (sites per thousand bp)
+        site_density = 1000 * n_sites / genome_length
+
+        counts, bins = np.histogram(
+            cov_positions, bins="auto", range=(0, genome_length)
+        )
+        n_bins = len(bins)
+
+        entr = entropy(counts)  # Positional entropy
+        norm_entr = norm_entropy(counts)  # Normalized positional entropy
+        gini = gini_coeff(counts)  # Gini coefficient
+        norm_gini = norm_gini_coeff(counts)  # Normalized Gini coefficient
+
+        log.debug(f"Number of reads: {len(set(read_names)):,}")
+        log.debug(f"Number of alignments: {n_alns:,}")
+        log.debug(f"Bases covered: {bases_covered:,}")
+        log.debug(f"Mean coverage: {mean_coverage:.2f}")
+        log.debug(f"Mean coverage covered: {mean_coverage_covered:.2f}")
+        log.debug(f"Max covered bases: {max_covered_bases:,}")
+        log.debug(f"Mean covered bases: {mean_covered_bases:.2f}")
+        log.debug(f"SD: {cov_sd:.2f}")
+        log.debug(f"Breadth: {breadth:.2f}")
+        log.debug(f"Exp. breadth: {exp_breadth:.2f}")
+        log.debug(f"Breadth/exp. ratio: {breadth_exp_ratio:.2f}")
+        log.debug(f"Number of bins: {n_bins}")
+        log.debug(f"Site density: {site_density:.2f}")
+        log.debug(f"Entropy (H): {entr:.2f}")
+        log.debug(f"Normalized entropy (H*): {norm_entr:.2f}")
+        log.debug(f"Gini coefficient (G): {gini:.2f}")
+        log.debug(f"Normalized Gini coefficient (G*): {norm_gini:.2f}")
+        log.debug(f"Cov. evenness: {cov_evenness:.2f}")
+        log.debug(f"C_v: {c_v:.2f}")
+        log.debug(f"D_i: {d_i:.2f}")
+        log.debug(f"Mean mapq: {np.mean(read_mapq):.2f}")
+        log.debug(f"GC content: {gc_content:.2f}")
+        log.debug(f"Taxonomic abundance (alns): {tax_abund_aln:.2f}")
+        log.debug(f"Taxonomic abundance (reads): {tax_abund_read:.2f}")
+
+        if plot:
+            fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
+            # infer number of bins using Freedman-Diaconis rule
+            positions_cov_zeros = pd.DataFrame(
+                {"pos": range(1, bam_reference_length + 1)}
+            )
+            positions_cov = pd.DataFrame(
+                {"pos": [i[0] for i in cov_pos_raw], "cov": [i[1] for i in cov_pos_raw]}
+            )
+            positions_cov = positions_cov_zeros.merge(
+                positions_cov, on="pos", how="left"
+            )
+            positions_cov["cov"] = positions_cov["cov"].fillna(0)
+            positions_cov["cov"] = positions_cov["cov"].astype(int)
+            positions_cov["cov_binary"] = positions_cov["cov"].apply(
+                lambda x: 1 if x > 0 else 0
+            )
+            plt.plot(
+                positions_cov["pos"],
+                positions_cov["cov"],
+                color="c",
+                ms=0.5,
+            )
+            plt.suptitle(f"{reference}")
+            plt.title(
+                f"cov:{mean_coverage:.4f} b/e:{breadth_exp_ratio:.2f} cov_e:{cov_evenness:.2f} entropy:{norm_entr:.2f} gini:{norm_gini:.2f}"
+            )
+            fig.savefig(f"{plots_dir}/{reference}_coverage.png", dpi=300)
+            plt.close(fig)
+
+        data = BamAlignment(
+            reference=reference,
+            n_alns=n_alns,
+            reference_length=reference_length,
+            bam_reference_length=bam_reference_length,
+            mean_coverage=mean_coverage,
+            mean_coverage_covered=mean_coverage_covered,
+            bases_covered=bases_covered,
+            max_covered_bases=max_covered_bases,
+            mean_covered_bases=mean_covered_bases,
+            cov_evenness=cov_evenness,
+            breadth=breadth,
+            exp_breadth=exp_breadth,
+            breadth_exp_ratio=breadth_exp_ratio,
+            n_bins=n_bins,
+            site_density=site_density,
+            entropy=entr,
+            norm_entropy=norm_entr,
+            gini=gini,
+            norm_gini=norm_gini,
+            c_v=c_v,
+            d_i=d_i,
+            edit_distances=edit_distances,
+            # edit_distances_md=edit_distances_md,
+            ani_nm=ani_nm,
+            # ani_md=ani_md,
+            read_length=read_length,
+            read_gc_content=read_gc_content,
+            read_aligned_length=read_aligned_length,
+            mapping_quality=read_mapq,
+            read_names=set(read_names),
+            read_aln_score=read_aln_score,
+            tax_abund_aln=tax_abund_aln,
+            tax_abund_read=tax_abund_read,
+        )
+        results.append(data)
     samfile.close()
-
-    cov_pos = [i[1] for i in cov_pos_raw]
-    # convert datafrane to pyranges
-    ranges = create_pyranges(reference, starts, ends, strands)
-    if ranges.df.shape[0] == 0:
-        log.debug(f"No alignments found for {reference}")
-        return None
-    ranges_raw = ranges.merge(strand=False)
-    ranges = ranges_raw.lengths().to_list()
-
-    max_covered_bases = np.max(ranges)
-    mean_covered_bases = np.mean(ranges)
-    bases_covered = int(len(cov_pos))
-    # get SD from covered bases
-    cov_sd = np.std(cov_pos, ddof=1)
-    cov_var = np.var(cov_pos, ddof=1)
-    # get average coverage
-    mean_coverage = sum(cov_pos) / reference_length
-    mean_coverage_covered = sum(cov_pos) / bases_covered
-
-    breadth = bases_covered / reference_length
-    exp_breadth = 1 - np.exp(-mean_coverage)
-    breadth_exp_ratio = breadth / exp_breadth
-
-    if breadth_exp_ratio > 1:
-        breadth_exp_ratio = 1.0
-
-    # fill vector with zeros to match reference length
-    cov_pos_zeroes = np.pad(cov_pos, (0, reference_length - len(cov_pos)), "constant")
-    cov_evenness = coverage_evenness(cov_pos_zeroes)
-    gc_content = (np.sum(read_gc_content) / np.sum(read_length)) * 100
-    c_v = cov_sd / mean_coverage
-    d_i = cov_var / mean_coverage
-
-    read_mapq = [np.nan if x == 255 else x for x in read_mapq]
-
-    tax_abund_aln = round((n_alns / reference_length) * scale)
-    tax_abund_read = round((len(set(read_names)) / reference_length) * scale)
-
-    # Analyse site distribution
-    cov_positions = [i[0] for i in cov_pos_raw]
-    n_sites = len(cov_positions)
-    genome_length = bam_reference_length
-    # Site density (sites per thousand bp)
-    site_density = 1000 * n_sites / genome_length
-
-    counts, bins = np.histogram(cov_positions, bins="auto", range=(0, genome_length))
-    n_bins = len(bins)
-
-    entr = entropy(counts)  # Positional entropy
-    norm_entr = norm_entropy(counts)  # Normalized positional entropy
-    gini = gini_coeff(counts)  # Gini coefficient
-    norm_gini = norm_gini_coeff(counts)  # Normalized Gini coefficient
-
-    log.debug(f"Number of reads: {len(set(read_names)):,}")
-    log.debug(f"Number of alignments: {n_alns:,}")
-    log.debug(f"Bases covered: {bases_covered:,}")
-    log.debug(f"Mean coverage: {mean_coverage:.2f}")
-    log.debug(f"Mean coverage covered: {mean_coverage_covered:.2f}")
-    log.debug(f"Max covered bases: {max_covered_bases:,}")
-    log.debug(f"Mean covered bases: {mean_covered_bases:.2f}")
-    log.debug(f"SD: {cov_sd:.2f}")
-    log.debug(f"Breadth: {breadth:.2f}")
-    log.debug(f"Exp. breadth: {exp_breadth:.2f}")
-    log.debug(f"Breadth/exp. ratio: {breadth_exp_ratio:.2f}")
-    log.debug(f"Number of bins: {n_bins}")
-    log.debug(f"Site density: {site_density:.2f}")
-    log.debug(f"Entropy (H): {entr:.2f}")
-    log.debug(f"Normalized entropy (H*): {norm_entr:.2f}")
-    log.debug(f"Gini coefficient (G): {gini:.2f}")
-    log.debug(f"Normalized Gini coefficient (G*): {norm_gini:.2f}")
-    log.debug(f"Cov. evenness: {cov_evenness:.2f}")
-    log.debug(f"C_v: {c_v:.2f}")
-    log.debug(f"D_i: {d_i:.2f}")
-    log.debug(f"Mean mapq: {np.mean(read_mapq):.2f}")
-    log.debug(f"GC content: {gc_content:.2f}")
-    log.debug(f"Taxonomic abundance (alns): {tax_abund_aln:.2f}")
-    log.debug(f"Taxonomic abundance (reads): {tax_abund_read:.2f}")
-
-    if plot:
-        fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
-        # infer number of bins using Freedman-Diaconis rule
-        positions_cov_zeros = pd.DataFrame({"pos": range(1, bam_reference_length + 1)})
-        positions_cov = pd.DataFrame(
-            {"pos": [i[0] for i in cov_pos_raw], "cov": [i[1] for i in cov_pos_raw]}
-        )
-        positions_cov = positions_cov_zeros.merge(positions_cov, on="pos", how="left")
-        positions_cov["cov"] = positions_cov["cov"].fillna(0)
-        positions_cov["cov"] = positions_cov["cov"].astype(int)
-        positions_cov["cov_binary"] = positions_cov["cov"].apply(
-            lambda x: 1 if x > 0 else 0
-        )
-        plt.plot(
-            positions_cov["pos"],
-            positions_cov["cov"],
-            color="c",
-            ms=0.5,
-        )
-        plt.suptitle(f"{reference}")
-        plt.title(
-            f"cov:{mean_coverage:.4f} b/e:{breadth_exp_ratio:.2f} cov_e:{cov_evenness:.2f} entropy:{norm_entr:.2f} gini:{norm_gini:.2f}"
-        )
-        fig.savefig(f"{plots_dir}/{reference}_coverage.png", dpi=300)
-        plt.close(fig)
-
-    data = BamAlignment(
-        reference=reference,
-        n_alns=n_alns,
-        reference_length=reference_length,
-        bam_reference_length=bam_reference_length,
-        mean_coverage=mean_coverage,
-        mean_coverage_covered=mean_coverage_covered,
-        bases_covered=bases_covered,
-        max_covered_bases=max_covered_bases,
-        mean_covered_bases=mean_covered_bases,
-        cov_evenness=cov_evenness,
-        breadth=breadth,
-        exp_breadth=exp_breadth,
-        breadth_exp_ratio=breadth_exp_ratio,
-        n_bins=n_bins,
-        site_density=site_density,
-        entropy=entr,
-        norm_entropy=norm_entr,
-        gini=gini,
-        norm_gini=norm_gini,
-        c_v=c_v,
-        d_i=d_i,
-        edit_distances=edit_distances,
-        # edit_distances_md=edit_distances_md,
-        ani_nm=ani_nm,
-        # ani_md=ani_md,
-        read_length=read_length,
-        read_gc_content=read_gc_content,
-        read_aligned_length=read_aligned_length,
-        mapping_quality=read_mapq,
-        read_names=set(read_names),
-        read_aln_score=read_aln_score,
-        tax_abund_aln=tax_abund_aln,
-        tax_abund_read=tax_abund_read,
-    )
+    results = list(filter(None, results))
+    data_df = pd.DataFrame([x.to_summary() for x in results])
     # prof.disable()
     # # print profiling output
     # stats = pstats.Stats(prof).strip_dirs().sort_stats("tottime")
     # stats.print_stats(5)  # top 10 rows
-    return data
+    return data_df
 
 
 class BamAlignment:
@@ -601,10 +615,19 @@ def process_bam(
         sys.exit(1)
 
     logging.info(f"Keeping {len(references):,} references")
-    params = zip([bam] * len(references), references)
-    try:
-        logging.info(f"Getting stats for each reference...")
+    if chunksize is not None:
+        c_size = chunksize
+    else:
+        c_size = calc_chunksize(
+            n_workers=threads, len_iterable=len(references), factor=4
+        )
 
+    ref_chunks = [references[i : i + c_size] for i in range(0, len(references), c_size)]
+    params = zip([bam] * len(ref_chunks), ref_chunks)
+    try:
+        logging.info(
+            f"Processing {len(ref_chunks):,} chunks of {c_size:,} references each"
+        )
         if is_debug():
             data = list(
                 map(
@@ -627,13 +650,6 @@ def process_bam(
                 initargs=([params, ref_lengths, scale],),
             )
 
-            if chunksize is not None:
-                c_size = chunksize
-            else:
-                c_size = calc_chunksize(
-                    n_workers=threads, len_iterable=len(references), factor=4
-                )
-
             data = list(
                 tqdm.tqdm(
                     p.imap_unordered(
@@ -646,9 +662,9 @@ def process_bam(
                             plots_dir=plots_dir,
                         ),
                         params,
-                        chunksize=c_size,
+                        chunksize=1,
                     ),
-                    total=len(references),
+                    total=len(ref_chunks),
                     leave=False,
                     ncols=80,
                     desc=f"References processed",
@@ -733,7 +749,9 @@ def filter_reference_BAM(
                 ncols=80,
                 desc="References processed",
             ):
-                for aln in samfile.fetch(reference=reference, multiple_iterators=False):
+                for aln in samfile.fetch(
+                    reference=reference, multiple_iterators=False, until_eof=True
+                ):
                     out_bam_file.write(
                         pysam.AlignedSegment.fromstring(aln.to_string(), header=header)
                     )
