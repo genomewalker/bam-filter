@@ -58,11 +58,9 @@ filterBAM only needs a BAM file. For a complete list of options:
 ```
 $ filterBAM --help
 
-usage: filterBAM [-h] [-t THREADS] [-p PREFIX] [-l MIN_READ_LENGTH] [-n MIN_READ_COUNT]
-                 [-b MIN_EXPECTED_BREADTH_RATIO] [-e MIN_NORM_ENTROPY] [-g MIN_NORM_GINI]
-                 [-B MIN_BREADTH] [-a MIN_READ_ANI] [-c MIN_COVERAGE_EVENNESS] [-m SORT_MEMORY] [-N]
-                 [--scale SCALE] [-r REFERENCE_LENGTHS] [--read-length-freqs] [--only-stats] [--plot]
-                 [--plot-dir PLOTS_DIR] [--only-stats-filtered] [--debug] [--version]
+usage: filterBAM [-h] [-t THREADS] [-p PREFIX] [-A MIN_READ_ANI] [-l MIN_READ_LENGTH] [-n MIN_READ_COUNT] [-b MIN_EXPECTED_BREADTH_RATIO] [-e MIN_NORM_ENTROPY] [-g MIN_NORM_GINI] [-B MIN_BREADTH]
+                 [-a MIN_AVG_READ_ANI] [-c MIN_COVERAGE_EVENNESS] [-m SORT_MEMORY] [-N] [--scale SCALE] [-r REFERENCE_LENGTHS] [--read-length-freqs] [--only-stats] [--plot] [--only-stats-filtered]
+                 [--chunk-size CHUNK_SIZE] [--debug] [--version]
                  bam
 
 A simple tool to calculate metrics from a BAM file and filter with uneven coverage.
@@ -76,6 +74,8 @@ optional arguments:
                         Number of threads to use (default: 1)
   -p PREFIX, --prefix PREFIX
                         Prefix used for the output files (default: None)
+  -A MIN_READ_ANI, --min-read-ani MIN_READ_ANI
+                        Minimum read ANI to keep a read (default: 90.0)
   -l MIN_READ_LENGTH, --min-read-length MIN_READ_LENGTH
                         Minimum read length (default: 30)
   -n MIN_READ_COUNT, --min-read-count MIN_READ_COUNT
@@ -88,24 +88,23 @@ optional arguments:
                         Minimum normalized Gini coefficient (default: auto)
   -B MIN_BREADTH, --min-breadth MIN_BREADTH
                         Minimum breadth (default: 0)
-  -a MIN_READ_ANI, --min-read-ani MIN_READ_ANI
+  -a MIN_AVG_READ_ANI, --min-avg-read-ani MIN_AVG_READ_ANI
                         Minimum average read ANI (default: 90.0)
   -c MIN_COVERAGE_EVENNESS, --min-coverage-evenness MIN_COVERAGE_EVENNESS
                         Minimum coverage evenness (default: 0)
   -m SORT_MEMORY, --sort-memory SORT_MEMORY
-                        Set maximum memory per thread for sorting; suffix K/M/G recognized (default:
-                        1G)
+                        Set maximum memory per thread for sorting; suffix K/M/G recognized (default: 1G)
   -N, --sort-by-name    Sort by read names (default: False)
-  --scale SCALE         Scale taxonomic abundance by this factor; suffix K/M recognized (default:
-                        1000000.0)
+  --scale SCALE         Scale taxonomic abundance by this factor; suffix K/M recognized (default: 1000000.0)
   -r REFERENCE_LENGTHS, --reference-lengths REFERENCE_LENGTHS
                         File with references lengths (default: None)
-  --read-length-freqs   Save a JSON file with the read length frequencies mapped to each reference
-                        (default: False)
+  --read-length-freqs   Save a JSON file with the read length frequencies mapped to each reference (default: False)
   --only-stats          Only produce statistics and skip filtering (default: False)
   --plot                Plot genome coverage plots (default: False)
   --only-stats-filtered
                         Only filter statistics and skip BAM filtering (default: False)
+  --chunk-size CHUNK_SIZE
+                        Chunk size for parallel processing (default: None)
   --debug               Print debug messages (default: False)
   --version             Print program version
 ```
