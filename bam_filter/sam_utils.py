@@ -14,12 +14,14 @@ from bam_filter.entropy import entropy, norm_entropy, gini_coeff, norm_gini_coef
 
 import pyranges as pr
 
+# import cProfile as profile
+import pstats
 
 import matplotlib.pyplot as plt
 
 log = logging.getLogger("my_logger")
 
-logging.getLogger("matplotlib").setLevel(logging.WARNING)
+
 sys.setrecursionlimit(10**6)
 
 # Function to calculate evenness of coverage
@@ -37,7 +39,11 @@ def coverage_evenness(coverage):
     # n = len(D2)
     # E = 1 - (n - sum(D2) / C) / N
     C = float(np.rint(np.mean(coverage)))
-    D2 = [x for x in coverage if x <= C]
+    D2 = coverage[coverage <= C]
+    # print(len(D2))
+    # D2 = [x for x in coverage if x <= C]
+    # print(len(D2))
+    # exit()
     if len(D2) == 0:  # pragma: no cover
         covEvenness = 1.0
     else:
@@ -86,13 +92,20 @@ def create_pyranges(reference, starts, ends, strands):
 
 
 def get_bam_stats(
-    params, ref_lengths=None, scale=1e6, plot=False, plots_dir="coverage-plots"
+    params,
+    ref_lengths=None,
+    min_read_ani=90.0,
+    scale=1e6,
+    plot=False,
+    plots_dir="coverage-plots",
 ):
     """
     Worker function per chromosome
     loop over a bam file and create tuple with lists containing metrics:
     two definitions of the edit distances to the reference genome scaled by aligned read length
     """
+    # prof = profile.Profile()
+    # prof.enable()
     bam, reference = params
     samfile = pysam.AlignmentFile(bam, "rb")
     edit_distances = []
@@ -120,34 +133,37 @@ def get_bam_stats(
     ends = []
     strands = []
     for aln in samfile.fetch(reference=reference, multiple_iterators=False):
-        n_alns += 1
-        if aln.has_tag("AS"):
-            read_aln_score.append(aln.get_tag("AS"))
-        else:
-            read_aln_score.append(np.nan)
+        ani_read = (1 - ((aln.get_tag("NM") / aln.infer_query_length()))) * 100
+        if ani_read >= min_read_ani:
+            n_alns += 1
+            if aln.has_tag("AS"):
+                read_aln_score.append(aln.get_tag("AS"))
+            else:
+                read_aln_score.append(np.nan)
 
-        if aln.has_tag("AS"):
-            edit_distances.append(aln.get_tag("NM"))
-            ani_nm.append((1 - ((aln.get_tag("NM") / aln.infer_query_length()))) * 100)
-        else:
-            edit_distances.append(np.nan)
-            ani_nm.append(np.nan)
+            if aln.has_tag("AS"):
+                edit_distances.append(aln.get_tag("NM"))
+                ani_nm.append(ani_read)
+            else:
+                edit_distances.append(np.nan)
+                ani_nm.append(np.nan)
 
-        read_gc_content.append(calc_gc_content(aln.query_sequence))
-        read_length.append(aln.infer_read_length())
-        read_aligned_length.append(aln.query_alignment_length)
-        read_mapq.append(aln.mapping_quality)
-        read_names.append(aln.query_name)
-        # check if strand is reverse
-        if aln.is_reverse:
-            strand = "-"
-        else:
-            strand = "+"
-        starts.append(aln.reference_start)
-        ends.append(aln.reference_end)
-        strands.append(strand)
+            read_gc_content.append(calc_gc_content(aln.query_sequence))
+            read_length.append(aln.infer_read_length())
+            read_aligned_length.append(aln.query_alignment_length)
+            read_mapq.append(aln.mapping_quality)
+            read_names.append(aln.query_name)
+            # check if strand is reverse
+            if aln.is_reverse:
+                strand = "-"
+            else:
+                strand = "+"
+            starts.append(aln.reference_start)
+            ends.append(aln.reference_end)
+            strands.append(strand)
 
     # get bases covered by reads pileup
+
     cov_pos_raw = [
         (pileupcolumn.pos, pileupcolumn.n)
         for pileupcolumn in samfile.pileup(
@@ -160,10 +176,13 @@ def get_bam_stats(
         )
     ]
     samfile.close()
+
     cov_pos = [i[1] for i in cov_pos_raw]
     # convert datafrane to pyranges
     ranges = create_pyranges(reference, starts, ends, strands)
-
+    if ranges.df.shape[0] == 0:
+        log.debug(f"No alignments found for {reference}")
+        return None
     ranges_raw = ranges.merge(strand=False)
     ranges = ranges_raw.lengths().to_list()
 
@@ -297,6 +316,10 @@ def get_bam_stats(
         tax_abund_aln=tax_abund_aln,
         tax_abund_read=tax_abund_read,
     )
+    # prof.disable()
+    # # print profiling output
+    # stats = pstats.Stats(prof).strip_dirs().sort_stats("tottime")
+    # stats.print_stats(5)  # top 10 rows
     return data
 
 
@@ -486,6 +509,7 @@ def process_bam(
     bam,
     threads=1,
     reference_lengths=None,
+    min_read_ani=90.0,
     min_read_count=10,
     scale=1e6,
     sort_memory="1G",
@@ -587,6 +611,7 @@ def process_bam(
                     functools.partial(
                         get_bam_stats,
                         ref_lengths=ref_lengths,
+                        min_read_ani=min_read_ani,
                         scale=scale,
                         plot=plot,
                         plots_dir=plots_dir,
@@ -615,6 +640,7 @@ def process_bam(
                         functools.partial(
                             get_bam_stats,
                             ref_lengths=ref_lengths,
+                            min_read_ani=min_read_ani,
                             scale=scale,
                             plot=plot,
                             plots_dir=plots_dir,
@@ -660,12 +686,12 @@ def filter_reference_BAM(
     """
     logging.info("Filtering stats...")
     logging.info(
-        f"min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_read_ani >= {filter_conditions['min_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} &  min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} & min_norm_entropy >= {filter_conditions['min_norm_entropy']} & min_norm_gini <= {filter_conditions['min_norm_gini']}"
+        f"min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_avg_read_ani >= {filter_conditions['min_avg_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} &  min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} & min_norm_entropy >= {filter_conditions['min_norm_entropy']} & min_norm_gini <= {filter_conditions['min_norm_gini']}"
     )
     df_filtered = df.loc[
         (df["n_reads"] >= filter_conditions["min_read_count"])
         & (df["read_length_mean"] >= filter_conditions["min_read_length"])
-        & (df["read_ani_mean"] >= filter_conditions["min_read_ani"])
+        & (df["read_ani_mean"] >= filter_conditions["min_avg_read_ani"])
         & (df["breadth_exp_ratio"] >= filter_conditions["min_expected_breadth_ratio"])
         & (df["breadth"] >= filter_conditions["min_breadth"])
         & (df["cov_evenness"] >= filter_conditions["min_coverage_evenness"])

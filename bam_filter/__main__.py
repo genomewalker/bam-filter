@@ -112,7 +112,7 @@ def main():
         "min_read_count": args.min_read_count,
         "min_expected_breadth_ratio": args.min_expected_breadth_ratio,
         "min_breadth": args.min_breadth,
-        "min_read_ani": args.min_read_ani,
+        "min_avg_read_ani": args.min_avg_read_ani,
         "min_coverage_evenness": args.min_coverage_evenness,
         "min_norm_entropy": min_norm_entropy,
         "min_norm_gini": min_norm_gini,
