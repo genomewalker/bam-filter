@@ -14,12 +14,14 @@ from bam_filter.entropy import entropy, norm_entropy, gini_coeff, norm_gini_coef
 
 import pyranges as pr
 
+# import cProfile as profile
+import pstats
 
 import matplotlib.pyplot as plt
 
 log = logging.getLogger("my_logger")
 
-logging.getLogger("matplotlib").setLevel(logging.WARNING)
+
 sys.setrecursionlimit(10**6)
 
 # Function to calculate evenness of coverage
@@ -37,7 +39,11 @@ def coverage_evenness(coverage):
     # n = len(D2)
     # E = 1 - (n - sum(D2) / C) / N
     C = float(np.rint(np.mean(coverage)))
-    D2 = [x for x in coverage if x <= C]
+    D2 = coverage[coverage <= C]
+    # print(len(D2))
+    # D2 = [x for x in coverage if x <= C]
+    # print(len(D2))
+    # exit()
     if len(D2) == 0:  # pragma: no cover
         covEvenness = 1.0
     else:
@@ -98,6 +104,8 @@ def get_bam_stats(
     loop over a bam file and create tuple with lists containing metrics:
     two definitions of the edit distances to the reference genome scaled by aligned read length
     """
+    # prof = profile.Profile()
+    # prof.enable()
     bam, reference = params
     samfile = pysam.AlignmentFile(bam, "rb")
     edit_distances = []
@@ -155,6 +163,7 @@ def get_bam_stats(
             strands.append(strand)
 
     # get bases covered by reads pileup
+
     cov_pos_raw = [
         (pileupcolumn.pos, pileupcolumn.n)
         for pileupcolumn in samfile.pileup(
@@ -167,11 +176,13 @@ def get_bam_stats(
         )
     ]
     samfile.close()
-    cov_pos = [i[1] for i in cov_pos_raw]
 
+    cov_pos = [i[1] for i in cov_pos_raw]
     # convert datafrane to pyranges
     ranges = create_pyranges(reference, starts, ends, strands)
-
+    if ranges.df.shape[0] == 0:
+        log.debug(f"No alignments found for {reference}")
+        return None
     ranges_raw = ranges.merge(strand=False)
     ranges = ranges_raw.lengths().to_list()
 
@@ -305,6 +316,10 @@ def get_bam_stats(
         tax_abund_aln=tax_abund_aln,
         tax_abund_read=tax_abund_read,
     )
+    # prof.disable()
+    # # print profiling output
+    # stats = pstats.Stats(prof).strip_dirs().sort_stats("tottime")
+    # stats.print_stats(5)  # top 10 rows
     return data
 
 
