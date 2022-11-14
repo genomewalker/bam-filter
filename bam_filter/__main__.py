@@ -13,9 +13,9 @@ see <https://www.gnu.org/licenses/>.
 
 
 import logging
-
+import pandas as pd
 from bam_filter.sam_utils import process_bam, filter_reference_BAM
-from bam_filter.utils import get_arguments, create_output_files, concat_df
+from bam_filter.utils import get_arguments, create_output_files, fast_flatten
 from bam_filter.entropy import find_knee
 import json
 import warnings
@@ -74,8 +74,8 @@ def main():
         plots_dir=out_files["coverage_plot_dir"],
         chunksize=args.chunk_size,
     )
-
-    data_df = concat_df(data)
+    data = fast_flatten(list(filter(None, data)))
+    data_df = pd.DataFrame([x.to_summary() for x in data])
 
     if args.read_length_freqs:
         lens = [x.get_read_length_freqs() for x in data]
@@ -153,7 +153,7 @@ def main():
             sort_memory=args.sort_memory,
             sort_by_name=args.sort_by_name,
         )
-    logging.info(f"ALL DONE.")
+    logging.info("ALL DONE.")
 
 
 if __name__ == "__main__":

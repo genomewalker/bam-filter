@@ -333,14 +333,12 @@ def get_bam_stats(
         )
         results.append(data)
     samfile.close()
-    results = list(filter(None, results))
-    data_df = pd.DataFrame([x.to_summary() for x in results])
     # prof.disable()
     # # print profiling output
     # stats = pstats.Stats(prof).strip_dirs().sort_stats("tottime")
     # stats.print_stats(5)  # top 10 rows
 
-    return data_df
+    return results
 
 
 class BamAlignment:
