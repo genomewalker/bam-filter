@@ -14,8 +14,8 @@ from bam_filter.entropy import entropy, norm_entropy, gini_coeff, norm_gini_coef
 
 import pyranges as pr
 
-import cProfile as profile
-import pstats
+# import cProfile as profile
+# import pstats
 
 import matplotlib.pyplot as plt
 
@@ -23,6 +23,7 @@ log = logging.getLogger("my_logger")
 
 
 sys.setrecursionlimit(10**6)
+
 
 # Function to calculate evenness of coverage
 def coverage_evenness(coverage):
