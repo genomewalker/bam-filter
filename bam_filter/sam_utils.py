@@ -624,14 +624,13 @@ def process_bam(
         sys.exit(1)
 
     logging.info(f"Keeping {len(references):,} references")
-    if (chunksize is not None) or ((len(references) // chunksize) < threads):
+
+    if (chunksize is not None) and ((len(references) // chunksize) > threads):
         c_size = chunksize
     else:
         c_size = calc_chunksize(
             n_workers=threads, len_iterable=len(references), factor=4
         )
-
-    logging.info(f"Using {c_size} chunks")
 
     ref_chunks = [references[i : i + c_size] for i in range(0, len(references), c_size)]
     params = zip([bam] * len(ref_chunks), ref_chunks)
