@@ -55,6 +55,10 @@ def get_summary(obj):
     return obj.to_summary()
 
 
+def get_lens(obj):
+    return obj.get_read_length_freqs()
+
+
 def main():
 
     logging.basicConfig(
@@ -102,7 +106,20 @@ def main():
     data_df = pd.DataFrame(data_df)
 
     if args.read_length_freqs:
-        lens = [x.get_read_length_freqs() for x in data]
+        logging.info("Calculating read length frequencies")
+        c_size = calc_chunksize(
+            n_workers=args.threads, len_iterable=len(data), factor=4
+        )
+        p = Pool(args.threads)
+        lens = list(
+            tqdm.tqdm(
+                p.imap(get_lens, data, chunksize=c_size),
+                total=len(data),
+                leave=False,
+                ncols=80,
+                desc="References processed",
+            )
+        )
         lens = json.dumps(lens, default=obj_dict, ensure_ascii=False, indent=4)
         with open(out_files["read_length_freqs"], "w", encoding="utf-8") as outfile:
             print(lens, file=outfile)
