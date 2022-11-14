@@ -141,6 +141,7 @@ def main():
             min_norm_gini, min_norm_entropy = find_knee(
                 data_df, out_plot_name=out_files["knee_plot"]
             )
+
             if min_norm_gini is None or min_norm_entropy is None:
                 logging.warning(
                     "Could not find knee in entropy plot. Disabling filtering by entropy/gini inequality."
@@ -152,6 +153,17 @@ def main():
                     "min_breadth": args.min_breadth,
                     "min_avg_read_ani": args.min_avg_read_ani,
                     "min_coverage_evenness": args.min_coverage_evenness,
+                }
+            else:
+                filter_conditions = {
+                    "min_read_length": args.min_read_length,
+                    "min_read_count": args.min_read_count,
+                    "min_expected_breadth_ratio": args.min_expected_breadth_ratio,
+                    "min_breadth": args.min_breadth,
+                    "min_avg_read_ani": args.min_avg_read_ani,
+                    "min_coverage_evenness": args.min_coverage_evenness,
+                    "min_norm_entropy": min_norm_entropy,
+                    "min_norm_gini": min_norm_gini,
                 }
         else:
             min_norm_gini = 0.5
@@ -181,6 +193,7 @@ def main():
             "min_norm_entropy": min_norm_entropy,
             "min_norm_gini": min_norm_gini,
         }
+
     if args.only_stats:
         logging.info("Skipping filtering...")
     else:
