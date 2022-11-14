@@ -15,10 +15,12 @@ see <https://www.gnu.org/licenses/>.
 import logging
 import pandas as pd
 from bam_filter.sam_utils import process_bam, filter_reference_BAM
-from bam_filter.utils import get_arguments, create_output_files, fast_flatten
+from bam_filter.utils import get_arguments, create_output_files, fast_flatten, concat_df
 from bam_filter.entropy import find_knee
 import json
 import warnings
+from multiprocessing import Pool
+import tqdm
 
 log = logging.getLogger("my_logger")
 
@@ -41,6 +43,10 @@ def handle_warning(message, category, filename, lineno, file=None, line=None):
 
 def obj_dict(obj):
     return obj.__dict__
+
+
+def get_summary(obj):
+    return obj.to_summary()
 
 
 def main():
@@ -74,8 +80,19 @@ def main():
         plots_dir=out_files["coverage_plot_dir"],
         chunksize=args.chunk_size,
     )
+    logging.info("Reducing results to a single dataframe")
     data = fast_flatten(list(filter(None, data)))
-    data_df = pd.DataFrame([x.to_summary() for x in data])
+    p = Pool(args.threads)
+    data_df = list(
+        tqdm.tqdm(
+            p.imap(get_summary, data),
+            total=len(data),
+            leave=False,
+            ncols=80,
+            desc="References processed",
+        )
+    )
+    data_df = pd.DataFrame(data_df)
 
     if args.read_length_freqs:
         lens = [x.get_read_length_freqs() for x in data]
