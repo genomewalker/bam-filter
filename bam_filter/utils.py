@@ -46,7 +46,7 @@ def check_values(val, minval, maxval, parser, var):
 
 
 def check_values_auto(val, minval, maxval, parser, var):
-    if val == "auto":
+    if val == "auto" or val is None or val == "None":
         return val
     else:
         # check if float
@@ -141,7 +141,7 @@ defaults = {
     "min_read_count": 10,
     "min_expected_breadth_ratio": 0.5,
     "min_norm_entropy": "auto",
-    "min_norm_gini": "auto",
+    "min_norm_gini": None,
     "min_avg_read_ani": 90.0,
     "min_read_ani": 90.0,
     "min_breadth": 0,
@@ -290,7 +290,9 @@ def get_arguments(argv=None):
         "-a",
         "--min-avg-read-ani",
         type=lambda x: float(
-            check_values(x, minval=0, maxval=100, parser=parser, var="--min-avg-read-ani")
+            check_values(
+                x, minval=0, maxval=100, parser=parser, var="--min-avg-read-ani"
+            )
         ),
         default=defaults["min_avg_read_ani"],
         dest="min_avg_read_ani",

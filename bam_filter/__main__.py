@@ -86,35 +86,60 @@ def main():
     logging.info(f"Writing reference statistics to {out_files['stats']}")
     data_df.to_csv(out_files["stats"], sep="\t", index=False, compression="gzip")
 
-    if args.min_norm_entropy == "auto" or args.min_norm_gini == "auto":
+    if args.min_norm_entropy is None or args.min_norm_gini is None:
+        filter_conditions = {
+            "min_read_length": args.min_read_length,
+            "min_read_count": args.min_read_count,
+            "min_expected_breadth_ratio": args.min_expected_breadth_ratio,
+            "min_breadth": args.min_breadth,
+            "min_avg_read_ani": args.min_avg_read_ani,
+            "min_coverage_evenness": args.min_coverage_evenness,
+        }
+    elif args.min_norm_entropy == "auto" or args.min_norm_gini == "auto":
         if data_df.shape[0] > 1:
             min_norm_gini, min_norm_entropy = find_knee(
                 data_df, out_plot_name=out_files["knee_plot"]
             )
-            if min_norm_gini is None:
-                min_norm_gini, min_norm_entropy = (
-                    args.min_norm_gini,
-                    args.min_norm_entropy,
+            if min_norm_gini is None or min_norm_entropy is None:
+                logging.warning(
+                    "Could not find knee in entropy plot. Disabling filtering by entropy/gini inequality."
                 )
+                filter_conditions = {
+                    "min_read_length": args.min_read_length,
+                    "min_read_count": args.min_read_count,
+                    "min_expected_breadth_ratio": args.min_expected_breadth_ratio,
+                    "min_breadth": args.min_breadth,
+                    "min_avg_read_ani": args.min_avg_read_ani,
+                    "min_coverage_evenness": args.min_coverage_evenness,
+                }
         else:
             min_norm_gini = 0.5
             min_norm_entropy = 0.75
             logging.warning(
                 f"There's only one genome. Using min_norm_gini={min_norm_gini} and min_norm_entropy={min_norm_entropy}. Please check the results."
             )
+            filter_conditions = {
+                "min_read_length": args.min_read_length,
+                "min_read_count": args.min_read_count,
+                "min_expected_breadth_ratio": args.min_expected_breadth_ratio,
+                "min_breadth": args.min_breadth,
+                "min_avg_read_ani": args.min_avg_read_ani,
+                "min_coverage_evenness": args.min_coverage_evenness,
+                "min_norm_entropy": min_norm_entropy,
+                "min_norm_gini": min_norm_gini,
+            }
     else:
         min_norm_gini, min_norm_entropy = args.min_norm_gini, args.min_norm_entropy
-
-    filter_conditions = {
-        "min_read_length": args.min_read_length,
-        "min_read_count": args.min_read_count,
-        "min_expected_breadth_ratio": args.min_expected_breadth_ratio,
-        "min_breadth": args.min_breadth,
-        "min_avg_read_ani": args.min_avg_read_ani,
-        "min_coverage_evenness": args.min_coverage_evenness,
-        "min_norm_entropy": min_norm_entropy,
-        "min_norm_gini": min_norm_gini,
-    }
+        filter_conditions = {
+            "min_read_length": args.min_read_length,
+            "min_read_count": args.min_read_count,
+            "min_expected_breadth_ratio": args.min_expected_breadth_ratio,
+            "min_breadth": args.min_breadth,
+            "min_avg_read_ani": args.min_avg_read_ani,
+            "min_coverage_evenness": args.min_coverage_evenness,
+            "min_norm_entropy": min_norm_entropy,
+            "min_norm_gini": min_norm_gini,
+        }
     if args.only_stats:
         logging.info("Skipping filtering...")
     else:
