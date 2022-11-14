@@ -84,6 +84,7 @@ def main():
         threads=args.threads,
         reference_lengths=args.reference_lengths,
         min_read_count=args.min_read_count,
+        min_read_ani=args.min_read_ani,
         scale=args.scale,
         sort_memory=args.sort_memory,
         plot=args.plot,

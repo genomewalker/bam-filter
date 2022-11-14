@@ -170,7 +170,7 @@ def get_bam_stats(
                 ends.append(aln.reference_end)
                 strands.append(strand)
 
-            cov_np[aln.reference_start : aln.reference_end] += 1
+                cov_np[aln.reference_start : aln.reference_end] += 1
 
         # get bases covered by reads pileup
 
