@@ -586,7 +586,7 @@ def process_bam(
                 str(threads),
             )
 
-        logging.info(f"Reloading BAM file")
+        logging.info("Reloading BAM file")
         samfile = pysam.AlignmentFile(
             bam, "rb"
         )  # Need to reload the samfile after creating index
