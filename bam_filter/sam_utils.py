@@ -99,6 +99,7 @@ def get_bam_stats(
     scale=1e6,
     plot=False,
     plots_dir="coverage-plots",
+    read_length_freqs=False,
 ):
     """
     Worker function per chromosome
@@ -333,12 +334,17 @@ def get_bam_stats(
         )
         results.append(data)
     samfile.close()
+    results = list(filter(None, results))
+    data_df = pd.DataFrame([x.to_summary() for x in results])
+    if read_length_freqs:
+        read_lens = [x.get_read_length_freqs for x in results]
+        return data_df, read_lens
+    else:
+        return data_df, None
     # prof.disable()
     # # print profiling output
     # stats = pstats.Stats(prof).strip_dirs().sort_stats("tottime")
     # stats.print_stats(5)  # top 10 rows
-
-    return results
 
 
 class BamAlignment:
@@ -534,6 +540,7 @@ def process_bam(
     plot=False,
     plots_dir="coverage-plots",
     chunksize=None,
+    read_length_freqs=False,
 ):
     """
     Processing function: calls pool of worker functions
@@ -638,7 +645,7 @@ def process_bam(
             f"Processing {len(ref_chunks):,} chunks of {c_size:,} references each"
         )
         if is_debug():
-            data = list(
+            data, lens = list(
                 map(
                     functools.partial(
                         get_bam_stats,
@@ -647,6 +654,7 @@ def process_bam(
                         scale=scale,
                         plot=plot,
                         plots_dir=plots_dir,
+                        read_length_freqs=read_length_freqs,
                     ),
                     params,
                 )

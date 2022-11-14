@@ -89,37 +89,16 @@ def main():
         plot=args.plot,
         plots_dir=out_files["coverage_plot_dir"],
         chunksize=args.chunk_size,
+        read_length_freqs=args.read_length_freqs,
     )
     logging.info("Reducing results to a single dataframe")
-    data = fast_flatten(list(filter(None, data)))
-    c_size = calc_chunksize(n_workers=args.threads, len_iterable=len(data), factor=4)
-    p = Pool(args.threads)
-    data_df = list(
-        tqdm.tqdm(
-            p.imap(get_summary, data, chunksize=c_size),
-            total=len(data),
-            leave=False,
-            ncols=80,
-            desc="References processed",
-        )
-    )
-    data_df = pd.DataFrame(data_df)
+    data_df = [x[0] for x in data]
+    # data_df = fast_flatten(list(filter(None, data_df)))
+    data_df = concat_df(data_df)
 
     if args.read_length_freqs:
         logging.info("Calculating read length frequencies")
-        c_size = calc_chunksize(
-            n_workers=args.threads, len_iterable=len(data), factor=4
-        )
-        p = Pool(args.threads)
-        lens = list(
-            tqdm.tqdm(
-                p.imap(get_lens, data, chunksize=c_size),
-                total=len(data),
-                leave=False,
-                ncols=80,
-                desc="References processed",
-            )
-        )
+        lens = [x[1] for x in data]
         lens = json.dumps(lens, default=obj_dict, ensure_ascii=False, indent=4)
         with open(out_files["read_length_freqs"], "w", encoding="utf-8") as outfile:
             print(lens, file=outfile)
