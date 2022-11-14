@@ -134,7 +134,7 @@ def get_bam_stats(
         starts = []
         ends = []
         strands = []
-        for aln in samfile.fetch(reference=reference, multiple_iterators=True):
+        for aln in samfile.fetch(reference=reference, multiple_iterators=False):
             ani_read = (1 - ((aln.get_tag("NM") / aln.infer_query_length()))) * 100
             if ani_read >= min_read_ani:
                 n_alns += 1
@@ -624,12 +624,14 @@ def process_bam(
         sys.exit(1)
 
     logging.info(f"Keeping {len(references):,} references")
-    if chunksize is not None:
+    if (chunksize is not None) or ((len(references) // chunksize) < threads):
         c_size = chunksize
     else:
         c_size = calc_chunksize(
             n_workers=threads, len_iterable=len(references), factor=4
         )
+
+    logging.info(f"Using {c_size} chunks")
 
     ref_chunks = [references[i : i + c_size] for i in range(0, len(references), c_size)]
     params = zip([bam] * len(ref_chunks), ref_chunks)
