@@ -15,7 +15,13 @@ see <https://www.gnu.org/licenses/>.
 import logging
 import pandas as pd
 from bam_filter.sam_utils import process_bam, filter_reference_BAM
-from bam_filter.utils import get_arguments, create_output_files, fast_flatten, concat_df
+from bam_filter.utils import (
+    get_arguments,
+    create_output_files,
+    fast_flatten,
+    concat_df,
+    calc_chunksize,
+)
 from bam_filter.entropy import find_knee
 import json
 import warnings
@@ -82,10 +88,11 @@ def main():
     )
     logging.info("Reducing results to a single dataframe")
     data = fast_flatten(list(filter(None, data)))
+    c_size = calc_chunksize(n_workers=args.threads, len_iterable=len(data), factor=4)
     p = Pool(args.threads)
     data_df = list(
         tqdm.tqdm(
-            p.imap(get_summary, data),
+            p.imap(get_summary, data, chunksize=c_size),
             total=len(data),
             leave=False,
             ncols=80,
