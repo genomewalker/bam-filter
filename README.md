@@ -58,8 +58,11 @@ filterBAM only needs a BAM file. For a complete list of options:
 ```
 $ filterBAM --help
 
-usage: filterBAM [-h] [-t THREADS] [-p PREFIX] [-A MIN_READ_ANI] [-l MIN_READ_LENGTH] [-n MIN_READ_COUNT] [-b MIN_EXPECTED_BREADTH_RATIO] [-e MIN_NORM_ENTROPY] [-g MIN_NORM_GINI] [-B MIN_BREADTH]
-                 [-a MIN_AVG_READ_ANI] [-c MIN_COVERAGE_EVENNESS] [-m SORT_MEMORY] [-N] [--scale SCALE] [-r REFERENCE_LENGTHS] [--read-length-freqs] [--only-stats] [--plot] [--only-stats-filtered]
+usage: filterBAM [-h] [-t THREADS] [-p PREFIX] [-A MIN_READ_ANI] [-l MIN_READ_LENGTH]
+                 [-n MIN_READ_COUNT] [-b MIN_EXPECTED_BREADTH_RATIO] [-e MIN_NORM_ENTROPY]
+                 [-g MIN_NORM_GINI] [-B MIN_BREADTH] [-a MIN_AVG_READ_ANI] [-c MIN_COVERAGE_EVENNESS]
+                 [-m SORT_MEMORY] [-N] [--scale SCALE] [-r REFERENCE_LENGTHS] [--read-length-freqs]
+                 [--read-hits-count] [--only-stats] [--plot] [--only-stats-filtered]
                  [--chunk-size CHUNK_SIZE] [--debug] [--version]
                  bam
 
@@ -85,7 +88,7 @@ optional arguments:
   -e MIN_NORM_ENTROPY, --min-normalized-entropy MIN_NORM_ENTROPY
                         Minimum normalized entropy (default: auto)
   -g MIN_NORM_GINI, --min-normalized-gini MIN_NORM_GINI
-                        Minimum normalized Gini coefficient (default: auto)
+                        Minimum normalized Gini coefficient (default: None)
   -B MIN_BREADTH, --min-breadth MIN_BREADTH
                         Minimum breadth (default: 0)
   -a MIN_AVG_READ_ANI, --min-avg-read-ani MIN_AVG_READ_ANI
@@ -93,12 +96,17 @@ optional arguments:
   -c MIN_COVERAGE_EVENNESS, --min-coverage-evenness MIN_COVERAGE_EVENNESS
                         Minimum coverage evenness (default: 0)
   -m SORT_MEMORY, --sort-memory SORT_MEMORY
-                        Set maximum memory per thread for sorting; suffix K/M/G recognized (default: 1G)
+                        Set maximum memory per thread for sorting; suffix K/M/G recognized (default:
+                        1G)
   -N, --sort-by-name    Sort by read names (default: False)
-  --scale SCALE         Scale taxonomic abundance by this factor; suffix K/M recognized (default: 1000000.0)
+  --scale SCALE         Scale taxonomic abundance by this factor; suffix K/M recognized (default:
+                        1000000.0)
   -r REFERENCE_LENGTHS, --reference-lengths REFERENCE_LENGTHS
                         File with references lengths (default: None)
-  --read-length-freqs   Save a JSON file with the read length frequencies mapped to each reference (default: False)
+  --read-length-freqs   Save a JSON file with the read length frequencies mapped to each reference
+                        (default: False)
+  --read-hits-count     Save a TSV file with the read hits frequencies mapped to each reference
+                        (default: False)
   --only-stats          Only produce statistics and skip filtering (default: False)
   --plot                Plot genome coverage plots (default: False)
   --only-stats-filtered

@@ -99,11 +99,27 @@ def main():
     data_df = concat_df(data_df)
 
     if args.read_length_freqs:
-        logging.info("Calculating read length frequencies")
+        logging.info("Calculating read length frequencies...")
         lens = [x[1] for x in data]
         lens = json.dumps(lens, default=obj_dict, ensure_ascii=False, indent=4)
         with open(out_files["read_length_freqs"], "w", encoding="utf-8") as outfile:
             print(lens, file=outfile)
+
+    if args.read_hits_count:
+        logging.info("Calculating read hits counts...")
+        hits = [x[2] for x in data]
+        # merge dicts and sum values
+        hits = {k: sum(d[k] for d in hits) for k in set().union(*hits)}
+        # convert dict to dataframe
+        hits = (
+            pd.DataFrame.from_dict(hits, orient="index", columns=["count"])
+            .rename_axis("read")
+            .reset_index()
+        )
+
+        hits.to_csv(
+            out_files["read_hits_count"], sep="\t", index=False, compression="gzip"
+        )
 
     logging.info(f"Writing reference statistics to {out_files['stats']}")
     data_df.to_csv(out_files["stats"], sep="\t", index=False, compression="gzip")
