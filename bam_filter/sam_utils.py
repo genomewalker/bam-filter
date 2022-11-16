@@ -338,6 +338,11 @@ def get_bam_stats(
     samfile.close()
     results = list(filter(None, results))
     data_df = pd.DataFrame([x.to_summary() for x in results])
+    read_hits = (
+        pd.DataFrame.from_dict(read_hits, orient="index", columns=["count"])
+        .rename_axis("read_id")
+        .reset_index()
+    )
     if read_length_freqs:
         read_lens = [x.get_read_length_freqs for x in results]
         return data_df, read_lens, read_hits
