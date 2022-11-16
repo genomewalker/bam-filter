@@ -170,6 +170,7 @@ help_msg = {
     "sort_memory": "Set maximum memory per thread for sorting; suffix K/M/G recognized",
     "scale": "Scale taxonomic abundance by this factor; suffix K/M recognized",
     "read_length_freqs": "Save a JSON file with the read length frequencies mapped to each reference",
+    "read_hits_count": "Save a TSV file with the read hits frequencies mapped to each reference",
     "only_stats": "Only produce statistics and skip filtering",
     "only_stats_filtered": "Only filter statistics and skip BAM filtering",
     "plot": "Plot genome coverage plots",
@@ -348,6 +349,12 @@ def get_arguments(argv=None):
         help=help_msg["read_length_freqs"],
     )
     parser.add_argument(
+        "--read-hits-count",
+        dest="read_hits_count",
+        action="store_true",
+        help=help_msg["read_hits_count"],
+    )
+    parser.add_argument(
         "--only-stats",
         dest="only_stats",
         action="store_true",
@@ -516,6 +523,7 @@ def create_output_files(prefix, bam):
         "bam_filtered_tmp": f"{prefix}.filtered.tmp.bam",
         "bam_filtered": f"{prefix}.filtered.bam",
         "read_length_freqs": f"{prefix}_read-length-freqs.json",
+        "read_hits_count": f"{prefix}_read-hits-count.tsv.gz",
         "knee_plot": f"{prefix}_knee-plot.png",
         "coverage_plot_dir": f"{prefix}_coverage-plots",
     }

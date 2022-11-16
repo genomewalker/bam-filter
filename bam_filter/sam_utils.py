@@ -11,7 +11,7 @@ import logging
 import warnings
 from bam_filter.utils import is_debug, calc_chunksize, initializer
 from bam_filter.entropy import entropy, norm_entropy, gini_coeff, norm_gini_coeff
-
+from collections import Counter, defaultdict
 import pyranges as pr
 
 # import cProfile as profile
@@ -138,12 +138,14 @@ def get_bam_stats(
         ends = []
         strands = []
         cov_np = np.zeros(samfile.get_reference_length(reference), dtype=int)
+        read_hits = defaultdict(int)
         for aln in samfile.fetch(
             contig=reference, multiple_iterators=False, until_eof=False
         ):
             ani_read = (1 - ((aln.get_tag("NM") / aln.infer_query_length()))) * 100
             if ani_read >= min_read_ani:
                 n_alns += 1
+                read_hits[aln.query_name] += 1
                 if aln.has_tag("AS"):
                     read_aln_score.append(aln.get_tag("AS"))
                 else:
@@ -338,9 +340,9 @@ def get_bam_stats(
     data_df = pd.DataFrame([x.to_summary() for x in results])
     if read_length_freqs:
         read_lens = [x.get_read_length_freqs for x in results]
-        return data_df, read_lens
+        return data_df, read_lens, read_hits
     else:
-        return data_df, None
+        return data_df, None, read_hits
     # prof.disable()
     # # print profiling output
     # stats = pstats.Stats(prof).strip_dirs().sort_stats("tottime")
@@ -645,7 +647,7 @@ def process_bam(
             f"Processing {len(ref_chunks):,} chunks of {c_size:,} references each"
         )
         if is_debug():
-            data, lens = list(
+            data = list(
                 map(
                     functools.partial(
                         get_bam_stats,
