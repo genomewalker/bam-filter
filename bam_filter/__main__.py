@@ -27,6 +27,7 @@ import json
 import warnings
 from multiprocessing import Pool
 import tqdm
+from collections import Counter
 
 log = logging.getLogger("my_logger")
 
@@ -108,8 +109,10 @@ def main():
     if args.read_hits_count:
         logging.info("Calculating read hits counts...")
         hits = [x[2] for x in data]
+        print(len(hits))
+        exit()
         # merge dicts and sum values
-        hits = {k: sum(d[k] for d in hits) for k in set().union(*hits)}
+        hits = sum(map(Counter, hits), Counter())
         # convert dict to dataframe
         hits = (
             pd.DataFrame.from_dict(hits, orient="index", columns=["count"])
