@@ -111,7 +111,7 @@ def get_bam_stats(
     bam, references = params
     results = []
     samfile = pysam.AlignmentFile(bam, "rb")
-
+    read_hits = defaultdict(int)
     for reference in references:
         edit_distances = []
         # edit_distances_md = []
@@ -138,7 +138,7 @@ def get_bam_stats(
         ends = []
         strands = []
         cov_np = np.zeros(samfile.get_reference_length(reference), dtype=int)
-        read_hits = defaultdict(int)
+
         for aln in samfile.fetch(
             contig=reference, multiple_iterators=False, until_eof=False
         ):
