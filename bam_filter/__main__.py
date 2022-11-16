@@ -109,8 +109,7 @@ def main():
     if args.read_hits_count:
         logging.info("Calculating read hits counts...")
         hits = [x[2] for x in data]
-        print(len(hits))
-        exit()
+
         # merge dicts and sum values
         hits = sum(map(Counter, hits), Counter())
         # convert dict to dataframe
