@@ -115,6 +115,7 @@ def main():
             pd.DataFrame.from_dict(hits, orient="index", columns=["count"])
             .rename_axis("read")
             .reset_index()
+            .sort_values(by="count", ascending=False)
         )
 
         hits.to_csv(
