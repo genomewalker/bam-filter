@@ -110,17 +110,10 @@ def main():
         logging.info("Calculating read hits counts...")
         hits = [x[2] for x in data]
 
+        hits = concat_df(hits)
         # merge dicts and sum values
-        hits = sum(map(Counter, hits), Counter())
-        # convert dict to dataframe
-        hits = (
-            pd.DataFrame.from_dict(hits, orient="index", columns=["count"])
-            .rename_axis("read")
-            .reset_index()
-            .sort_values(by="count", ascending=False)
-        )
-
-        hits.to_csv(
+        hits = hits.groupby(["read_id"]).sum().reset_index()
+        hits.sort_values("count", ascending=False).to_csv(
             out_files["read_hits_count"], sep="\t", index=False, compression="gzip"
         )
 
