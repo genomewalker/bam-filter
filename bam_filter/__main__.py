@@ -113,7 +113,7 @@ def main():
         hits = concat_df(hits)
         # merge dicts and sum values
         hits = hits.groupby(["read_id"]).sum().reset_index()
-        hits.to_csv(
+        hits.sort_values("count", ascending=False).to_csv(
             out_files["read_hits_count"], sep="\t", index=False, compression="gzip"
         )
 
