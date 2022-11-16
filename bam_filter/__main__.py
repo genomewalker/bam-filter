@@ -28,6 +28,7 @@ import warnings
 from multiprocessing import Pool
 import tqdm
 from collections import Counter
+from functools import reduce
 
 log = logging.getLogger("my_logger")
 
@@ -110,10 +111,19 @@ def main():
         logging.info("Calculating read hits counts...")
         hits = [x[2] for x in data]
 
-        hits = concat_df(hits)
         # merge dicts and sum values
-        hits = hits.groupby(["read_id"]).sum().reset_index()
-        hits.sort_values("count", ascending=False).to_csv(
+        hits = reduce(lambda x, y: x.update(y) or x, (Counter(dict(x)) for x in hits))
+        # hits = sum(map(Counter, hits), Counter())
+
+        # convert dict to dataframe
+        hits = (
+            pd.DataFrame.from_dict(hits, orient="index", columns=["count"])
+            .rename_axis("read")
+            .reset_index()
+            .sort_values(by="count", ascending=False)
+        )
+
+        hits.to_csv(
             out_files["read_hits_count"], sep="\t", index=False, compression="gzip"
         )
 
