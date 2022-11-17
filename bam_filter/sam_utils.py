@@ -194,7 +194,7 @@ def get_bam_stats(
         ranges = create_pyranges(reference, starts, ends, strands)
         if ranges.df.shape[0] == 0:
             log.debug(f"No alignments found for {reference}")
-            return None
+            return None, None, read_hits
         ranges_raw = ranges.merge(strand=False)
         ranges = ranges_raw.lengths().to_list()
 
