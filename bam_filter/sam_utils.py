@@ -143,9 +143,6 @@ def get_bam_stats(
             contig=reference, multiple_iterators=False, until_eof=False
         ):
             ani_read = (1 - ((aln.get_tag("NM") / aln.infer_query_length()))) * 100
-            if aln.query_name == "M_A00706:52:HJYNKDSXX:1:1101:30246:1485":
-                print(ani_read)
-                exit()
             if ani_read >= min_read_ani:
                 n_alns += 1
                 read_hits[aln.query_name] += 1
@@ -632,7 +629,7 @@ def process_bam(
     references = [
         chrom.contig
         for chrom in samfile.get_index_statistics()
-        if chrom.mapped > min_read_count
+        if chrom.mapped >= min_read_count
     ]
 
     if len(references) == 0:
@@ -647,7 +644,6 @@ def process_bam(
         c_size = calc_chunksize(
             n_workers=threads, len_iterable=len(references), factor=4
         )
-    references = ["IMGVR_UViG_2710264778_000001"]
     ref_chunks = [references[i : i + c_size] for i in range(0, len(references), c_size)]
     params = zip([bam] * len(ref_chunks), ref_chunks)
     try:
