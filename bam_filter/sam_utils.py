@@ -647,7 +647,7 @@ def process_bam(
         c_size = calc_chunksize(
             n_workers=threads, len_iterable=len(references), factor=4
         )
-
+    references = ["IMGVR_UViG_2710264778_000001"]
     ref_chunks = [references[i : i + c_size] for i in range(0, len(references), c_size)]
     params = zip([bam] * len(ref_chunks), ref_chunks)
     try:
