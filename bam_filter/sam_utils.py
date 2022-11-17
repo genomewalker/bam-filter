@@ -143,6 +143,9 @@ def get_bam_stats(
             contig=reference, multiple_iterators=False, until_eof=False
         ):
             ani_read = (1 - ((aln.get_tag("NM") / aln.infer_query_length()))) * 100
+            if aln.query_name == "M_A00706:52:HJYNKDSXX:1:1101:30246:1485":
+                print("ani_read")
+                exit()
             if ani_read >= min_read_ani:
                 n_alns += 1
                 read_hits[aln.query_name] += 1
