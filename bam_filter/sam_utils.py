@@ -34,7 +34,7 @@ def get_tad(cov, trim_min=10, trim_max=90):
     ]
 
     if sum(cov) == 0:
-        return 0, None
+        return 0, 0
     else:
         return sum(cov) / len(cov), len(cov)
 
