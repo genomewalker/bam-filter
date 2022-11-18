@@ -34,9 +34,9 @@ def get_tad(cov, trim_min=10, trim_max=90):
     ]
 
     if sum(cov) == 0:
-        return 0
+        return 0, None
     else:
-        return sum(cov) / len(cov)
+        return sum(cov) / len(cov), len(cov)
 
 
 # Function to calculate evenness of coverage
@@ -214,7 +214,7 @@ def get_bam_stats(
         if trim_ends > 0:
             cov_np = cov_np[trim_ends:-trim_ends]
 
-        mean_coverage_trunc = get_tad(
+        mean_coverage_trunc, mean_coverage_trunc_len = get_tad(
             cov_np,
             trim_min=10,
             trim_max=90,
@@ -261,6 +261,23 @@ def get_bam_stats(
         tax_abund_aln = round((n_alns / reference_length) * scale)
         tax_abund_read = round((len(set(read_names)) / reference_length) * scale)
 
+        # Using the trimmed mean to estimate number of reads that map to the reference
+        # This is to avoid the issue of having a very high coverage region that
+        # skews the mean coverage
+        # C = LN / G
+        # • C stands for coverage
+        # • G is the haploid genome length
+        # • L is the read length
+        # • N is the number of reads
+        #
+        if mean_coverage_trunc_len > 0 and mean_coverage_trunc > 0:
+            n_reads_tad = round(
+                (reference_length * mean_coverage_trunc) / np.mean(read_length)
+            )
+            tax_abund_tad = round((n_reads_tad / mean_coverage_trunc_len) * scale)
+        else:
+            n_reads_tad = 0
+            tax_abund_tad = 0
         # Analyse site distribution
         n_sites = len(cov_pos)
         genome_length = bam_reference_length
@@ -283,6 +300,7 @@ def get_bam_stats(
         log.debug(f"Bases covered: {bases_covered:,}")
         log.debug(f"Mean coverage: {mean_coverage:.2f}")
         log.debug(f"Mean coverage (truncated): {mean_coverage_trunc:.2f}")
+        log.debug(f"Reference length (truncated): {mean_coverage_trunc_len:.2f}")
         log.debug(f"Mean coverage covered: {mean_coverage_covered:.2f}")
         log.debug(f"Max covered bases: {max_covered_bases:,}")
         log.debug(f"Mean covered bases: {mean_covered_bases:.2f}")
@@ -303,6 +321,8 @@ def get_bam_stats(
         log.debug(f"GC content: {gc_content:.2f}")
         log.debug(f"Taxonomic abundance (alns): {tax_abund_aln:.2f}")
         log.debug(f"Taxonomic abundance (reads): {tax_abund_read:.2f}")
+        log.debug(f"Taxonomic abundance (TAD): {tax_abund_tad:.2f}")
+        log.debug(f"Number of reads (TAD): {n_reads_tad:,}")
         if plot:
             fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
             # infer number of bins using Freedman-Diaconis rule
@@ -338,6 +358,7 @@ def get_bam_stats(
             bam_reference_length=bam_reference_length,
             mean_coverage=mean_coverage,
             mean_coverage_trunc=mean_coverage_trunc,
+            mean_coverage_trunc_len=mean_coverage_trunc_len,
             mean_coverage_covered=mean_coverage_covered,
             bases_covered=bases_covered,
             max_covered_bases=max_covered_bases,
@@ -366,6 +387,8 @@ def get_bam_stats(
             read_aln_score=read_aln_score,
             tax_abund_aln=tax_abund_aln,
             tax_abund_read=tax_abund_read,
+            tax_abund_tad=tax_abund_tad,
+            n_reads_tad=n_reads_tad,
         )
         results.append(data)
     samfile.close()
@@ -409,6 +432,7 @@ class BamAlignment:
         mean_covered_bases,
         mean_coverage,
         mean_coverage_trunc,
+        mean_coverage_trunc_len,
         mean_coverage_covered,
         reference_length,
         bam_reference_length,
@@ -428,6 +452,8 @@ class BamAlignment:
         read_aln_score,
         tax_abund_aln,
         tax_abund_read,
+        tax_abund_tad,
+        n_reads_tad,
     ):
         self.reference = reference
         self.n_alns = n_alns
@@ -445,6 +471,7 @@ class BamAlignment:
         self.mean_covered_bases = mean_covered_bases
         self.mean_coverage = mean_coverage
         self.mean_coverage_trunc = mean_coverage_trunc
+        self.mean_coverage_trunc_len = mean_coverage_trunc_len
         self.mean_coverage_covered = mean_coverage_covered
         self.reference_length = reference_length
         self.bam_reference_length = bam_reference_length
@@ -463,6 +490,8 @@ class BamAlignment:
         self.read_names = read_names
         self.tax_abund_aln = tax_abund_aln
         self.tax_abund_read = tax_abund_read
+        self.tax_abund_tad = tax_abund_tad
+        self.n_reads_tad = n_reads_tad
         # function to convert class to dict
 
     def as_dict(self):
@@ -484,6 +513,7 @@ class BamAlignment:
             "mean_covered_bases": self.mean_covered_bases,
             "mean_coverage": self.mean_coverage,
             "mean_coverage_trunc": self.mean_coverage_trunc,
+            "mean_coverage_trunc_len": self.mean_coverage_trunc_len,
             "mean_coverage_covered": self.mean_coverage_covered,
             "reference_length": self.reference_length,
             "breadth": self.breadth,
@@ -500,6 +530,8 @@ class BamAlignment:
             "cov_evenness": self.cov_evenness,
             "tax_abund_read": self.tax_abund_read,
             "tax_abund_aln": self.tax_abund_aln,
+            "tax_abund_tad": self.tax_abund_tad,
+            "n_reads_tad": self.n_reads_tad,
         }
 
     def to_summary(self):
@@ -544,6 +576,7 @@ class BamAlignment:
             "mean_covered_bases": self.mean_covered_bases,
             "coverage_mean": self.mean_coverage,
             "coverage_mean_trunc": self.mean_coverage_trunc,
+            "coverage_mean_trunc_len": self.mean_coverage_trunc_len,
             "coverage_covered_mean": self.mean_coverage_covered,
             "reference_length": self.reference_length,
             "bam_reference_length": self.bam_reference_length,
@@ -561,6 +594,8 @@ class BamAlignment:
             "cov_evenness": self.cov_evenness,
             "tax_abund_read": self.tax_abund_read,
             "tax_abund_aln": self.tax_abund_aln,
+            "tax_abund_tad": self.tax_abund_tad,
+            "n_reads_tad": self.n_reads_tad,
         }
 
     def get_read_length_freqs(self):
