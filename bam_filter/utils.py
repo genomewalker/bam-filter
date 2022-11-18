@@ -160,6 +160,9 @@ help_msg = {
     "prefix": "Prefix used for the output files",
     "min_read_length": "Minimum read length",
     "min_read_count": "Minimum read count",
+    "trim_ends": "Exclude n bases at the ends of the reference sequences",
+    "trim_min": "Remove coverage that are below this percentile. Used for the Truncated Average Depth (TAD) calculation",
+    "trim_max": "Remove coverage that are above this percentile. Used for the Truncated Average Depth (TAD) calculation",
     "min_breadth": "Minimum breadth",
     "min_expected_breadth_ratio": "Minimum expected breadth ratio",
     "min_norm_entropy": "Minimum normalized entropy",
@@ -188,6 +191,9 @@ def get_arguments(argv=None):
         description="A simple tool to calculate metrics from a BAM file and filter with uneven coverage.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    # add subparser for filtering options:
+    filter_args = parser.add_argument_group("filtering arguments")
+    misc_args = parser.add_argument_group("miscellaneous arguments")
     parser.add_argument(
         "bam",
         type=lambda x: is_valid_file(parser, x, "bam"),
@@ -203,6 +209,35 @@ def get_arguments(argv=None):
         default=1,
         help=help_msg["threads"],
     )
+    misc_args.add_argument(
+        "--reference-trim-length",
+        type=lambda x: int(
+            check_values(
+                x, minval=0, maxval=10000, parser=parser, var="---reference-trim-length"
+            )
+        ),
+        dest="trim_ends",
+        default=0,
+        help=help_msg["trim_ends"],
+    )
+    misc_args.add_argument(
+        "--trim-min",
+        type=lambda x: int(
+            check_values(x, minval=0, maxval=100, parser=parser, var="--trim-min")
+        ),
+        dest="trim_min",
+        default=10,
+        help=help_msg["trim_min"],
+    )
+    misc_args.add_argument(
+        "--trim-max",
+        type=lambda x: int(
+            check_values(x, minval=0, maxval=100, parser=parser, var="--trim-max")
+        ),
+        dest="trim_max",
+        default=90,
+        help=help_msg["trim_max"],
+    )
     parser.add_argument(
         "-p",
         "--prefix",
@@ -211,7 +246,7 @@ def get_arguments(argv=None):
         dest="prefix",
         help=help_msg["prefix"],
     )
-    parser.add_argument(
+    filter_args.add_argument(
         "-A",
         "--min-read-ani",
         type=lambda x: float(
@@ -221,7 +256,7 @@ def get_arguments(argv=None):
         dest="min_read_ani",
         help=help_msg["min_read_ani"],
     )
-    parser.add_argument(
+    filter_args.add_argument(
         "-l",
         "--min-read-length",
         type=lambda x: int(
@@ -233,7 +268,7 @@ def get_arguments(argv=None):
         dest="min_read_length",
         help=help_msg["min_read_length"],
     )
-    parser.add_argument(
+    filter_args.add_argument(
         "-n",
         "--min-read-count",
         type=lambda x: int(
@@ -245,7 +280,7 @@ def get_arguments(argv=None):
         dest="min_read_count",
         help=help_msg["min_read_count"],
     )
-    parser.add_argument(
+    filter_args.add_argument(
         "-b",
         "--min-expected-breadth-ratio",
         type=lambda x: float(
@@ -257,7 +292,7 @@ def get_arguments(argv=None):
         dest="min_expected_breadth_ratio",
         help=help_msg["min_expected_breadth_ratio"],
     )
-    parser.add_argument(
+    filter_args.add_argument(
         "-e",
         "--min-normalized-entropy",
         type=lambda x: check_values_auto(
@@ -267,7 +302,7 @@ def get_arguments(argv=None):
         dest="min_norm_entropy",
         help=help_msg["min_norm_entropy"],
     )
-    parser.add_argument(
+    filter_args.add_argument(
         "-g",
         "--min-normalized-gini",
         type=lambda x: check_values_auto(
@@ -277,7 +312,7 @@ def get_arguments(argv=None):
         dest="min_norm_gini",
         help=help_msg["min_norm_gini"],
     )
-    parser.add_argument(
+    filter_args.add_argument(
         "-B",
         "--min-breadth",
         type=lambda x: float(
@@ -287,7 +322,7 @@ def get_arguments(argv=None):
         dest="min_breadth",
         help=help_msg["min_breadth"],
     )
-    parser.add_argument(
+    filter_args.add_argument(
         "-a",
         "--min-avg-read-ani",
         type=lambda x: float(
@@ -299,7 +334,7 @@ def get_arguments(argv=None):
         dest="min_avg_read_ani",
         help=help_msg["min_avg_read_ani"],
     )
-    parser.add_argument(
+    filter_args.add_argument(
         "-c",
         "--min-coverage-evenness",
         type=lambda x: float(

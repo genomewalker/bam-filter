@@ -58,7 +58,8 @@ filterBAM only needs a BAM file. For a complete list of options:
 ```
 $ filterBAM --help
 
-usage: filterBAM [-h] [-t THREADS] [-p PREFIX] [-A MIN_READ_ANI] [-l MIN_READ_LENGTH]
+usage: filterBAM [-h] [-t THREADS] [--reference-trim-length TRIM_ENDS] [--trim-min TRIM_MIN]
+                 [--trim-max TRIM_MAX] [-p PREFIX] [-A MIN_READ_ANI] [-l MIN_READ_LENGTH]
                  [-n MIN_READ_COUNT] [-b MIN_EXPECTED_BREADTH_RATIO] [-e MIN_NORM_ENTROPY]
                  [-g MIN_NORM_GINI] [-B MIN_BREADTH] [-a MIN_AVG_READ_ANI] [-c MIN_COVERAGE_EVENNESS]
                  [-m SORT_MEMORY] [-N] [--scale SCALE] [-r REFERENCE_LENGTHS] [--read-length-freqs]
@@ -75,6 +76,12 @@ optional arguments:
   -h, --help            show this help message and exit
   -t THREADS, --threads THREADS
                         Number of threads to use (default: 1)
+  --reference-trim-length TRIM_ENDS
+                        Exclude n bases at the ends of the reference sequences (default: 0)
+  --trim-min TRIM_MIN   Remove coverage that are below this percentile. Used for the Truncated Average
+                        Depth (TAD) calculation (default: 10)
+  --trim-max TRIM_MAX   Remove coverage that are above this percentile. Used for the Truncated Average
+                        Depth (TAD) calculation (default: 90)
   -p PREFIX, --prefix PREFIX
                         Prefix used for the output files (default: None)
   -A MIN_READ_ANI, --min-read-ani MIN_READ_ANI

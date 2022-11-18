@@ -70,6 +70,11 @@ def main():
     )
 
     args = get_arguments()
+
+    if args.trim_min >= args.trim_max:
+        log.error("trim_min must be less than trim_max")
+        exit(1)
+
     logging.getLogger("my_logger").setLevel(
         logging.DEBUG if args.debug else logging.INFO
     )
@@ -87,6 +92,9 @@ def main():
         reference_lengths=args.reference_lengths,
         min_read_count=args.min_read_count,
         min_read_ani=args.min_read_ani,
+        trim_ends=args.trim_ends,
+        trim_min=args.trim_min,
+        trim_max=args.trim_max,
         scale=args.scale,
         sort_memory=args.sort_memory,
         plot=args.plot,
