@@ -173,7 +173,7 @@ The program will produce two main outputs:
     - **max_covered_bases**: Maximum number of bases covered in the reference
     - **mean_covered_bases**: Average number of bases covered in the reference
     - **coverage_mean**: Mean depth of the reference
-    - **coverage_mean_trunc**: Mean depth of the reference after removing the 10% and 90% of the coverage values (default: TAD80 [ref](https://sfamjournals.onlinelibrary.wiley.com/doi/10.1111/1462-2920.15112))
+    - **coverage_mean_trunc**: Mean depth of the reference after removing the 10% and 90% of the coverage values (default: TAD80 as calculated [here](https://sfamjournals.onlinelibrary.wiley.com/doi/10.1111/1462-2920.15112))
     - **coverage_mean_trunc_len**: Length of the reference after being truncated by the TAD(X) values
     - **coverage_covered_mean**: Mean depth of the reference only counting covered bases
     - **reference_length**: Real reference length
