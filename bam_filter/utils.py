@@ -160,6 +160,9 @@ help_msg = {
     "prefix": "Prefix used for the output files",
     "min_read_length": "Minimum read length",
     "min_read_count": "Minimum read count",
+    "trim_ends": "Exclude n bases at the ends of the reference sequences",
+    "trim_min": "Remove coverage that are below this percentile. Used for the Truncated Average Depth (TAD) calculation",
+    "trim_max": "Remove coverage that are above this percentile. Used for the Truncated Average Depth (TAD) calculation",
     "min_breadth": "Minimum breadth",
     "min_expected_breadth_ratio": "Minimum expected breadth ratio",
     "min_norm_entropy": "Minimum normalized entropy",
@@ -202,6 +205,35 @@ def get_arguments(argv=None):
         dest="threads",
         default=1,
         help=help_msg["threads"],
+    )
+    parser.add_argument(
+        "--reference-trim-length",
+        type=lambda x: int(
+            check_values(
+                x, minval=0, maxval=10000, parser=parser, var="---reference-trim-length"
+            )
+        ),
+        dest="trim_ends",
+        default=0,
+        help=help_msg["trim_ends"],
+    )
+    parser.add_argument(
+        "--trim-min",
+        type=lambda x: int(
+            check_values(x, minval=0, maxval=100, parser=parser, var="--trim-min")
+        ),
+        dest="trim_min",
+        default=10,
+        help=help_msg["trim_min"],
+    )
+    parser.add_argument(
+        "--trim-max",
+        type=lambda x: int(
+            check_values(x, minval=0, maxval=100, parser=parser, var="--trim-max")
+        ),
+        dest="trim_max",
+        default=90,
+        help=help_msg["trim_max"],
     )
     parser.add_argument(
         "-p",

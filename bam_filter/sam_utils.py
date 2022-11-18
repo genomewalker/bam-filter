@@ -25,6 +25,20 @@ log = logging.getLogger("my_logger")
 sys.setrecursionlimit(10**6)
 
 
+def get_tad(cov, trim_min=10, trim_max=90):
+    """
+    Get the TAD of a coverage
+    """
+    cov = cov[
+        (cov >= np.percentile(cov, trim_min)) & (cov <= np.percentile(cov, trim_max))
+    ]
+
+    if sum(cov) == 0:
+        return 0
+    else:
+        return sum(cov) / len(cov)
+
+
 # Function to calculate evenness of coverage
 def coverage_evenness(coverage):
     """
@@ -97,6 +111,9 @@ def get_bam_stats(
     ref_lengths=None,
     min_read_ani=90.0,
     scale=1e6,
+    trim_ends=0,
+    trim_min=10,
+    trim_max=90,
     plot=False,
     plots_dir="coverage-plots",
     read_length_freqs=False,
@@ -188,6 +205,21 @@ def get_bam_stats(
         #         max_depth=100000000,
         #     )
         # ]
+        if trim_ends > len(cov_np) or trim_ends * 2 > len(cov_np):
+            log.warning(
+                f"Trimming ends ({trim_ends}) is larger than reference length ({len(cov_np)}). Disabling trimming."
+            )
+            trim_ends = 0
+
+        if trim_ends > 0:
+            cov_np = cov_np[trim_ends:-trim_ends]
+
+        mean_coverage_trunc = get_tad(
+            cov_np,
+            trim_min=10,
+            trim_max=90,
+        )
+
         cov_pos = cov_np[cov_np > 0]
         cov_positions = np.where(cov_np > 0)[0]
         # convert datafrane to pyranges
@@ -205,10 +237,10 @@ def get_bam_stats(
         cov_sd = np.std(cov_pos, ddof=1)
         cov_var = np.var(cov_pos, ddof=1)
         # get average coverage
-        mean_coverage = sum(cov_pos) / reference_length
+        mean_coverage = sum(cov_pos) / (reference_length - (2 * trim_ends))
         mean_coverage_covered = sum(cov_pos) / bases_covered
 
-        breadth = bases_covered / reference_length
+        breadth = bases_covered / (reference_length - (2 * trim_ends))
         exp_breadth = 1 - np.exp(-mean_coverage)
         breadth_exp_ratio = breadth / exp_breadth
 
@@ -250,6 +282,7 @@ def get_bam_stats(
         log.debug(f"Number of alignments: {n_alns:,}")
         log.debug(f"Bases covered: {bases_covered:,}")
         log.debug(f"Mean coverage: {mean_coverage:.2f}")
+        log.debug(f"Mean coverage (truncated): {mean_coverage_trunc:.2f}")
         log.debug(f"Mean coverage covered: {mean_coverage_covered:.2f}")
         log.debug(f"Max covered bases: {max_covered_bases:,}")
         log.debug(f"Mean covered bases: {mean_covered_bases:.2f}")
@@ -270,7 +303,6 @@ def get_bam_stats(
         log.debug(f"GC content: {gc_content:.2f}")
         log.debug(f"Taxonomic abundance (alns): {tax_abund_aln:.2f}")
         log.debug(f"Taxonomic abundance (reads): {tax_abund_read:.2f}")
-
         if plot:
             fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
             # infer number of bins using Freedman-Diaconis rule
@@ -305,6 +337,7 @@ def get_bam_stats(
             reference_length=reference_length,
             bam_reference_length=bam_reference_length,
             mean_coverage=mean_coverage,
+            mean_coverage_trunc=mean_coverage_trunc,
             mean_coverage_covered=mean_coverage_covered,
             bases_covered=bases_covered,
             max_covered_bases=max_covered_bases,
@@ -375,6 +408,7 @@ class BamAlignment:
         max_covered_bases,
         mean_covered_bases,
         mean_coverage,
+        mean_coverage_trunc,
         mean_coverage_covered,
         reference_length,
         bam_reference_length,
@@ -410,6 +444,7 @@ class BamAlignment:
         self.max_covered_bases = max_covered_bases
         self.mean_covered_bases = mean_covered_bases
         self.mean_coverage = mean_coverage
+        self.mean_coverage_trunc = mean_coverage_trunc
         self.mean_coverage_covered = mean_coverage_covered
         self.reference_length = reference_length
         self.bam_reference_length = bam_reference_length
@@ -448,6 +483,7 @@ class BamAlignment:
             "max_covered_bases": self.max_covered_bases,
             "mean_covered_bases": self.mean_covered_bases,
             "mean_coverage": self.mean_coverage,
+            "mean_coverage_trunc": self.mean_coverage_trunc,
             "mean_coverage_covered": self.mean_coverage_covered,
             "reference_length": self.reference_length,
             "breadth": self.breadth,
@@ -507,6 +543,7 @@ class BamAlignment:
             "max_covered_bases": self.max_covered_bases,
             "mean_covered_bases": self.mean_covered_bases,
             "coverage_mean": self.mean_coverage,
+            "coverage_mean_trunc": self.mean_coverage_trunc,
             "coverage_covered_mean": self.mean_coverage_covered,
             "reference_length": self.reference_length,
             "bam_reference_length": self.bam_reference_length,
@@ -542,6 +579,9 @@ def process_bam(
     reference_lengths=None,
     min_read_ani=90.0,
     min_read_count=10,
+    trim_ends=0,
+    trim_min=10,
+    trim_max=90,
     scale=1e6,
     sort_memory="1G",
     plot=False,
@@ -657,6 +697,9 @@ def process_bam(
                         get_bam_stats,
                         ref_lengths=ref_lengths,
                         min_read_ani=min_read_ani,
+                        trim_ends=0,
+                        trim_min=trim_min,
+                        trim_max=trim_max,
                         scale=scale,
                         plot=plot,
                         plots_dir=plots_dir,
@@ -680,6 +723,8 @@ def process_bam(
                             get_bam_stats,
                             ref_lengths=ref_lengths,
                             min_read_ani=min_read_ani,
+                            trim_ends=0,
+                            trim_min=trim_min,
                             scale=scale,
                             plot=plot,
                             plots_dir=plots_dir,
