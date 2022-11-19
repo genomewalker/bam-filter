@@ -814,7 +814,8 @@ def filter_reference_BAM(
         )
         # We transform the coverage_evenenness to 1.0 where the coverage is smaller than 1
         if not transform_cov_evenness:
-            df["cov_evenness_tmp"] = [1.0 if x < 1.0 else x for x in df["cov_evenness"]]
+            df["cov_evenness_tmp"] = df["cov_evenness"]
+            df["cov_evenness_tmp"] = [1.0 for x in df["coverage_mean"] if x < 1.0]
         else:
             df["cov_evenness_tmp"] = df["cov_evenness"]
         df_filtered = df.loc[
@@ -836,7 +837,8 @@ def filter_reference_BAM(
             f"min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_avg_read_ani >= {filter_conditions['min_avg_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} &  min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} & min_coverage_mean >= {filter_conditions['min_coverage_mean']}"
         )
         if not transform_cov_evenness:
-            df["cov_evenness_tmp"] = [1.0 if x < 1 else x for x in df["cov_evenness"]]
+            df["cov_evenness_tmp"] = df["cov_evenness"]
+            df["cov_evenness_tmp"] = [1.0 for x in df["coverage_mean"] if x < 1.0]
         else:
             df["cov_evenness_tmp"] = df["cov_evenness"]
 
