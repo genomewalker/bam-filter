@@ -853,7 +853,7 @@ def filter_reference_BAM(
             & (df["coverage_mean"] >= filter_conditions["min_coverage_mean"])
         ]
 
-    del df["coverage_evenenness_tmp"]
+    del df_filtered["cov_evenness_tmp"]
 
     if len(df_filtered.index) > 0:
         logging.info(f"Saving filtered stats...")
