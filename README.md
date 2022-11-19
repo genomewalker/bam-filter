@@ -62,9 +62,10 @@ usage: filterBAM [-h] [-t THREADS] [--reference-trim-length TRIM_ENDS] [--trim-m
                  [--trim-max TRIM_MAX] [-p PREFIX] [-A MIN_READ_ANI] [-l MIN_READ_LENGTH]
                  [-n MIN_READ_COUNT] [-b MIN_EXPECTED_BREADTH_RATIO] [-e MIN_NORM_ENTROPY]
                  [-g MIN_NORM_GINI] [-B MIN_BREADTH] [-a MIN_AVG_READ_ANI] [-c MIN_COVERAGE_EVENNESS]
-                 [-m SORT_MEMORY] [-N] [--scale SCALE] [-r REFERENCE_LENGTHS] [--read-length-freqs]
-                 [--read-hits-count] [--only-stats] [--plot] [--only-stats-filtered]
-                 [--chunk-size CHUNK_SIZE] [--debug] [--version]
+                 [-C MIN_COVERAGE_MEAN] [--include-low-detection] [-m SORT_MEMORY] [-N]
+                 [--scale SCALE] [-r REFERENCE_LENGTHS] [--read-length-freqs] [--read-hits-count]
+                 [--only-stats] [--plot] [--only-stats-filtered] [--chunk-size CHUNK_SIZE] [--debug]
+                 [--version]
                  bam
 
 A simple tool to calculate metrics from a BAM file and filter with uneven coverage.
@@ -118,6 +119,11 @@ filtering arguments:
                         Minimum average read ANI (default: 90.0)
   -c MIN_COVERAGE_EVENNESS, --min-coverage-evenness MIN_COVERAGE_EVENNESS
                         Minimum coverage evenness (default: 0)
+  -C MIN_COVERAGE_MEAN, --min-coverage-mean MIN_COVERAGE_MEAN
+                        Minimum coverage mean (default: 0)
+  --include-low-detection
+                        Include those references that fullfi all filtering criteria but the coverage
+                        evenness is 0 (default: False)
 
 miscellaneous arguments:
   --reference-trim-length TRIM_ENDS
