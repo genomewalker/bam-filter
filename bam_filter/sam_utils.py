@@ -811,7 +811,9 @@ def filter_reference_BAM(
         )
         # We transform the coverage_evenenness to 1.0 where the coverage is smaller than 1
         if not transform_cov_evenness:
-            df["cov_evenness_tmp"] = [1.0 if x < 1 else x for x in df["cov_evenness"]]
+            df["cov_evenness_tmp"] = [1.0 if x < 1.0 else x for x in df["cov_evenness"]]
+        else:
+            df["cov_evenness_tmp"] = df["cov_evenness"]
         df_filtered = df.loc[
             (df["n_reads"] >= filter_conditions["min_read_count"])
             & (df["read_length_mean"] >= filter_conditions["min_read_length"])
@@ -821,7 +823,7 @@ def filter_reference_BAM(
                 >= filter_conditions["min_expected_breadth_ratio"]
             )
             & (df["breadth"] >= filter_conditions["min_breadth"])
-            & (df["cov_evenness"] >= filter_conditions["min_coverage_evenness"])
+            & (df["cov_evenness_tmp"] >= filter_conditions["min_coverage_evenness"])
             & (df["coverage_mean"] >= filter_conditions["min_coverage_mean"])
             & (df["norm_entropy"] >= filter_conditions["min_norm_entropy"])
             & (df["norm_gini"] <= filter_conditions["min_norm_gini"])
@@ -832,6 +834,9 @@ def filter_reference_BAM(
         )
         if not transform_cov_evenness:
             df["cov_evenness_tmp"] = [1.0 if x < 1 else x for x in df["cov_evenness"]]
+        else:
+            df["cov_evenness_tmp"] = df["cov_evenness"]
+
         df_filtered = df.loc[
             (df["n_reads"] >= filter_conditions["min_read_count"])
             & (df["read_length_mean"] >= filter_conditions["min_read_length"])
@@ -841,7 +846,7 @@ def filter_reference_BAM(
                 >= filter_conditions["min_expected_breadth_ratio"]
             )
             & (df["breadth"] >= filter_conditions["min_breadth"])
-            & (df["cov_evenness"] >= filter_conditions["min_coverage_evenness"])
+            & (df["cov_evenness_tmp"] >= filter_conditions["min_coverage_evenness"])
             & (df["coverage_mean"] >= filter_conditions["min_coverage_mean"])
         ]
 
