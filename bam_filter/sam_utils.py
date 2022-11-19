@@ -228,7 +228,7 @@ def get_bam_stats(
         ranges = create_pyranges(reference, starts, ends, strands)
         if ranges.df.shape[0] == 0:
             log.debug(f"No alignments found for {reference}")
-            return None, None, pd.DataFrame(read_hits)
+            return None, None, read_hits
         ranges_raw = ranges.merge(strand=False)
         ranges = ranges_raw.lengths().to_list()
 
@@ -401,27 +401,19 @@ def get_bam_stats(
     # exit()
     results = list(filter(None, results))
     data_df = pd.DataFrame([x.to_summary() for x in results])
-    # read_hits = (
-    #     pd.DataFrame.from_dict(read_hits, orient="index", columns=["count"])
-    #     .rename_axis("read_id")
-    #     .reset_index()
-    # )
+    read_hits = (
+        pd.DataFrame.from_dict(read_hits, orient="index", columns=["count"])
+        .rename_axis("read_id")
+        .reset_index()
+    )
     if read_length_freqs:
         read_lens = [x.get_read_length_freqs for x in results]
-        return (
-            data_df,
-            read_lens,
-            pd.DataFrame.from_dict(read_hits, orient="index", columns=["count"])
-            .rename_axis("read")
-            .reset_index(),
-        )
+        return (data_df, read_lens, read_hits)
     else:
         return (
             data_df,
             None,
-            pd.DataFrame.from_dict(read_hits, orient="index", columns=["count"])
-            .rename_axis("read")
-            .reset_index(),
+            read_hits,
         )
 
 
@@ -829,7 +821,7 @@ def filter_reference_BAM(
             print("here")
             df["cov_evenness_tmp"] = df["cov_evenness"]
             df["cov_evenness_tmp"] = np.where(
-                df.coverage_mean < 1.0, 1.0, df.cov_evenness_tmp
+                np.rint(df.coverage_mean) < 1.0, 1.0, df.cov_evenness_tmp
             )
         else:
             df["cov_evenness_tmp"] = df["cov_evenness"]
@@ -855,7 +847,7 @@ def filter_reference_BAM(
             print("here")
             df["cov_evenness_tmp"] = df["cov_evenness"]
             df["cov_evenness_tmp"] = np.where(
-                df.coverage_mean < 1.0, 1.0, df.cov_evenness_tmp
+                np.rint(df.coverage_mean) < 1.0, 1.0, df.cov_evenness_tmp
             )
         else:
             df["cov_evenness_tmp"] = df["cov_evenness"]

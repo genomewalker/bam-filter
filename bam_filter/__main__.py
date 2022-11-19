@@ -117,7 +117,7 @@ def main():
     if args.read_hits_count:
         logging.info("Calculating read hits counts...")
         hits = [x[2] for x in data if x[2] is not None]
-        hits = pd.concat(hits)
+        hits = concat_df(hits)
         # merge dicts and sum values
         # hits = reduce(lambda x, y: x.update(y) or x, (Counter(dict(x)) for x in hits))
         # hits = sum(map(Counter, hits), Counter())
