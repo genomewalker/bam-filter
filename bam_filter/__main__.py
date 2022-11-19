@@ -29,8 +29,15 @@ from multiprocessing import Pool
 import tqdm
 from collections import Counter
 from functools import reduce
+import numpy as np
 
 log = logging.getLogger("my_logger")
+
+
+def group_by_sum(x):
+    u, idx = np.unique(x[:, 0], return_inverse=True)
+    s = np.bincount(idx, weights=np.array(x[:, 1], dtype="float64"))
+    return np.c_[u, s]
 
 
 def handle_warning(message, category, filename, lineno, file=None, line=None):
@@ -117,18 +124,22 @@ def main():
     if args.read_hits_count:
         logging.info("Calculating read hits counts...")
         hits = [x[2] for x in data if x[2] is not None]
+        hits = np.concatenate(hits)
+        hits = group_by_sum(hits)
+        hits = pd.DataFrame(hits, columns=["read_id", "count"])
+
         # hits = concat_df(hits)
         # merge dicts and sum values
-        hits = reduce(lambda x, y: x.update(y) or x, (Counter(dict(x)) for x in hits))
-        # hits = sum(map(Counter, hits), Counter())
+        # hits = reduce(lambda x, y: x.update(y) or x, (Counter(dict(x)) for x in hits))
+        # # hits = sum(map(Counter, hits), Counter())
 
-        # convert dict to dataframe
-        hits = (
-            pd.DataFrame.from_dict(hits, orient="index", columns=["count"])
-            .rename_axis("read")
-            .reset_index()
-            .sort_values(by="count", ascending=False)
-        )
+        # # convert dict to dataframe
+        # hits = (
+        #     pd.DataFrame.from_dict(hits, orient="index", columns=["count"])
+        #     .rename_axis("read")
+        #     .reset_index()
+        #     .sort_values(by="count", ascending=False)
+        # )
 
         hits.to_csv(
             out_files["read_hits_count"], sep="\t", index=False, compression="gzip"

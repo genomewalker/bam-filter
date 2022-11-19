@@ -406,6 +406,8 @@ def get_bam_stats(
     #     .rename_axis("read_id")
     #     .reset_index()
     # )
+    read_hits = list(read_hits.items())
+    read_hits = np.array(read_hits)
     if read_length_freqs:
         read_lens = [x.get_read_length_freqs for x in results]
         return (data_df, read_lens, read_hits)
