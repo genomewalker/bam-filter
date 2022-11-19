@@ -145,6 +145,7 @@ def main():
             "min_breadth": args.min_breadth,
             "min_avg_read_ani": args.min_avg_read_ani,
             "min_coverage_evenness": args.min_coverage_evenness,
+            "min_coverage_mean": args.min_coverage_mean,
         }
     elif args.min_norm_entropy == "auto" or args.min_norm_gini == "auto":
         if data_df.shape[0] > 1:
@@ -163,6 +164,7 @@ def main():
                     "min_breadth": args.min_breadth,
                     "min_avg_read_ani": args.min_avg_read_ani,
                     "min_coverage_evenness": args.min_coverage_evenness,
+                    "min_coverage_mean": args.min_coverage_mean,
                 }
             else:
                 filter_conditions = {
@@ -172,6 +174,7 @@ def main():
                     "min_breadth": args.min_breadth,
                     "min_avg_read_ani": args.min_avg_read_ani,
                     "min_coverage_evenness": args.min_coverage_evenness,
+                    "min_coverage_mean": args.min_coverage_mean,
                     "min_norm_entropy": min_norm_entropy,
                     "min_norm_gini": min_norm_gini,
                 }
@@ -188,6 +191,7 @@ def main():
                 "min_breadth": args.min_breadth,
                 "min_avg_read_ani": args.min_avg_read_ani,
                 "min_coverage_evenness": args.min_coverage_evenness,
+                "min_coverage_mean": args.min_coverage_mean,
                 "min_norm_entropy": min_norm_entropy,
                 "min_norm_gini": min_norm_gini,
             }
@@ -200,6 +204,7 @@ def main():
             "min_breadth": args.min_breadth,
             "min_avg_read_ani": args.min_avg_read_ani,
             "min_coverage_evenness": args.min_coverage_evenness,
+            "min_coverage_mean": args.min_coverage_mean,
             "min_norm_entropy": min_norm_entropy,
             "min_norm_gini": min_norm_gini,
         }

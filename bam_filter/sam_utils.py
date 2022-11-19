@@ -17,6 +17,8 @@ import pyranges as pr
 # import cProfile as profile
 # import pstats
 
+# import pstats
+
 import matplotlib.pyplot as plt
 
 log = logging.getLogger("my_logger")
@@ -33,10 +35,10 @@ def get_tad(cov, trim_min=10, trim_max=90):
         (cov >= np.percentile(cov, trim_min)) & (cov <= np.percentile(cov, trim_max))
     ]
 
-    if sum(cov) == 0:
+    if np.sum(cov) == 0:
         return 0, 0
     else:
-        return sum(cov) / len(cov), len(cov)
+        return np.sum(cov) / len(cov), len(cov)
 
 
 # Function to calculate evenness of coverage
@@ -63,7 +65,7 @@ def coverage_evenness(coverage):
         covEvenness = 1.0
     else:
         if C > 0:
-            covEvenness = 1.0 - (len(D2) - sum(D2) / C) / len(coverage)
+            covEvenness = 1.0 - (len(D2) - np.sum(D2) / C) / len(coverage)
         else:
             covEvenness = 0.0
 
@@ -237,8 +239,8 @@ def get_bam_stats(
         cov_sd = np.std(cov_pos, ddof=1)
         cov_var = np.var(cov_pos, ddof=1)
         # get average coverage
-        mean_coverage = sum(cov_pos) / (reference_length - (2 * trim_ends))
-        mean_coverage_covered = sum(cov_pos) / bases_covered
+        mean_coverage = np.sum(cov_pos) / (reference_length - (2 * trim_ends))
+        mean_coverage_covered = np.sum(cov_pos) / bases_covered
 
         breadth = bases_covered / (reference_length - (2 * trim_ends))
         exp_breadth = 1 - np.exp(-mean_coverage)
@@ -392,6 +394,11 @@ def get_bam_stats(
         )
         results.append(data)
     samfile.close()
+    # prof.disable()
+    # # print profiling output
+    # stats = pstats.Stats(prof).strip_dirs().sort_stats("tottime")
+    # stats.print_stats(5)  # top 10 rows
+    # exit()
     results = list(filter(None, results))
     data_df = pd.DataFrame([x.to_summary() for x in results])
     # read_hits = (
@@ -404,10 +411,6 @@ def get_bam_stats(
         return data_df, read_lens, read_hits
     else:
         return data_df, None, read_hits
-    # prof.disable()
-    # # print profiling output
-    # stats = pstats.Stats(prof).strip_dirs().sort_stats("tottime")
-    # stats.print_stats(5)  # top 10 rows
 
 
 class BamAlignment:
@@ -602,7 +605,7 @@ class BamAlignment:
         frags = {}
         lengths = pd.Series(self.read_length)
         lengths = lengths.value_counts().sort_index()
-        freqs = list(lengths / sum(lengths))
+        freqs = list(lengths / np.sum(lengths))
         frags[self.reference] = {"length": list(lengths.index), "freq": freqs}
         return frags
 
