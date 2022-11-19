@@ -401,11 +401,11 @@ def get_bam_stats(
     # exit()
     results = list(filter(None, results))
     data_df = pd.DataFrame([x.to_summary() for x in results])
-    read_hits = (
-        pd.DataFrame.from_dict(read_hits, orient="index", columns=["count"])
-        .rename_axis("read_id")
-        .reset_index()
-    )
+    # read_hits = (
+    #     pd.DataFrame.from_dict(read_hits, orient="index", columns=["count"])
+    #     .rename_axis("read_id")
+    #     .reset_index()
+    # )
     if read_length_freqs:
         read_lens = [x.get_read_length_freqs for x in results]
         return (data_df, read_lens, read_hits)
@@ -817,8 +817,7 @@ def filter_reference_BAM(
             f"min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_avg_read_ani >= {filter_conditions['min_avg_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} &  min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} & min_coverage_mean >= {filter_conditions['min_coverage_mean']} & min_norm_entropy >= {filter_conditions['min_norm_entropy']} & min_norm_gini <= {filter_conditions['min_norm_gini']}"
         )
         # We transform the coverage_evenenness to 1.0 where the coverage is smaller than 1
-        if transform_cov_evenness is False:
-            print("here")
+        if transform_cov_evenness is True:
             df["cov_evenness_tmp"] = df["cov_evenness"]
             df["cov_evenness_tmp"] = np.where(
                 np.rint(df.coverage_mean) < 1.0, 1.0, df.cov_evenness_tmp
@@ -843,8 +842,7 @@ def filter_reference_BAM(
         logging.info(
             f"min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_avg_read_ani >= {filter_conditions['min_avg_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} &  min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} & min_coverage_mean >= {filter_conditions['min_coverage_mean']}"
         )
-        if transform_cov_evenness is False:
-            print("here")
+        if transform_cov_evenness is True:
             df["cov_evenness_tmp"] = df["cov_evenness"]
             df["cov_evenness_tmp"] = np.where(
                 np.rint(df.coverage_mean) < 1.0, 1.0, df.cov_evenness_tmp
