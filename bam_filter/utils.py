@@ -364,7 +364,7 @@ def get_arguments(argv=None):
     filter_args.add_argument(
         "--disable-transform-cov-evenness",
         dest="transform_cov_evenness",
-        action="store_false",
+        action="store_true",
         help=help_msg["transform_cov_evenness"],
     )
     parser.add_argument(

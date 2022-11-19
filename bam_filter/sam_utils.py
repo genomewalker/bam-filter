@@ -228,7 +228,7 @@ def get_bam_stats(
         ranges = create_pyranges(reference, starts, ends, strands)
         if ranges.df.shape[0] == 0:
             log.debug(f"No alignments found for {reference}")
-            return None, None, read_hits
+            return None, None, pd.DataFrame(read_hits)
         ranges_raw = ranges.merge(strand=False)
         ranges = ranges_raw.lengths().to_list()
 
@@ -408,9 +408,21 @@ def get_bam_stats(
     # )
     if read_length_freqs:
         read_lens = [x.get_read_length_freqs for x in results]
-        return data_df, read_lens, read_hits
+        return (
+            data_df,
+            read_lens,
+            pd.DataFrame.from_dict(read_hits, orient="index", columns=["count"])
+            .rename_axis("read")
+            .reset_index(),
+        )
     else:
-        return data_df, None, read_hits
+        return (
+            data_df,
+            None,
+            pd.DataFrame.from_dict(read_hits, orient="index", columns=["count"])
+            .rename_axis("read")
+            .reset_index(),
+        )
 
 
 class BamAlignment:
@@ -813,9 +825,12 @@ def filter_reference_BAM(
             f"min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_avg_read_ani >= {filter_conditions['min_avg_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} &  min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} & min_coverage_mean >= {filter_conditions['min_coverage_mean']} & min_norm_entropy >= {filter_conditions['min_norm_entropy']} & min_norm_gini <= {filter_conditions['min_norm_gini']}"
         )
         # We transform the coverage_evenenness to 1.0 where the coverage is smaller than 1
-        if not transform_cov_evenness:
+        if transform_cov_evenness is False:
+            print("here")
             df["cov_evenness_tmp"] = df["cov_evenness"]
-            df["cov_evenness_tmp"] = [1.0 for x in df["coverage_mean"] if x < 1.0]
+            df["cov_evenness_tmp"] = np.where(
+                df.coverage_mean < 1.0, 1.0, df.cov_evenness_tmp
+            )
         else:
             df["cov_evenness_tmp"] = df["cov_evenness"]
         df_filtered = df.loc[
@@ -836,9 +851,12 @@ def filter_reference_BAM(
         logging.info(
             f"min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_avg_read_ani >= {filter_conditions['min_avg_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} &  min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} & min_coverage_mean >= {filter_conditions['min_coverage_mean']}"
         )
-        if not transform_cov_evenness:
+        if transform_cov_evenness is False:
+            print("here")
             df["cov_evenness_tmp"] = df["cov_evenness"]
-            df["cov_evenness_tmp"] = [1.0 for x in df["coverage_mean"] if x < 1.0]
+            df["cov_evenness_tmp"] = np.where(
+                df.coverage_mean < 1.0, 1.0, df.cov_evenness_tmp
+            )
         else:
             df["cov_evenness_tmp"] = df["cov_evenness"]
 
@@ -855,7 +873,7 @@ def filter_reference_BAM(
             & (df["coverage_mean"] >= filter_conditions["min_coverage_mean"])
         ]
 
-    del df_filtered["cov_evenness_tmp"]
+    # del df_filtered["cov_evenness_tmp"]
 
     if len(df_filtered.index) > 0:
         logging.info(f"Saving filtered stats...")
