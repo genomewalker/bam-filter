@@ -104,21 +104,19 @@ def main():
     )
     logging.info("Reducing results to a single dataframe")
     data = list(filter(None, data))
-    data_df = [x[0] for x in data]
-    print(data_df)
-    data_df = fast_flatten(list(filter(None, data_df)))
+    data_df = [x[0] for x in data if x[0] is not None]
     data_df = concat_df(data_df)
 
     if args.read_length_freqs:
         logging.info("Calculating read length frequencies...")
-        lens = [x[1] for x in data]
+        lens = [x[1] for x in data if x[1] is not None]
         lens = json.dumps(lens, default=obj_dict, ensure_ascii=False, indent=4)
         with open(out_files["read_length_freqs"], "w", encoding="utf-8") as outfile:
             print(lens, file=outfile)
 
     if args.read_hits_count:
         logging.info("Calculating read hits counts...")
-        hits = [x[2] for x in data]
+        hits = [x[2] for x in data if x[2] is not None]
 
         # merge dicts and sum values
         hits = reduce(lambda x, y: x.update(y) or x, (Counter(dict(x)) for x in hits))
