@@ -146,6 +146,7 @@ defaults = {
     "min_read_ani": 90.0,
     "min_breadth": 0,
     "min_coverage_evenness": 0,
+    "min_coverage_mean": 0,
     "prefix": None,
     "sort_memory": "1G",
     "reference_lengths": None,
@@ -170,6 +171,8 @@ help_msg = {
     "min_read_ani": "Minimum read ANI to keep a read",
     "min_avg_read_ani": "Minimum average read ANI",
     "min_coverage_evenness": "Minimum coverage evenness",
+    "min_coverage_mean": "Minimum coverage mean",
+    "transform_cov_evenness": "Disable transforming the coverage evenness values to 1.0 when filtering if mean coverage is < 1",
     "sort_memory": "Set maximum memory per thread for sorting; suffix K/M/G recognized",
     "scale": "Scale taxonomic abundance by this factor; suffix K/M recognized",
     "read_length_freqs": "Save a JSON file with the read length frequencies mapped to each reference",
@@ -345,6 +348,24 @@ def get_arguments(argv=None):
         default=defaults["min_coverage_evenness"],
         dest="min_coverage_evenness",
         help=help_msg["min_coverage_evenness"],
+    )
+    filter_args.add_argument(
+        "-C",
+        "--min-coverage-mean",
+        type=lambda x: float(
+            check_values(
+                x, minval=0, maxval=1000000, parser=parser, var="--min-coverage-mean"
+            )
+        ),
+        default=defaults["min_coverage_mean"],
+        dest="min_coverage_mean",
+        help=help_msg["min_coverage_mean"],
+    )
+    filter_args.add_argument(
+        "--disable-transform-cov-evenness",
+        dest="transform_cov_evenness",
+        action="store_false",
+        help=help_msg["transform_cov_evenness"],
     )
     parser.add_argument(
         "-m",

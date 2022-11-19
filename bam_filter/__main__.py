@@ -211,6 +211,7 @@ def main():
             bam=args.bam,
             df=data_df,
             filter_conditions=filter_conditions,
+            transform_cov_evenness=args.transform_cov_evenness,
             threads=args.threads,
             out_files=out_files,
             only_stats_filtered=args.only_stats_filtered,

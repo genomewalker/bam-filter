@@ -793,6 +793,7 @@ def filter_reference_BAM(
     out_files,
     sort_memory,
     only_stats_filtered,
+    transform_cov_evenness=False,
     sort_by_name=False,
 ):
     """Filter BAM based on certain conditions
@@ -806,8 +807,11 @@ def filter_reference_BAM(
     logging.info("Filtering stats...")
     if "min_norm_entropy" in filter_conditions and "min_norm_gini" in filter_conditions:
         logging.info(
-            f"min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_avg_read_ani >= {filter_conditions['min_avg_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} &  min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} & min_norm_entropy >= {filter_conditions['min_norm_entropy']} & min_norm_gini <= {filter_conditions['min_norm_gini']}"
+            f"min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_avg_read_ani >= {filter_conditions['min_avg_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} &  min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} & min_coverage_mean >= {filter_conditions['min_coverage_mean']} & min_norm_entropy >= {filter_conditions['min_norm_entropy']} & min_norm_gini <= {filter_conditions['min_norm_gini']}"
         )
+        # We transform the coverage_evenenness to 1.0 where the coverage is smaller than 1
+        if not transform_cov_evenness:
+            df["cov_evenness_tmp"] = [1.0 if x < 1 else x for x in df["cov_evenness"]]
         df_filtered = df.loc[
             (df["n_reads"] >= filter_conditions["min_read_count"])
             & (df["read_length_mean"] >= filter_conditions["min_read_length"])
@@ -818,13 +822,16 @@ def filter_reference_BAM(
             )
             & (df["breadth"] >= filter_conditions["min_breadth"])
             & (df["cov_evenness"] >= filter_conditions["min_coverage_evenness"])
+            & (df["coverage_mean"] >= filter_conditions["min_coverage_mean"])
             & (df["norm_entropy"] >= filter_conditions["min_norm_entropy"])
             & (df["norm_gini"] <= filter_conditions["min_norm_gini"])
         ]
     else:
         logging.info(
-            f"min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_avg_read_ani >= {filter_conditions['min_avg_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} &  min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']}"
+            f"min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_avg_read_ani >= {filter_conditions['min_avg_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} &  min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} & min_coverage_mean >= {filter_conditions['min_coverage_mean']}"
         )
+        if not transform_cov_evenness:
+            df["cov_evenness_tmp"] = [1.0 if x < 1 else x for x in df["cov_evenness"]]
         df_filtered = df.loc[
             (df["n_reads"] >= filter_conditions["min_read_count"])
             & (df["read_length_mean"] >= filter_conditions["min_read_length"])
@@ -835,7 +842,11 @@ def filter_reference_BAM(
             )
             & (df["breadth"] >= filter_conditions["min_breadth"])
             & (df["cov_evenness"] >= filter_conditions["min_coverage_evenness"])
+            & (df["coverage_mean"] >= filter_conditions["min_coverage_mean"])
         ]
+
+    del df["coverage_evenenness_tmp"]
+
     if len(df_filtered.index) > 0:
         logging.info(f"Saving filtered stats...")
         df_filtered.to_csv(
