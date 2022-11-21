@@ -70,7 +70,6 @@ def main():
     )
 
     args = get_arguments()
-
     if args.trim_min >= args.trim_max:
         log.error("trim_min must be less than trim_max")
         exit(1)

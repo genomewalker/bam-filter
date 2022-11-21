@@ -407,7 +407,7 @@ def get_bam_stats(
     #     .reset_index()
     # )
     if read_length_freqs:
-        read_lens = [x.get_read_length_freqs for x in results]
+        read_lens = [x.get_read_length_freqs() for x in results]
         return (data_df, read_lens, read_hits)
     else:
         return (
@@ -767,9 +767,11 @@ def process_bam(
                             min_read_ani=min_read_ani,
                             trim_ends=0,
                             trim_min=trim_min,
+                            trim_max=trim_max,
                             scale=scale,
                             plot=plot,
                             plots_dir=plots_dir,
+                            read_length_freqs=read_length_freqs,
                         ),
                         params,
                         chunksize=1,
