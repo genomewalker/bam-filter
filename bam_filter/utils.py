@@ -140,7 +140,7 @@ defaults = {
     "min_read_length": 30,
     "min_read_count": 10,
     "min_expected_breadth_ratio": 0.5,
-    "min_norm_entropy": "auto",
+    "min_norm_entropy": None,
     "min_norm_gini": None,
     "min_avg_read_ani": 90.0,
     "min_read_ani": 90.0,
