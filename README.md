@@ -110,7 +110,7 @@ filtering arguments:
   -b MIN_EXPECTED_BREADTH_RATIO, --min-expected-breadth-ratio MIN_EXPECTED_BREADTH_RATIO
                         Minimum expected breadth ratio (default: 0.5)
   -e MIN_NORM_ENTROPY, --min-normalized-entropy MIN_NORM_ENTROPY
-                        Minimum normalized entropy (default: auto)
+                        Minimum normalized entropy (default: None)
   -g MIN_NORM_GINI, --min-normalized-gini MIN_NORM_GINI
                         Minimum normalized Gini coefficient (default: None)
   -B MIN_BREADTH, --min-breadth MIN_BREADTH
