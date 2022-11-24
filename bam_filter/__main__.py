@@ -102,8 +102,9 @@ def main():
         read_length_freqs=args.read_length_freqs,
     )
     logging.info("Reducing results to a single dataframe")
-    data = list(filter(None, data))
+    # data = list(filter(None, data))
     data_df = [x[0] for x in data if x[0] is not None]
+    print(data_df)
     data_df = concat_df(data_df)
 
     if args.read_length_freqs:
