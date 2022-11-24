@@ -400,8 +400,8 @@ def get_bam_stats(
     # stats = pstats.Stats(prof).strip_dirs().sort_stats("tottime")
     # stats.print_stats(5)  # top 10 rows
     # exit()
-    results = [x[0] for x in results if x[0] is not None]
-    # results = list(filter(None, results))
+    # results = [x[0] for x in results if x[0] is not None]
+    results = list(filter(None, results))
     data_df = pd.DataFrame([x.to_summary() for x in results])
     # read_hits = (
     #     pd.DataFrame.from_dict(read_hits, orient="index", columns=["count"])
