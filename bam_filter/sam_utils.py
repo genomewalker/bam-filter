@@ -8,7 +8,7 @@ from scipy import stats
 import tqdm
 import logging
 import warnings
-from bam_filter.utils import is_debug, calc_chunksize, initializer
+from bam_filter.utils import is_debug, calc_chunksize, initializer, fast_flatten
 from bam_filter.entropy import entropy, norm_entropy, gini_coeff, norm_gini_coeff
 from collections import Counter, defaultdict
 import pyranges as pr
@@ -24,6 +24,15 @@ log = logging.getLogger("my_logger")
 
 
 sys.setrecursionlimit(10**6)
+
+
+def get_alns(params):
+    bam, reference = params
+    samfile = pysam.AlignmentFile(bam, "rb")
+    alns = []
+    for aln in samfile.fetch(reference=reference, multiple_iterators=False):
+        alns.append(aln.to_string())
+    return alns
 
 
 def get_tad(cov, trim_min=10, trim_max=90):
@@ -882,7 +891,7 @@ def filter_reference_BAM(
             )
             (ref_names, ref_lengths) = zip(*refs_dict.items())
 
-            out_bam_file = pysam.Samfile(
+            out_bam_file = pysam.AlignmentFile(
                 out_files["bam_filtered_tmp"],
                 "wb",
                 referencenames=list(ref_names),
@@ -894,21 +903,74 @@ def filter_reference_BAM(
             )
             references = df_filtered["reference"].values
 
-            logging.info("Filtering BAM file...")
             samfile = pysam.AlignmentFile(bam, "rb")
-            for reference in tqdm.tqdm(
-                references,
-                total=len(references),
-                leave=False,
-                ncols=80,
-                desc="References processed",
-            ):
-                for aln in samfile.fetch(
-                    reference=reference, multiple_iterators=False, until_eof=True
+            if len(references) > 500:
+                # split references into batches
+                c_size = calc_chunksize(
+                    n_workers=threads, len_iterable=len(references), factor=4
+                )
+                ref_chunks = [
+                    references[i : i + c_size]
+                    for i in range(0, len(references), c_size)
+                ]
+                logging.info(
+                    f"Filtering {len(references):,} references in {len(ref_chunks):,} chunks..."
+                )
+                for chunk in tqdm.tqdm(
+                    ref_chunks,
+                    total=len(ref_chunks),
+                    desc="Chunk processed",
+                    leave=False,
+                    ncols=80,
                 ):
-                    out_bam_file.write(
-                        pysam.AlignedSegment.fromstring(aln.to_string(), header=header)
-                    )
+                    params = zip([bam] * len(chunk), chunk)
+                    try:
+                        if is_debug():
+                            alns = list(map(get_alns, params))
+                        else:
+
+                            p = Pool(threads)
+                            c_size = calc_chunksize(threads, len(chunk))
+                            alns = list(
+                                tqdm.tqdm(
+                                    p.imap_unordered(get_alns, params, chunksize=1),
+                                    total=len(chunk),
+                                    leave=False,
+                                    ncols=80,
+                                    desc="References processed",
+                                )
+                            )
+                        p.close()
+                        p.join()
+
+                    except KeyboardInterrupt:
+                        logging.info("User canceled the operation. Terminating jobs.")
+                        p.terminate()
+                        p.join()
+                        sys.exit(0)
+
+                    for aln in fast_flatten(alns):
+                        out_bam_file.write(
+                            pysam.AlignedSegment.fromstring(aln, header=header)
+                        )
+            else:
+                logging.info("Filtering the references sequentially...")
+                for reference in tqdm.tqdm(
+                    references,
+                    total=len(references),
+                    leave=False,
+                    ncols=80,
+                    desc="References processed",
+                ):
+                    for aln in samfile.fetch(
+                        reference=reference, multiple_iterators=False, until_eof=True
+                    ):
+                        out_bam_file.write(
+                            pysam.AlignedSegment.fromstring(
+                                aln.to_string(), header=header
+                            )
+                        )
+
             out_bam_file.close()
             if sort_by_name:
                 logging.info("Sorting BAM file by read name...")
@@ -961,12 +1023,3 @@ def filter_reference_BAM(
             os.remove(out_files["bam_filtered_tmp"])
     else:
         logging.info("No references meet the filter conditions. Skipping...")
-
-
-def get_alns(params):
-    bam, reference = params
-    samfile = pysam.AlignmentFile(bam, "rb")
-    alns = []
-    for aln in samfile.fetch(reference=reference, multiple_iterators=False):
-        alns.append(aln.to_string())
-    return alns
