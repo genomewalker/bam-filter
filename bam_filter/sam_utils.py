@@ -8,13 +8,13 @@ from scipy import stats
 import tqdm
 import logging
 import warnings
-from bam_filter.utils import is_debug, calc_chunksize, initializer
+from bam_filter.utils import is_debug, calc_chunksize, initializer, fast_flatten
 from bam_filter.entropy import entropy, norm_entropy, gini_coeff, norm_gini_coeff
 from collections import Counter, defaultdict
 import pyranges as pr
 
-# import cProfile as profile
-# import pstats
+import cProfile as profile
+import pstats
 
 # import pstats
 
@@ -24,6 +24,15 @@ log = logging.getLogger("my_logger")
 
 
 sys.setrecursionlimit(10**6)
+
+
+def get_alns(params):
+    bam, reference = params
+    samfile = pysam.AlignmentFile(bam, "rb")
+    alns = []
+    for aln in samfile.fetch(reference=reference, multiple_iterators=False):
+        alns.append(aln.to_string())
+    return alns
 
 
 def get_tad(cov, trim_min=10, trim_max=90):
@@ -817,7 +826,7 @@ def filter_reference_BAM(
     logging.info("Filtering stats...")
     if "min_norm_entropy" in filter_conditions and "min_norm_gini" in filter_conditions:
         logging.info(
-            f"min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_avg_read_ani >= {filter_conditions['min_avg_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} & min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} & min_coverage_mean >= {filter_conditions['min_coverage_mean']} & min_norm_entropy >= {filter_conditions['min_norm_entropy']} & min_norm_gini <= {filter_conditions['min_norm_gini']}"
+            f"::: min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_avg_read_ani >= {filter_conditions['min_avg_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} & min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} & min_coverage_mean >= {filter_conditions['min_coverage_mean']} & min_norm_entropy >= {filter_conditions['min_norm_entropy']} & min_norm_gini <= {filter_conditions['min_norm_gini']}"
         )
         # We transform the coverage_evenenness to 1.0 where the coverage is smaller than 1
         if transform_cov_evenness is True:
@@ -843,7 +852,7 @@ def filter_reference_BAM(
         ]
     else:
         logging.info(
-            f"min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_avg_read_ani >= {filter_conditions['min_avg_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} & min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} & min_coverage_mean >= {filter_conditions['min_coverage_mean']}"
+            f"::: min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_avg_read_ani >= {filter_conditions['min_avg_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} & min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} & min_coverage_mean >= {filter_conditions['min_coverage_mean']}"
         )
         if transform_cov_evenness is True:
             df["cov_evenness_tmp"] = df["cov_evenness"]
@@ -869,6 +878,8 @@ def filter_reference_BAM(
     del df_filtered["cov_evenness_tmp"]
 
     if len(df_filtered.index) > 0:
+        prof = profile.Profile()
+        prof.enable()
         logging.info("Saving filtered stats...")
         df_filtered.to_csv(
             out_files["stats_filtered"], sep="\t", index=False, compression="gzip"
@@ -878,24 +889,27 @@ def filter_reference_BAM(
         else:
             logging.info("Writing filtered BAM file... (be patient)")
             refs_dict = dict(
-                zip(df_filtered["reference"], df_filtered["reference_length"])
+                zip(df_filtered["reference"], df_filtered["bam_reference_length"])
             )
             (ref_names, ref_lengths) = zip(*refs_dict.items())
 
-            out_bam_file = pysam.Samfile(
+            refs_idx = {x: i for i, x in enumerate(ref_names)}
+
+            out_bam_file = pysam.AlignmentFile(
                 out_files["bam_filtered_tmp"],
                 "wb",
                 referencenames=list(ref_names),
                 referencelengths=list(ref_lengths),
                 threads=threads,
             )
-            header = pysam.AlignmentHeader.from_references(
-                list(ref_names), list(ref_lengths)
-            )
-            references = df_filtered["reference"].values
 
-            logging.info("Filtering BAM file...")
+            references = list(ref_names)
+
             samfile = pysam.AlignmentFile(bam, "rb")
+
+            logging.info(
+                f"::: Filtering {len(references):,} references sequentially..."
+            )
             for reference in tqdm.tqdm(
                 references,
                 total=len(references),
@@ -904,12 +918,12 @@ def filter_reference_BAM(
                 desc="References processed",
             ):
                 for aln in samfile.fetch(
-                    reference=reference, multiple_iterators=False, until_eof=True
+                    reference=reference, multiple_iterators=False, until_eof=False
                 ):
-                    out_bam_file.write(
-                        pysam.AlignedSegment.fromstring(aln.to_string(), header=header)
-                    )
+                    aln.reference_id = refs_idx[aln.reference_name]
+                    out_bam_file.write(aln)
             out_bam_file.close()
+
             if sort_by_name:
                 logging.info("Sorting BAM file by read name...")
                 pysam.sort(
@@ -961,12 +975,3 @@ def filter_reference_BAM(
             os.remove(out_files["bam_filtered_tmp"])
     else:
         logging.info("No references meet the filter conditions. Skipping...")
-
-
-def get_alns(params):
-    bam, reference = params
-    samfile = pysam.AlignmentFile(bam, "rb")
-    alns = []
-    for aln in samfile.fetch(reference=reference, multiple_iterators=False):
-        alns.append(aln.to_string())
-    return alns
