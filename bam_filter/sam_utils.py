@@ -903,24 +903,22 @@ def filter_reference_BAM(
                 threads=threads,
             )
 
-            references = list(ref_names)
-
             samfile = pysam.AlignmentFile(bam, "rb")
+            references = [x for x in samfile.references if x in refs_idx.keys()]
 
             logging.info(
                 f"::: Filtering {len(references):,} references sequentially..."
             )
-            for aln in tqdm.tqdm(
-                samfile.fetch(until_eof=True),
-                total=len(samfile.mapped),
+            for reference in tqdm.tqdm(
+                references,
+                total=len(references),
                 leave=False,
                 ncols=80,
-                desc="Alns processed",
+                desc="References processed",
             ):
-                # for aln in samfile.fetch(
-                #     reference=reference, multiple_iterators=False, until_eof=True
-                # ):
-                if aln.reference_name in references:
+                for aln in samfile.fetch(
+                    reference=reference, multiple_iterators=False, until_eof=False
+                ):
                     aln.reference_id = refs_idx[aln.reference_name]
                     out_bam_file.write(aln)
             out_bam_file.close()
