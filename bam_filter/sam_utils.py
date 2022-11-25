@@ -918,7 +918,7 @@ def filter_reference_BAM(
                 desc="References processed",
             ):
                 for aln in samfile.fetch(
-                    reference=reference, multiple_iterators=False, until_eof=False
+                    reference=reference, multiple_iterators=False, until_eof=True
                 ):
                     aln.reference_id = refs_idx[aln.reference_name]
                     out_bam_file.write(aln)
@@ -947,6 +947,7 @@ def filter_reference_BAM(
                     out_files["bam_filtered_tmp"],
                 )
 
+                logging.info("BAM index not found. Indexing...")
                 save = pysam.set_verbosity(0)
                 samfile = pysam.AlignmentFile(out_files["bam_filtered"], "rb")
                 chr_lengths = []
@@ -956,7 +957,6 @@ def filter_reference_BAM(
                 pysam.set_verbosity(save)
                 samfile.close()
 
-                logging.info("BAM index not found. Indexing...")
                 if max_chr_length > 536870912:
                     logging.info("A reference is longer than 2^29, indexing with csi")
                     pysam.index(
