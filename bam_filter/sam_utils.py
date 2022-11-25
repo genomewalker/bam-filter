@@ -5,7 +5,6 @@ import pandas as pd
 from multiprocessing import Pool
 import functools
 from scipy import stats
-import pysam
 import tqdm
 import logging
 import warnings
@@ -638,7 +637,7 @@ def process_bam(
     to extract from a bam file two definitions of the edit distances to the reference genome scaled by read length
     Returned in a pandas DataFrame
     """
-    logging.info(f"Loading BAM file")
+    logging.info("Loading BAM file")
     save = pysam.set_verbosity(0)
     samfile = pysam.AlignmentFile(bam, "rb")
 
@@ -658,7 +657,7 @@ def process_bam(
         # check if the dataframe contains all the References in the BAM file
         if not set(references).issubset(set(ref_lengths.index)):
             logging.error(
-                f"The BAM file contains references not found in the reference lengths file"
+                "The BAM file contains references not found in the reference lengths file"
             )
             sys.exit(1)
         max_chr_length = np.max(ref_lengths["length"].tolist())
@@ -781,7 +780,7 @@ def process_bam(
                     total=len(ref_chunks),
                     leave=False,
                     ncols=80,
-                    desc=f"References processed",
+                    desc="References processed",
                 )
             )
 
@@ -789,7 +788,7 @@ def process_bam(
             p.join()
 
     except KeyboardInterrupt:
-        logging.info(f"User canceled the operation. Terminating jobs.")
+        logging.info("User canceled the operation. Terminating jobs.")
         p.terminate()
         p.join()
         sys.exit(0)
@@ -870,7 +869,7 @@ def filter_reference_BAM(
     del df_filtered["cov_evenness_tmp"]
 
     if len(df_filtered.index) > 0:
-        logging.info(f"Saving filtered stats...")
+        logging.info("Saving filtered stats...")
         df_filtered.to_csv(
             out_files["stats_filtered"], sep="\t", index=False, compression="gzip"
         )

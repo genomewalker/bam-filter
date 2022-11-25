@@ -18,15 +18,11 @@ from bam_filter.sam_utils import process_bam, filter_reference_BAM
 from bam_filter.utils import (
     get_arguments,
     create_output_files,
-    fast_flatten,
     concat_df,
-    calc_chunksize,
 )
 from bam_filter.entropy import find_knee
 import json
 import warnings
-from multiprocessing import Pool
-import tqdm
 from collections import Counter
 from functools import reduce
 

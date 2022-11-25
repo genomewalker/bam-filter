@@ -490,69 +490,9 @@ def initializer(init_data):
     parms = init_data
 
 
-def do_parallel(parms, lst, func, threads):
-    if is_debug():
-        dfs = list(map(partial(func, parms=parms), lst))
-    else:
-        p = Pool(threads, initializer=initializer, initargs=(parms,))
-        c_size = calc_chunksize(threads, len(lst))
-        dfs = list(
-            tqdm.tqdm(
-                p.imap_unordered(
-                    partial(func, parms=parms),
-                    lst,
-                    chunksize=c_size,
-                ),
-                total=len(lst),
-                leave=False,
-                ncols=80,
-                desc=f"Components processed",
-            )
-        )
-        p.close()
-        p.join()
-    return concat_df(dfs)
-
-
-def do_parallel_lst(parms, lst, func, threads):
-    if is_debug():
-        lst = list(map(partial(func, parms=parms), lst))
-    else:
-        p = Pool(threads, initializer=initializer, initargs=(parms,))
-        c_size = calc_chunksize(threads, len(lst))
-        lst = list(
-            tqdm.tqdm(
-                p.imap_unordered(
-                    partial(func, parms=parms),
-                    lst,
-                    chunksize=c_size,
-                ),
-                total=len(lst),
-                leave=False,
-                ncols=80,
-                desc=f"Components processed",
-            )
-        )
-
-    return lst
-
-
-def get_components_large(parms, components, func, threads):
-    dfs = list(
-        tqdm.tqdm(
-            map(partial(func, parms=parms), components),
-            total=len(components),
-            leave=False,
-            ncols=80,
-            desc=f"Components processed",
-        )
-    )
-    return concat_df(dfs)
-
-
 def clean_up(keep, temp_dir):
     if keep:
-        logging.info(f"Cleaning up temporary files")
+        logging.info("Cleaning up temporary files")
         logging.shutdown()
         shutil.rmtree(temp_dir, ignore_errors=True)
 
