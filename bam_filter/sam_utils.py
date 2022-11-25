@@ -13,8 +13,8 @@ from bam_filter.entropy import entropy, norm_entropy, gini_coeff, norm_gini_coef
 from collections import Counter, defaultdict
 import pyranges as pr
 
-# import cProfile as profile
-# import pstats
+import cProfile as profile
+import pstats
 
 # import pstats
 
@@ -852,7 +852,7 @@ def filter_reference_BAM(
         ]
     else:
         logging.info(
-            f"min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_avg_read_ani >= {filter_conditions['min_avg_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} & min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} & min_coverage_mean >= {filter_conditions['min_coverage_mean']}"
+            f"::: Filter: min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_avg_read_ani >= {filter_conditions['min_avg_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} & min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} & min_coverage_mean >= {filter_conditions['min_coverage_mean']}"
         )
         if transform_cov_evenness is True:
             df["cov_evenness_tmp"] = df["cov_evenness"]
@@ -878,6 +878,8 @@ def filter_reference_BAM(
     del df_filtered["cov_evenness_tmp"]
 
     if len(df_filtered.index) > 0:
+        prof = profile.Profile()
+        prof.enable()
         logging.info("Saving filtered stats...")
         df_filtered.to_csv(
             out_files["stats_filtered"], sep="\t", index=False, compression="gzip"
@@ -887,9 +889,11 @@ def filter_reference_BAM(
         else:
             logging.info("Writing filtered BAM file... (be patient)")
             refs_dict = dict(
-                zip(df_filtered["reference"], df_filtered["reference_length"])
+                zip(df_filtered["reference"], df_filtered["bam_reference_length"])
             )
             (ref_names, ref_lengths) = zip(*refs_dict.items())
+
+            refs_idx = {x: i for i, x in enumerate(ref_names)}
 
             out_bam_file = pysam.AlignmentFile(
                 out_files["bam_filtered_tmp"],
@@ -898,80 +902,28 @@ def filter_reference_BAM(
                 referencelengths=list(ref_lengths),
                 threads=threads,
             )
-            header = pysam.AlignmentHeader.from_references(
-                list(ref_names), list(ref_lengths)
-            )
-            references = df_filtered["reference"].values
+
+            references = list(ref_names)
 
             samfile = pysam.AlignmentFile(bam, "rb")
-            if len(references) > 500:
-                # split references into batches
-                c_size = calc_chunksize(
-                    n_workers=threads, len_iterable=len(references), factor=4
-                )
-                ref_chunks = [
-                    references[i : i + c_size]
-                    for i in range(0, len(references), c_size)
-                ]
-                logging.info(
-                    f"Filtering {len(references):,} references in {len(ref_chunks):,} chunks..."
-                )
-                for chunk in tqdm.tqdm(
-                    ref_chunks,
-                    total=len(ref_chunks),
-                    desc="Chunk processed",
-                    leave=False,
-                    ncols=80,
+
+            logging.info(
+                f"::: Filtering {len(references):,} references sequentially..."
+            )
+            for reference in tqdm.tqdm(
+                references,
+                total=len(references),
+                leave=False,
+                ncols=80,
+                desc="References processed",
+            ):
+                for aln in samfile.fetch(
+                    reference=reference, multiple_iterators=False, until_eof=False
                 ):
-                    params = zip([bam] * len(chunk), chunk)
-                    try:
-                        if is_debug():
-                            alns = list(map(get_alns, params))
-                        else:
-
-                            p = Pool(threads)
-                            c_size = calc_chunksize(threads, len(chunk))
-                            alns = list(
-                                tqdm.tqdm(
-                                    p.imap_unordered(get_alns, params, chunksize=1),
-                                    total=len(chunk),
-                                    leave=False,
-                                    ncols=80,
-                                    desc="References processed",
-                                )
-                            )
-                        p.close()
-                        p.join()
-
-                    except KeyboardInterrupt:
-                        logging.info("User canceled the operation. Terminating jobs.")
-                        p.terminate()
-                        p.join()
-                        sys.exit(0)
-
-                    for aln in fast_flatten(alns):
-                        out_bam_file.write(
-                            pysam.AlignedSegment.fromstring(aln, header=header)
-                        )
-            else:
-                logging.info("Filtering the references sequentially...")
-                for reference in tqdm.tqdm(
-                    references,
-                    total=len(references),
-                    leave=False,
-                    ncols=80,
-                    desc="References processed",
-                ):
-                    for aln in samfile.fetch(
-                        reference=reference, multiple_iterators=False, until_eof=True
-                    ):
-                        out_bam_file.write(
-                            pysam.AlignedSegment.fromstring(
-                                aln.to_string(), header=header
-                            )
-                        )
-
+                    aln.reference_id = refs_idx[aln.reference_name]
+                    out_bam_file.write(aln)
             out_bam_file.close()
+
             if sort_by_name:
                 logging.info("Sorting BAM file by read name...")
                 pysam.sort(
