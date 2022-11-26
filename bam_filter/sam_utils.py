@@ -30,7 +30,9 @@ def get_alns(params):
     bam, reference = params
     samfile = pysam.AlignmentFile(bam, "rb", threads=4)
     alns = []
-    for aln in samfile.fetch(reference=reference, multiple_iterators=False):
+    for aln in samfile.fetch(
+        reference=reference, multiple_iterators=False, until_eof=False
+    ):
         alns.append(aln.to_string())
     return alns
 
@@ -919,7 +921,7 @@ def filter_reference_BAM(
                 desc="References processed",
             ):
                 for aln in samfile.fetch(
-                    reference=reference, multiple_iterators=False, until_eof=True
+                    reference=reference, multiple_iterators=False, until_eof=False
                 ):
                     aln.reference_id = refs_idx[aln.reference_name]
                     out_bam_file.write(aln)
