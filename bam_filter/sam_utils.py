@@ -28,7 +28,7 @@ sys.setrecursionlimit(10**6)
 
 def get_alns(params):
     bam, reference = params
-    samfile = pysam.AlignmentFile(bam, "rb")
+    samfile = pysam.AlignmentFile(bam, "rb", threads=4)
     alns = []
     for aln in samfile.fetch(reference=reference, multiple_iterators=False):
         alns.append(aln.to_string())
@@ -137,8 +137,7 @@ def get_bam_stats(
     # prof.enable()
     bam, references = params
     results = []
-    samfile = pysam.AlignmentFile(bam, "rb")
-    samfile.set_threads(threads)
+    samfile = pysam.AlignmentFile(bam, "rb", threads=4)
 
     read_hits = defaultdict(int)
     for reference in references:
@@ -650,8 +649,7 @@ def process_bam(
     """
     logging.info("Loading BAM file")
     save = pysam.set_verbosity(0)
-    samfile = pysam.AlignmentFile(bam, "rb")
-    samfile.set_threads(threads)
+    samfile = pysam.AlignmentFile(bam, "rb", threads=4)
 
     references = samfile.references
 
@@ -680,7 +678,7 @@ def process_bam(
         sorted_bam = bam.replace(".bam", ".bf-sorted.bam")
         pysam.sort("-@", str(threads), "-m", str(sort_memory), "-o", sorted_bam, bam)
         bam = sorted_bam
-        samfile = pysam.AlignmentFile(bam, "rb")
+        samfile = pysam.AlignmentFile(bam, "rb", threads=4)
 
     if not samfile.has_index():
         logging.info("BAM index not found. Indexing...")
@@ -696,9 +694,8 @@ def process_bam(
 
         logging.info("Reloading BAM file")
         samfile = pysam.AlignmentFile(
-            bam, "rb"
+            bam, "rb", threads=4
         )  # Need to reload the samfile after creating index
-        samfile.set_threads(threads)
 
     total_refs = samfile.nreferences
     logging.info(f"Found {total_refs:,} reference sequences")
@@ -905,12 +902,10 @@ def filter_reference_BAM(
                 "wb",
                 referencenames=list(ref_names),
                 referencelengths=list(ref_lengths),
-                threads=threads,
+                threads=4,
             )
 
-            samfile = pysam.AlignmentFile(bam, "rb")
-            samfile.set_threads(threads)
-            out_bam_file.set_threads(threads)
+            samfile = pysam.AlignmentFile(bam, "rb", threads=4)
             references = [x for x in samfile.references if x in refs_idx.keys()]
 
             logging.info(
@@ -958,8 +953,9 @@ def filter_reference_BAM(
 
                 logging.info("BAM index not found. Indexing...")
                 save = pysam.set_verbosity(0)
-                samfile = pysam.AlignmentFile(out_files["bam_filtered"], "rb")
-                samfile.set_threads(threads)
+                samfile = pysam.AlignmentFile(
+                    out_files["bam_filtered"], "rb", threads=4
+                )
                 chr_lengths = []
                 for chrom in samfile.references:
                     chr_lengths.append(samfile.get_reference_length(chrom))
