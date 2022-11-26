@@ -924,7 +924,7 @@ def filter_reference_BAM(
                 desc="References processed",
             ):
                 for aln in samfile.fetch(
-                    reference=reference, multiple_iterators=False, until_eof=False
+                    reference=reference, multiple_iterators=False, until_eof=True
                 ):
                     aln.reference_id = refs_idx[aln.reference_name]
                     out_bam_file.write(aln)
