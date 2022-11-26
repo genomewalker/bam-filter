@@ -138,6 +138,8 @@ def get_bam_stats(
     bam, references = params
     results = []
     samfile = pysam.AlignmentFile(bam, "rb")
+    samfile.set_threads(threads)
+
     read_hits = defaultdict(int)
     for reference in references:
         edit_distances = []
@@ -649,6 +651,7 @@ def process_bam(
     logging.info("Loading BAM file")
     save = pysam.set_verbosity(0)
     samfile = pysam.AlignmentFile(bam, "rb")
+    samfile.set_threads(threads)
 
     references = samfile.references
 
@@ -695,6 +698,7 @@ def process_bam(
         samfile = pysam.AlignmentFile(
             bam, "rb"
         )  # Need to reload the samfile after creating index
+        samfile.set_threads(threads)
 
     total_refs = samfile.nreferences
     logging.info(f"Found {total_refs:,} reference sequences")
@@ -955,6 +959,7 @@ def filter_reference_BAM(
                 logging.info("BAM index not found. Indexing...")
                 save = pysam.set_verbosity(0)
                 samfile = pysam.AlignmentFile(out_files["bam_filtered"], "rb")
+                samfile.set_threads(threads)
                 chr_lengths = []
                 for chrom in samfile.references:
                     chr_lengths.append(samfile.get_reference_length(chrom))
