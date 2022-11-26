@@ -876,7 +876,8 @@ def filter_reference_BAM(
         ]
 
     del df_filtered["cov_evenness_tmp"]
-
+    prof = profile.Profile()
+    prof.enable()
     if len(df_filtered.index) > 0:
         prof = profile.Profile()
         prof.enable()
@@ -922,7 +923,10 @@ def filter_reference_BAM(
                     aln.reference_id = refs_idx[aln.reference_name]
                     out_bam_file.write(aln)
             out_bam_file.close()
-
+            prof.disable()
+            # print profiling output
+            stats = pstats.Stats(prof).strip_dirs().sort_stats("tottime")
+            stats.print_stats(5)  # top 10 rows
             if sort_by_name:
                 logging.info("Sorting BAM file by read name...")
                 pysam.sort(
