@@ -913,18 +913,16 @@ def filter_reference_BAM(
             logging.info(
                 f"::: Filtering {len(references):,} references sequentially..."
             )
-            for _ in tqdm.tqdm(
-                range(samfile.mapped),
-                total=samfile.mapped,
+            for reference in tqdm.tqdm(
+                references,
+                total=len(references),
                 leave=False,
                 ncols=80,
                 desc="References processed",
             ):
-                # for aln in samfile.fetch(
-                #     reference=reference, multiple_iterators=False, until_eof=False
-                # ):
-                aln = next(samfile)
-                if aln.reference_name in refs_idx.keys():
+                for aln in samfile.fetch(
+                    reference=reference, multiple_iterators=False, until_eof=False
+                ):
                     aln.reference_id = refs_idx[aln.reference_name]
                     out_bam_file.write(aln)
             out_bam_file.close()
