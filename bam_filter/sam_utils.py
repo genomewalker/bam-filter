@@ -905,6 +905,8 @@ def filter_reference_BAM(
             )
 
             samfile = pysam.AlignmentFile(bam, "rb")
+            samfile.set_threads(threads)
+            out_bam_file.set_threads(threads)
             references = [x for x in samfile.references if x in refs_idx.keys()]
 
             logging.info(
