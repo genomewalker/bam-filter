@@ -10,6 +10,7 @@ plt_log.setLevel(logging.ERROR)
 
 logging.getLogger("PIL").setLevel(logging.WARNING)
 
+
 # Code from: https://www.frontiersin.org/articles/10.3389/fmicb.2022.918015/full
 def entropy(counts):
     counts_vector = np.array(counts)
