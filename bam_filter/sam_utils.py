@@ -31,7 +31,7 @@ def get_alns(params):
     samfile = pysam.AlignmentFile(bam, "rb", threads=4)
     alns = []
     for aln in samfile.fetch(
-        reference=reference, multiple_iterators=False, until_eof=False
+        reference=reference, multiple_iterators=False, until_eof=True
     ):
         alns.append(aln.to_string())
     return alns
@@ -170,7 +170,7 @@ def get_bam_stats(
         cov_np = np.zeros(samfile.get_reference_length(reference), dtype=int)
 
         for aln in samfile.fetch(
-            contig=reference, multiple_iterators=False, until_eof=False
+            contig=reference, multiple_iterators=False, until_eof=True
         ):
             ani_read = (1 - ((aln.get_tag("NM") / aln.infer_query_length()))) * 100
             if ani_read >= min_read_ani:
@@ -921,7 +921,7 @@ def filter_reference_BAM(
                 desc="References processed",
             ):
                 for aln in samfile.fetch(
-                    reference=reference, multiple_iterators=False, until_eof=False
+                    reference=reference, multiple_iterators=True, until_eof=True
                 ):
                     aln.reference_id = refs_idx[aln.reference_name]
                     out_bam_file.write(aln)
