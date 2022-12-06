@@ -217,6 +217,7 @@ def main():
             only_stats_filtered=args.only_stats_filtered,
             sort_memory=args.sort_memory,
             sort_by_name=args.sort_by_name,
+            min_read_ani=args.min_read_ani,
         )
     logging.info("ALL DONE.")
 

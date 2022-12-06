@@ -819,6 +819,7 @@ def filter_reference_BAM(
     out_files,
     sort_memory,
     only_stats_filtered,
+    min_read_ani,
     transform_cov_evenness=False,
     sort_by_name=False,
 ):
@@ -927,8 +928,12 @@ def filter_reference_BAM(
                 for aln in samfile.fetch(
                     reference=reference, multiple_iterators=False, until_eof=True
                 ):
-                    aln.reference_id = refs_idx[aln.reference_name]
-                    out_bam_file.write(aln)
+                    ani_read = (
+                        1 - ((aln.get_tag("NM") / aln.infer_query_length()))
+                    ) * 100
+                    if ani_read >= min_read_ani:
+                        aln.reference_id = refs_idx[aln.reference_name]
+                        out_bam_file.write(aln)
             out_bam_file.close()
             # prof.disable()
             # # print profiling output
