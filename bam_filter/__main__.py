@@ -14,7 +14,7 @@ see <https://www.gnu.org/licenses/>.
 
 import logging
 import pandas as pd
-from bam_filter.sam_utils import process_bam, filter_reference_BAM
+from bam_filter.sam_utils import process_bam, filter_reference_BAM, check_bam_file
 from bam_filter.utils import (
     get_arguments,
     create_output_files,
@@ -58,7 +58,6 @@ def get_lens(obj):
 
 
 def main():
-
     logging.basicConfig(
         level=logging.DEBUG,
         format="%(levelname)s ::: %(asctime)s ::: %(message)s",
@@ -81,8 +80,15 @@ def main():
 
     out_files = create_output_files(prefix=args.prefix, bam=args.bam)
 
-    data = process_bam(
+    bam = check_bam_file(
         bam=args.bam,
+        threads=args.threads,
+        reference_lengths=args.reference_lengths,
+        sort_memory=args.sort_memory,
+    )
+
+    data = process_bam(
+        bam=bam,
         threads=args.threads,
         reference_lengths=args.reference_lengths,
         min_read_count=args.min_read_count,
@@ -91,7 +97,6 @@ def main():
         trim_min=args.trim_min,
         trim_max=args.trim_max,
         scale=args.scale,
-        sort_memory=args.sort_memory,
         plot=args.plot,
         plots_dir=out_files["coverage_plot_dir"],
         chunksize=args.chunk_size,
@@ -208,7 +213,7 @@ def main():
         logging.info("Skipping filtering...")
     else:
         filter_reference_BAM(
-            bam=args.bam,
+            bam=bam,
             df=data_df,
             filter_conditions=filter_conditions,
             transform_cov_evenness=args.transform_cov_evenness,

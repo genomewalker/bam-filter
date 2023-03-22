@@ -629,28 +629,12 @@ class BamAlignment:
         return frags
 
 
-# Inspired from https://gigabaseorgigabyte.wordpress.com/2017/04/14/getting-the-edit-distance-from-a-bam-alignment-a-journey/
-def process_bam(
+def check_bam_file(
     bam,
     threads=1,
     reference_lengths=None,
-    min_read_ani=90.0,
-    min_read_count=10,
-    trim_ends=0,
-    trim_min=10,
-    trim_max=90,
-    scale=1e6,
     sort_memory="1G",
-    plot=False,
-    plots_dir="coverage-plots",
-    chunksize=None,
-    read_length_freqs=False,
 ):
-    """
-    Processing function: calls pool of worker functions
-    to extract from a bam file two definitions of the edit distances to the reference genome scaled by read length
-    Returned in a pandas DataFrame
-    """
     logging.info("Loading BAM file")
     save = pysam.set_verbosity(0)
     samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
@@ -682,6 +666,7 @@ def process_bam(
         sorted_bam = bam.replace(".bam", ".bf-sorted.bam")
         pysam.sort("-@", str(threads), "-m", str(sort_memory), "-o", sorted_bam, bam)
         bam = sorted_bam
+        pysam.index("-c", "-@", str(threads), bam)
         samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
 
     if not samfile.has_index():
@@ -695,11 +680,54 @@ def process_bam(
                 str(threads),
                 bam,
             )
+    logging.info("::: BAM file looks good.")
 
-        logging.info("Reloading BAM file")
-        samfile = pysam.AlignmentFile(
-            bam, "rb", threads=threads
-        )  # Need to reload the samfile after creating index
+    return bam  # Need to reload the samfile after creating index
+
+
+# Inspired from https://gigabaseorgigabyte.wordpress.com/2017/04/14/getting-the-edit-distance-from-a-bam-alignment-a-journey/
+def process_bam(
+    bam,
+    threads=1,
+    reference_lengths=None,
+    min_read_ani=90.0,
+    min_read_count=10,
+    trim_ends=0,
+    trim_min=10,
+    trim_max=90,
+    scale=1e6,
+    plot=False,
+    plots_dir="coverage-plots",
+    chunksize=None,
+    read_length_freqs=False,
+):
+    """
+    Processing function: calls pool of worker functions
+    to extract from a bam file two definitions of the edit distances to the reference genome scaled by read length
+    Returned in a pandas DataFrame
+    """
+    logging.info("Loading BAM file")
+    save = pysam.set_verbosity(0)
+    samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
+
+    references = samfile.references
+
+    chr_lengths = []
+    for chrom in samfile.references:
+        chr_lengths.append(samfile.get_reference_length(chrom))
+    pysam.set_verbosity(save)
+    ref_lengths = None
+
+    if reference_lengths is not None:
+        ref_lengths = pd.read_csv(
+            reference_lengths, sep="\t", index_col=0, names=["reference", "length"]
+        )
+        # check if the dataframe contains all the References in the BAM file
+        if not set(references).issubset(set(ref_lengths.index)):
+            logging.error(
+                "The BAM file contains references not found in the reference lengths file"
+            )
+            sys.exit(1)
 
     total_refs = samfile.nreferences
     logging.info(f"Found {total_refs:,} reference sequences")
@@ -767,7 +795,6 @@ def process_bam(
                 )
             )
         else:
-
             p = Pool(
                 threads,
                 initializer=initializer,
