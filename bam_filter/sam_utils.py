@@ -205,208 +205,208 @@ def get_bam_stats(
                 strands.append(strand)
 
                 cov_np[aln.reference_start : aln.reference_end] += 1
+        if n_alns > 0:
+            # get bases covered by reads pileup
 
-        # get bases covered by reads pileup
+            # cov_pos_raw = [
+            #     (pileupcolumn.pos, pileupcolumn.n)
+            #     for pileupcolumn in samfile.pileup(
+            #         reference,
+            #         start=None,
+            #         stop=None,
+            #         region=None,
+            #         stepper="nofilter",
+            #         min_mapping_quality=0,
+            #         max_depth=100000000,
+            #     )
+            # ]
+            if trim_ends > len(cov_np) or trim_ends * 2 > len(cov_np):
+                log.warning(
+                    f"Trimming ends ({trim_ends}) is larger than reference length ({len(cov_np)}). Disabling trimming."
+                )
+                trim_ends = 0
 
-        # cov_pos_raw = [
-        #     (pileupcolumn.pos, pileupcolumn.n)
-        #     for pileupcolumn in samfile.pileup(
-        #         reference,
-        #         start=None,
-        #         stop=None,
-        #         region=None,
-        #         stepper="nofilter",
-        #         min_mapping_quality=0,
-        #         max_depth=100000000,
-        #     )
-        # ]
-        if trim_ends > len(cov_np) or trim_ends * 2 > len(cov_np):
-            log.warning(
-                f"Trimming ends ({trim_ends}) is larger than reference length ({len(cov_np)}). Disabling trimming."
+            if trim_ends > 0:
+                cov_np = cov_np[trim_ends:-trim_ends]
+
+            mean_coverage_trunc, mean_coverage_trunc_len = get_tad(
+                cov_np,
+                trim_min=10,
+                trim_max=90,
             )
-            trim_ends = 0
 
-        if trim_ends > 0:
-            cov_np = cov_np[trim_ends:-trim_ends]
+            cov_pos = cov_np[cov_np > 0]
+            cov_positions = np.where(cov_np > 0)[0]
+            # convert datafrane to pyranges
+            ranges = create_pyranges(reference, starts, ends, strands)
+            if ranges.df.shape[0] == 0:
+                log.debug(f"No alignments found for {reference}")
+                results.append(None)
+                continue
+            ranges_raw = ranges.merge(strand=False)
+            ranges = ranges_raw.lengths().to_list()
 
-        mean_coverage_trunc, mean_coverage_trunc_len = get_tad(
-            cov_np,
-            trim_min=10,
-            trim_max=90,
-        )
+            max_covered_bases = np.max(ranges)
+            mean_covered_bases = np.mean(ranges)
+            bases_covered = int(len(cov_pos))
+            # get SD from covered bases
+            cov_sd = np.std(cov_pos, ddof=1)
+            cov_var = np.var(cov_pos, ddof=1)
+            # get average coverage
+            mean_coverage = np.sum(cov_pos) / (reference_length - (2 * trim_ends))
+            mean_coverage_covered = np.sum(cov_pos) / bases_covered
 
-        cov_pos = cov_np[cov_np > 0]
-        cov_positions = np.where(cov_np > 0)[0]
-        # convert datafrane to pyranges
-        ranges = create_pyranges(reference, starts, ends, strands)
-        if ranges.df.shape[0] == 0:
-            log.debug(f"No alignments found for {reference}")
-            results.append(None)
-            continue
-        ranges_raw = ranges.merge(strand=False)
-        ranges = ranges_raw.lengths().to_list()
+            breadth = bases_covered / (reference_length - (2 * trim_ends))
+            exp_breadth = 1 - np.exp(-mean_coverage)
+            breadth_exp_ratio = breadth / exp_breadth
 
-        max_covered_bases = np.max(ranges)
-        mean_covered_bases = np.mean(ranges)
-        bases_covered = int(len(cov_pos))
-        # get SD from covered bases
-        cov_sd = np.std(cov_pos, ddof=1)
-        cov_var = np.var(cov_pos, ddof=1)
-        # get average coverage
-        mean_coverage = np.sum(cov_pos) / (reference_length - (2 * trim_ends))
-        mean_coverage_covered = np.sum(cov_pos) / bases_covered
+            if breadth_exp_ratio > 1:
+                breadth_exp_ratio = 1.0
 
-        breadth = bases_covered / (reference_length - (2 * trim_ends))
-        exp_breadth = 1 - np.exp(-mean_coverage)
-        breadth_exp_ratio = breadth / exp_breadth
+            # fill vector with zeros to match reference length
+            # cov_pos_zeroes = np.pad(
+            #     cov_pos, (0, reference_length - len(cov_pos)), "constant"
+            # )
+            cov_evenness = coverage_evenness(cov_np)
+            gc_content = (np.sum(read_gc_content) / np.sum(read_length)) * 100
+            c_v = cov_sd / mean_coverage
+            d_i = cov_var / mean_coverage
 
-        if breadth_exp_ratio > 1:
-            breadth_exp_ratio = 1.0
+            read_mapq = [np.nan if x == 255 else x for x in read_mapq]
 
-        # fill vector with zeros to match reference length
-        # cov_pos_zeroes = np.pad(
-        #     cov_pos, (0, reference_length - len(cov_pos)), "constant"
-        # )
-        cov_evenness = coverage_evenness(cov_np)
-        gc_content = (np.sum(read_gc_content) / np.sum(read_length)) * 100
-        c_v = cov_sd / mean_coverage
-        d_i = cov_var / mean_coverage
+            tax_abund_aln = round((n_alns / reference_length) * scale)
+            tax_abund_read = round((len(set(read_names)) / reference_length) * scale)
 
-        read_mapq = [np.nan if x == 255 else x for x in read_mapq]
+            # Using the trimmed mean to estimate number of reads that map to the reference
+            # This is to avoid the issue of having a very high coverage region that
+            # skews the mean coverage
+            # C = LN / G
+            # • C stands for coverage
+            # • G is the haploid genome length
+            # • L is the read length
+            # • N is the number of reads
+            #
+            if mean_coverage_trunc_len > 0 and mean_coverage_trunc > 0:
+                n_reads_tad = round(
+                    (reference_length * mean_coverage_trunc) / np.mean(read_length)
+                )
+                tax_abund_tad = round((n_reads_tad / mean_coverage_trunc_len) * scale)
+            else:
+                n_reads_tad = 0
+                tax_abund_tad = 0
+            # Analyse site distribution
+            n_sites = len(cov_pos)
+            genome_length = bam_reference_length
+            # Site density (sites per thousand bp)
+            site_density = 1000 * n_sites / genome_length
 
-        tax_abund_aln = round((n_alns / reference_length) * scale)
-        tax_abund_read = round((len(set(read_names)) / reference_length) * scale)
-
-        # Using the trimmed mean to estimate number of reads that map to the reference
-        # This is to avoid the issue of having a very high coverage region that
-        # skews the mean coverage
-        # C = LN / G
-        # • C stands for coverage
-        # • G is the haploid genome length
-        # • L is the read length
-        # • N is the number of reads
-        #
-        if mean_coverage_trunc_len > 0 and mean_coverage_trunc > 0:
-            n_reads_tad = round(
-                (reference_length * mean_coverage_trunc) / np.mean(read_length)
+            counts, bins = np.histogram(
+                cov_positions, bins="auto", range=(0, genome_length)
             )
-            tax_abund_tad = round((n_reads_tad / mean_coverage_trunc_len) * scale)
-        else:
-            n_reads_tad = 0
-            tax_abund_tad = 0
-        # Analyse site distribution
-        n_sites = len(cov_pos)
-        genome_length = bam_reference_length
-        # Site density (sites per thousand bp)
-        site_density = 1000 * n_sites / genome_length
 
-        counts, bins = np.histogram(
-            cov_positions, bins="auto", range=(0, genome_length)
-        )
+            n_bins = len(bins)
 
-        n_bins = len(bins)
+            entr = entropy(counts)  # Positional entropy
+            norm_entr = norm_entropy(counts)  # Normalized positional entropy
+            gini = gini_coeff(counts)  # Gini coefficient
+            norm_gini = norm_gini_coeff(counts)  # Normalized Gini coefficient
 
-        entr = entropy(counts)  # Positional entropy
-        norm_entr = norm_entropy(counts)  # Normalized positional entropy
-        gini = gini_coeff(counts)  # Gini coefficient
-        norm_gini = norm_gini_coeff(counts)  # Normalized Gini coefficient
+            log.debug(f"Number of reads: {len(set(read_names)):,}")
+            log.debug(f"Number of alignments: {n_alns:,}")
+            log.debug(f"Bases covered: {bases_covered:,}")
+            log.debug(f"Mean coverage: {mean_coverage:.2f}")
+            log.debug(f"Mean coverage (truncated): {mean_coverage_trunc:.2f}")
+            log.debug(f"Reference length (truncated): {mean_coverage_trunc_len:.2f}")
+            log.debug(f"Mean coverage covered: {mean_coverage_covered:.2f}")
+            log.debug(f"Max covered bases: {max_covered_bases:,}")
+            log.debug(f"Mean covered bases: {mean_covered_bases:.2f}")
+            log.debug(f"SD: {cov_sd:.2f}")
+            log.debug(f"Breadth: {breadth:.2f}")
+            log.debug(f"Exp. breadth: {exp_breadth:.2f}")
+            log.debug(f"Breadth/exp. ratio: {breadth_exp_ratio:.2f}")
+            log.debug(f"Number of bins: {n_bins}")
+            log.debug(f"Site density: {site_density:.2f}")
+            log.debug(f"Entropy (H): {entr:.2f}")
+            log.debug(f"Normalized entropy (H*): {norm_entr:.2f}")
+            log.debug(f"Gini coefficient (G): {gini:.2f}")
+            log.debug(f"Normalized Gini coefficient (G*): {norm_gini:.2f}")
+            log.debug(f"Cov. evenness: {cov_evenness:.2f}")
+            log.debug(f"C_v: {c_v:.2f}")
+            log.debug(f"D_i: {d_i:.2f}")
+            log.debug(f"Mean mapq: {np.mean(read_mapq):.2f}")
+            log.debug(f"GC content: {gc_content:.2f}")
+            log.debug(f"Taxonomic abundance (alns): {tax_abund_aln:.2f}")
+            log.debug(f"Taxonomic abundance (reads): {tax_abund_read:.2f}")
+            log.debug(f"Taxonomic abundance (TAD): {tax_abund_tad:.2f}")
+            log.debug(f"Number of reads (TAD): {n_reads_tad:,}")
+            if plot:
+                fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
+                # infer number of bins using Freedman-Diaconis rule
+                positions_cov_zeros = pd.DataFrame(
+                    {"pos": range(1, bam_reference_length + 1)}
+                )
+                positions_cov = pd.DataFrame({"pos": cov_positions, "cov": cov_pos})
+                positions_cov = positions_cov_zeros.merge(
+                    positions_cov, on="pos", how="left"
+                )
+                positions_cov["cov"] = positions_cov["cov"].fillna(0)
+                positions_cov["cov"] = positions_cov["cov"].astype(int)
+                positions_cov["cov_binary"] = positions_cov["cov"].apply(
+                    lambda x: 1 if x > 0 else 0
+                )
+                plt.plot(
+                    positions_cov["pos"],
+                    positions_cov["cov"],
+                    color="c",
+                    ms=0.5,
+                )
+                plt.suptitle(f"{reference}")
+                plt.title(
+                    f"cov:{mean_coverage:.4f} b/e:{breadth_exp_ratio:.2f} cov_e:{cov_evenness:.2f} entropy:{norm_entr:.2f} gini:{norm_gini:.2f}"
+                )
+                fig.savefig(f"{plots_dir}/{reference}_coverage.png", dpi=300)
+                plt.close(fig)
 
-        log.debug(f"Number of reads: {len(set(read_names)):,}")
-        log.debug(f"Number of alignments: {n_alns:,}")
-        log.debug(f"Bases covered: {bases_covered:,}")
-        log.debug(f"Mean coverage: {mean_coverage:.2f}")
-        log.debug(f"Mean coverage (truncated): {mean_coverage_trunc:.2f}")
-        log.debug(f"Reference length (truncated): {mean_coverage_trunc_len:.2f}")
-        log.debug(f"Mean coverage covered: {mean_coverage_covered:.2f}")
-        log.debug(f"Max covered bases: {max_covered_bases:,}")
-        log.debug(f"Mean covered bases: {mean_covered_bases:.2f}")
-        log.debug(f"SD: {cov_sd:.2f}")
-        log.debug(f"Breadth: {breadth:.2f}")
-        log.debug(f"Exp. breadth: {exp_breadth:.2f}")
-        log.debug(f"Breadth/exp. ratio: {breadth_exp_ratio:.2f}")
-        log.debug(f"Number of bins: {n_bins}")
-        log.debug(f"Site density: {site_density:.2f}")
-        log.debug(f"Entropy (H): {entr:.2f}")
-        log.debug(f"Normalized entropy (H*): {norm_entr:.2f}")
-        log.debug(f"Gini coefficient (G): {gini:.2f}")
-        log.debug(f"Normalized Gini coefficient (G*): {norm_gini:.2f}")
-        log.debug(f"Cov. evenness: {cov_evenness:.2f}")
-        log.debug(f"C_v: {c_v:.2f}")
-        log.debug(f"D_i: {d_i:.2f}")
-        log.debug(f"Mean mapq: {np.mean(read_mapq):.2f}")
-        log.debug(f"GC content: {gc_content:.2f}")
-        log.debug(f"Taxonomic abundance (alns): {tax_abund_aln:.2f}")
-        log.debug(f"Taxonomic abundance (reads): {tax_abund_read:.2f}")
-        log.debug(f"Taxonomic abundance (TAD): {tax_abund_tad:.2f}")
-        log.debug(f"Number of reads (TAD): {n_reads_tad:,}")
-        if plot:
-            fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
-            # infer number of bins using Freedman-Diaconis rule
-            positions_cov_zeros = pd.DataFrame(
-                {"pos": range(1, bam_reference_length + 1)}
+            data = BamAlignment(
+                reference=reference,
+                n_alns=n_alns,
+                reference_length=reference_length,
+                bam_reference_length=bam_reference_length,
+                mean_coverage=mean_coverage,
+                mean_coverage_trunc=mean_coverage_trunc,
+                mean_coverage_trunc_len=mean_coverage_trunc_len,
+                mean_coverage_covered=mean_coverage_covered,
+                bases_covered=bases_covered,
+                max_covered_bases=max_covered_bases,
+                mean_covered_bases=mean_covered_bases,
+                cov_evenness=cov_evenness,
+                breadth=breadth,
+                exp_breadth=exp_breadth,
+                breadth_exp_ratio=breadth_exp_ratio,
+                n_bins=n_bins,
+                site_density=site_density,
+                entropy=entr,
+                norm_entropy=norm_entr,
+                gini=gini,
+                norm_gini=norm_gini,
+                c_v=c_v,
+                d_i=d_i,
+                edit_distances=edit_distances,
+                # edit_distances_md=edit_distances_md,
+                ani_nm=ani_nm,
+                # ani_md=ani_md,
+                read_length=read_length,
+                read_gc_content=read_gc_content,
+                read_aligned_length=read_aligned_length,
+                mapping_quality=read_mapq,
+                read_names=set(read_names),
+                read_aln_score=read_aln_score,
+                tax_abund_aln=tax_abund_aln,
+                tax_abund_read=tax_abund_read,
+                tax_abund_tad=tax_abund_tad,
+                n_reads_tad=n_reads_tad,
             )
-            positions_cov = pd.DataFrame({"pos": cov_positions, "cov": cov_pos})
-            positions_cov = positions_cov_zeros.merge(
-                positions_cov, on="pos", how="left"
-            )
-            positions_cov["cov"] = positions_cov["cov"].fillna(0)
-            positions_cov["cov"] = positions_cov["cov"].astype(int)
-            positions_cov["cov_binary"] = positions_cov["cov"].apply(
-                lambda x: 1 if x > 0 else 0
-            )
-            plt.plot(
-                positions_cov["pos"],
-                positions_cov["cov"],
-                color="c",
-                ms=0.5,
-            )
-            plt.suptitle(f"{reference}")
-            plt.title(
-                f"cov:{mean_coverage:.4f} b/e:{breadth_exp_ratio:.2f} cov_e:{cov_evenness:.2f} entropy:{norm_entr:.2f} gini:{norm_gini:.2f}"
-            )
-            fig.savefig(f"{plots_dir}/{reference}_coverage.png", dpi=300)
-            plt.close(fig)
-
-        data = BamAlignment(
-            reference=reference,
-            n_alns=n_alns,
-            reference_length=reference_length,
-            bam_reference_length=bam_reference_length,
-            mean_coverage=mean_coverage,
-            mean_coverage_trunc=mean_coverage_trunc,
-            mean_coverage_trunc_len=mean_coverage_trunc_len,
-            mean_coverage_covered=mean_coverage_covered,
-            bases_covered=bases_covered,
-            max_covered_bases=max_covered_bases,
-            mean_covered_bases=mean_covered_bases,
-            cov_evenness=cov_evenness,
-            breadth=breadth,
-            exp_breadth=exp_breadth,
-            breadth_exp_ratio=breadth_exp_ratio,
-            n_bins=n_bins,
-            site_density=site_density,
-            entropy=entr,
-            norm_entropy=norm_entr,
-            gini=gini,
-            norm_gini=norm_gini,
-            c_v=c_v,
-            d_i=d_i,
-            edit_distances=edit_distances,
-            # edit_distances_md=edit_distances_md,
-            ani_nm=ani_nm,
-            # ani_md=ani_md,
-            read_length=read_length,
-            read_gc_content=read_gc_content,
-            read_aligned_length=read_aligned_length,
-            mapping_quality=read_mapq,
-            read_names=set(read_names),
-            read_aln_score=read_aln_score,
-            tax_abund_aln=tax_abund_aln,
-            tax_abund_read=tax_abund_read,
-            tax_abund_tad=tax_abund_tad,
-            n_reads_tad=n_reads_tad,
-        )
-        results.append(data)
+            results.append(data)
     samfile.close()
     # prof.disable()
     # # print profiling output
@@ -861,7 +861,16 @@ def filter_reference_BAM(
     logging.info("Filtering stats...")
     if "min_norm_entropy" in filter_conditions and "min_norm_gini" in filter_conditions:
         logging.info(
-            f"::: min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_avg_read_ani >= {filter_conditions['min_avg_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} & min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} & min_coverage_mean >= {filter_conditions['min_coverage_mean']} & min_norm_entropy >= {filter_conditions['min_norm_entropy']} & min_norm_gini <= {filter_conditions['min_norm_gini']}"
+            f"::: min_read_count >= {filter_conditions['min_read_count']} "
+            f"& min_read_length >= {filter_conditions['min_read_length']} "
+            f"& min_avg_read_ani >= {filter_conditions['min_avg_read_ani']} "
+            f"& min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} "
+            f"& min_breadth >= {filter_conditions['min_breadth']} "
+            f"& min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} "
+            f"& min_evenness =< {filter_conditions['min_evenness']} "
+            f"& min_coverage_mean >= {filter_conditions['min_coverage_mean']} "
+            f"& min_norm_entropy >= {filter_conditions['min_norm_entropy']} "
+            f"& min_norm_gini <= {filter_conditions['min_norm_gini']}"
         )
         # We transform the coverage_evenenness to 1.0 where the coverage is smaller than 1
         if transform_cov_evenness is True:
@@ -881,13 +890,21 @@ def filter_reference_BAM(
             )
             & (df["breadth"] >= filter_conditions["min_breadth"])
             & (df["cov_evenness_tmp"] >= filter_conditions["min_coverage_evenness"])
+            & (df["c_v"] <= filter_conditions["min_evenness"])
             & (df["coverage_mean"] >= filter_conditions["min_coverage_mean"])
             & (df["norm_entropy"] >= filter_conditions["min_norm_entropy"])
             & (df["norm_gini"] <= filter_conditions["min_norm_gini"])
         ]
     else:
         logging.info(
-            f"::: min_read_count >= {filter_conditions['min_read_count']} & min_read_length >= {filter_conditions['min_read_length']} & min_avg_read_ani >= {filter_conditions['min_avg_read_ani']} & min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} & min_breadth >= {filter_conditions['min_breadth']} & min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} & min_coverage_mean >= {filter_conditions['min_coverage_mean']}"
+            f"::: min_read_count >= {filter_conditions['min_read_count']} "
+            f"& min_read_length >= {filter_conditions['min_read_length']} "
+            f"& min_avg_read_ani >= {filter_conditions['min_avg_read_ani']} "
+            f"& min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} "
+            f"& min_breadth >= {filter_conditions['min_breadth']} "
+            f"& min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} "
+            f"& min_evenness <= {filter_conditions['min_evenness']} "
+            f"& min_coverage_mean >= {filter_conditions['min_coverage_mean']}"
         )
         if transform_cov_evenness is True:
             df["cov_evenness_tmp"] = df["cov_evenness"]
@@ -907,6 +924,7 @@ def filter_reference_BAM(
             )
             & (df["breadth"] >= filter_conditions["min_breadth"])
             & (df["cov_evenness_tmp"] >= filter_conditions["min_coverage_evenness"])
+            & (df["c_v"] <= filter_conditions["min_evenness"])
             & (df["coverage_mean"] >= filter_conditions["min_coverage_mean"])
         ]
 
