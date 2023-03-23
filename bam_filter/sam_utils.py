@@ -867,7 +867,7 @@ def filter_reference_BAM(
             f"& min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} "
             f"& min_breadth >= {filter_conditions['min_breadth']} "
             f"& min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} "
-            f"& min_evenness =< {filter_conditions['min_evenness']} "
+            f"& min_coeff_var =< {filter_conditions['min_coeff_var']} "
             f"& min_coverage_mean >= {filter_conditions['min_coverage_mean']} "
             f"& min_norm_entropy >= {filter_conditions['min_norm_entropy']} "
             f"& min_norm_gini <= {filter_conditions['min_norm_gini']}"
@@ -890,7 +890,7 @@ def filter_reference_BAM(
             )
             & (df["breadth"] >= filter_conditions["min_breadth"])
             & (df["cov_evenness_tmp"] >= filter_conditions["min_coverage_evenness"])
-            & (df["c_v"] <= filter_conditions["min_evenness"])
+            & (df["c_v"] <= filter_conditions["min_coeff_var"])
             & (df["coverage_mean"] >= filter_conditions["min_coverage_mean"])
             & (df["norm_entropy"] >= filter_conditions["min_norm_entropy"])
             & (df["norm_gini"] <= filter_conditions["min_norm_gini"])
@@ -903,7 +903,7 @@ def filter_reference_BAM(
             f"& min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} "
             f"& min_breadth >= {filter_conditions['min_breadth']} "
             f"& min_coverage_evenness >= {filter_conditions['min_coverage_evenness']} "
-            f"& min_evenness <= {filter_conditions['min_evenness']} "
+            f"& min_coeff_var <= {filter_conditions['min_coeff_var']} "
             f"& min_coverage_mean >= {filter_conditions['min_coverage_mean']}"
         )
         if transform_cov_evenness is True:
@@ -924,7 +924,7 @@ def filter_reference_BAM(
             )
             & (df["breadth"] >= filter_conditions["min_breadth"])
             & (df["cov_evenness_tmp"] >= filter_conditions["min_coverage_evenness"])
-            & (df["c_v"] <= filter_conditions["min_evenness"])
+            & (df["c_v"] <= filter_conditions["min_coeff_var"])
             & (df["coverage_mean"] >= filter_conditions["min_coverage_mean"])
         ]
 

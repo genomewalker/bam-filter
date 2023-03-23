@@ -145,7 +145,7 @@ def main():
             "min_breadth": args.min_breadth,
             "min_avg_read_ani": args.min_avg_read_ani,
             "min_coverage_evenness": args.min_coverage_evenness,
-            "min_evenness": args.min_evenness,
+            "min_coeff_var": args.min_coeff_var,
             "min_coverage_mean": args.min_coverage_mean,
         }
     elif args.min_norm_entropy == "auto" or args.min_norm_gini == "auto":
@@ -165,7 +165,7 @@ def main():
                     "min_breadth": args.min_breadth,
                     "min_avg_read_ani": args.min_avg_read_ani,
                     "min_coverage_evenness": args.min_coverage_evenness,
-                    "min_evenness": args.min_evenness,
+                    "min_coeff_var": args.min_coeff_var,
                     "min_coverage_mean": args.min_coverage_mean,
                 }
             else:
@@ -176,7 +176,7 @@ def main():
                     "min_breadth": args.min_breadth,
                     "min_avg_read_ani": args.min_avg_read_ani,
                     "min_coverage_evenness": args.min_coverage_evenness,
-                    "min_evenness": args.min_evenness,
+                    "min_coeff_var": args.min_coeff_var,
                     "min_coverage_mean": args.min_coverage_mean,
                     "min_norm_entropy": min_norm_entropy,
                     "min_norm_gini": min_norm_gini,
@@ -194,7 +194,7 @@ def main():
                 "min_breadth": args.min_breadth,
                 "min_avg_read_ani": args.min_avg_read_ani,
                 "min_coverage_evenness": args.min_coverage_evenness,
-                "min_evenness": args.min_evenness,
+                "min_coeff_var": args.min_coeff_var,
                 "min_coverage_mean": args.min_coverage_mean,
                 "min_norm_entropy": min_norm_entropy,
                 "min_norm_gini": min_norm_gini,
@@ -208,7 +208,7 @@ def main():
             "min_breadth": args.min_breadth,
             "min_avg_read_ani": args.min_avg_read_ani,
             "min_coverage_evenness": args.min_coverage_evenness,
-            "min_evenness": args.min_evenness,
+            "min_coeff_var": args.min_coeff_var,
             "min_coverage_mean": args.min_coverage_mean,
             "min_norm_entropy": min_norm_entropy,
             "min_norm_gini": min_norm_gini,

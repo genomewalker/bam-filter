@@ -146,7 +146,7 @@ defaults = {
     "min_read_ani": 90.0,
     "min_breadth": 0,
     "min_coverage_evenness": 0,
-    "min_evenness": np.Inf,
+    "min_coeff_var": np.Inf,
     "min_coverage_mean": 0,
     "prefix": None,
     "sort_memory": "1G",
@@ -172,7 +172,7 @@ help_msg = {
     "min_read_ani": "Minimum read ANI to keep a read",
     "min_avg_read_ani": "Minimum average read ANI",
     "min_coverage_evenness": "Minimum coverage evenness",
-    "min_evenness": "Minimum coverage evenness calculated as SD/MEAN",
+    "min_coeff_var": "Minimum coverage evenness calculated as SD/MEAN",
     "min_coverage_mean": "Minimum coverage mean",
     "transform_cov_evenness": "Include those references that fullfi all filtering criteria but the coverage evenness is 0",
     "sort_memory": "Set maximum memory per thread for sorting; suffix K/M/G recognized",
@@ -352,16 +352,16 @@ def get_arguments(argv=None):
         help=help_msg["min_coverage_evenness"],
     )
     filter_args.add_argument(
-        "-E",
-        "--min-evenness",
+        "-V",
+        "--min-coeff-var",
         type=lambda x: float(
             check_values(
                 x, minval=0, maxval=np.Inf, parser=parser, var="--min-evenness"
             )
         ),
-        default=defaults["min_evenness"],
-        dest="min_evenness",
-        help=help_msg["min_evenness"],
+        default=defaults["min_coeff_var"],
+        dest="min_coeff_var",
+        help=help_msg["min_coeff_var"],
     )
     filter_args.add_argument(
         "-C",
