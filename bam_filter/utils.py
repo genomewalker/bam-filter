@@ -136,12 +136,27 @@ def is_valid_file(parser, arg, var):
         return arg
 
 
+# Check if is auto or number in a range
+def check_auto_range(val, minval, maxval, parser, var):
+    if val == "auto" or val is None or val == "None":
+        return val
+    else:
+        # check if float
+        try:
+            val = float(val)
+        except ValueError:
+            parser.error(
+                f"argument {var}: Invalid value {val}. Value has to be 'auto' or a 'float' between {minval} and {maxval}!"
+            )
+        return check_values(val, minval, maxval, parser, var)
+
+
 defaults = {
     "min_read_length": 30,
-    "min_read_count": 10,
+    "min_read_count": 3,
     "min_expected_breadth_ratio": 0,
-    "min_norm_entropy": None,
-    "min_norm_gini": None,
+    "min_norm_entropy": 0,
+    "min_norm_gini": 1.0,
     "min_avg_read_ani": 90.0,
     "min_read_ani": 90.0,
     "min_breadth": 0,
