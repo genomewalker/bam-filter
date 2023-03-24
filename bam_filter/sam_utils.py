@@ -39,6 +39,18 @@ sys.setrecursionlimit(10**6)
 #     return alns
 
 
+# function that creates an empty bam file
+def create_empty_bam(output):
+    """
+    Create an empty bam file
+    """
+    header = {"HD": {"VN": "1.0", "SO": "unsorted"}}
+
+    # Create an empty BAM file with the specified header
+    with pysam.AlignmentFile(output, "wb", header=header) as outfile:
+        pass
+
+
 def get_tad(cov, trim_min=10, trim_max=90):
     """
     Get the TAD of a coverage
@@ -1037,5 +1049,6 @@ def filter_reference_BAM(
             logging.info("Skipping filtering BAM file creation...")
     else:
         logging.info("No references meet the filter conditions.")
-        Path(out_files["bam_filtered"]).touch()
+        # Path(out_files["bam_filtered"]).touch()
+        create_empty_bam(out_files["bam_filtered"])
         Path(out_files["stats_filtered"]).touch()
