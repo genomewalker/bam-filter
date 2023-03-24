@@ -62,8 +62,8 @@ usage: filterBAM [-h] [-t THREADS] [--reference-trim-length TRIM_ENDS] [--trim-m
                  [--trim-max TRIM_MAX] [-p PREFIX] [-A MIN_READ_ANI] [-l MIN_READ_LENGTH]
                  [-n MIN_READ_COUNT] [-b MIN_EXPECTED_BREADTH_RATIO] [-e MIN_NORM_ENTROPY]
                  [-g MIN_NORM_GINI] [-B MIN_BREADTH] [-a MIN_AVG_READ_ANI] [-c MIN_COVERAGE_EVENNESS]
-                 [-C MIN_COVERAGE_MEAN] [--include-low-detection] [-m SORT_MEMORY] [-N]
-                 [--scale SCALE] [-r REFERENCE_LENGTHS] [--read-length-freqs] [--read-hits-count]
+                 [-V MIN_COEFF_VAR] [-C MIN_COVERAGE_MEAN] [--include-low-detection] [-m SORT_MEMORY]
+                 [-N] [--scale SCALE] [-r REFERENCE_LENGTHS] [--read-length-freqs] [--read-hits-count]
                  [--only-stats] [--plot] [--only-stats-filtered] [--chunk-size CHUNK_SIZE] [--debug]
                  [--version]
                  bam
@@ -106,19 +106,21 @@ filtering arguments:
   -l MIN_READ_LENGTH, --min-read-length MIN_READ_LENGTH
                         Minimum read length (default: 30)
   -n MIN_READ_COUNT, --min-read-count MIN_READ_COUNT
-                        Minimum read count (default: 10)
+                        Minimum read count (default: 3)
   -b MIN_EXPECTED_BREADTH_RATIO, --min-expected-breadth-ratio MIN_EXPECTED_BREADTH_RATIO
-                        Minimum expected breadth ratio (default: 0.5)
+                        Minimum expected breadth ratio (default: 0)
   -e MIN_NORM_ENTROPY, --min-normalized-entropy MIN_NORM_ENTROPY
-                        Minimum normalized entropy (default: None)
+                        Minimum normalized entropy (default: 0)
   -g MIN_NORM_GINI, --min-normalized-gini MIN_NORM_GINI
-                        Minimum normalized Gini coefficient (default: None)
+                        Minimum normalized Gini coefficient (default: 1.0)
   -B MIN_BREADTH, --min-breadth MIN_BREADTH
                         Minimum breadth (default: 0)
   -a MIN_AVG_READ_ANI, --min-avg-read-ani MIN_AVG_READ_ANI
                         Minimum average read ANI (default: 90.0)
   -c MIN_COVERAGE_EVENNESS, --min-coverage-evenness MIN_COVERAGE_EVENNESS
                         Minimum coverage evenness (default: 0)
+  -V MIN_COEFF_VAR, --min-coeff-var MIN_COEFF_VAR
+                        Minimum coverage evenness calculated as SD/MEAN (default: inf)
   -C MIN_COVERAGE_MEAN, --min-coverage-mean MIN_COVERAGE_MEAN
                         Minimum coverage mean (default: 0)
   --include-low-detection
