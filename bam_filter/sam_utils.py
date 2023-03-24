@@ -13,6 +13,7 @@ from bam_filter.utils import is_debug, calc_chunksize, initializer
 from bam_filter.entropy import entropy, norm_entropy, gini_coeff, norm_gini_coeff
 from collections import defaultdict
 import pyranges as pr
+from pathlib import Path
 
 # import cProfile as profile
 # import pstats
@@ -845,7 +846,6 @@ def filter_reference_BAM(
     threads,
     out_files,
     sort_memory,
-    only_stats_filtered,
     min_read_ani,
     transform_cov_evenness=False,
     sort_by_name=False,
@@ -938,9 +938,7 @@ def filter_reference_BAM(
         df_filtered.to_csv(
             out_files["stats_filtered"], sep="\t", index=False, compression="gzip"
         )
-        if only_stats_filtered:
-            logging.info("Skipping saving filtered BAM file.")
-        else:
+        if out_files["bam_filtered"] is not None:
             logging.info("Writing filtered BAM file... (be patient)")
             refs_dict = dict(
                 zip(df_filtered["reference"], df_filtered["bam_reference_length"])
@@ -1035,5 +1033,9 @@ def filter_reference_BAM(
                     )
 
             os.remove(out_files["bam_filtered_tmp"])
+        else:
+            logging.info("Skipping filtering BAM file creation...")
     else:
-        logging.info("No references meet the filter conditions. Skipping...")
+        logging.info("No references meet the filter conditions.")
+        Path(out_files["bam_filtered"]).touch()
+        Path(out_files["stats_filtered"]).touch()

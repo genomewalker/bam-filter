@@ -153,7 +153,13 @@ defaults = {
     "reference_lengths": None,
     "scale": 1e6,
     "chunk_size": None,
-    "plot": False,
+    "coverage_plots": None,
+    "stats": None,
+    "stats_filtered": None,
+    "bam_filtered": None,
+    "knee_plot": None,
+    "read_length_freqs": None,
+    "read_hits_count": None,
 }
 
 help_msg = {
@@ -179,9 +185,11 @@ help_msg = {
     "scale": "Scale taxonomic abundance by this factor; suffix K/M recognized",
     "read_length_freqs": "Save a JSON file with the read length frequencies mapped to each reference",
     "read_hits_count": "Save a TSV file with the read hits frequencies mapped to each reference",
-    "only_stats": "Only produce statistics and skip filtering",
-    "only_stats_filtered": "Only filter statistics and skip BAM filtering",
-    "plot": "Plot genome coverage plots",
+    "stats": "Save a TSV file with the statistics for each reference",
+    "stats_filtered": "Save a TSV file with the statistics for each reference after filtering",
+    "bam_filtered": "Save a BAM file with the references that passed the filtering criteria",
+    "coverage_plots": "Folder where to save genome coverage plots",
+    "knee_plot": "Plot knee plot",
     "sort_by_name": "Sort by read names",
     "chunk_size": "Chunk size for parallel processing",
     "help": "Help message",
@@ -199,6 +207,7 @@ def get_arguments(argv=None):
     # add subparser for filtering options:
     filter_args = parser.add_argument_group("filtering arguments")
     misc_args = parser.add_argument_group("miscellaneous arguments")
+    out_args = parser.add_argument_group("output arguments")
     parser.add_argument(
         "bam",
         type=lambda x: is_valid_file(parser, x, "bam"),
@@ -412,35 +421,69 @@ def get_arguments(argv=None):
         dest="reference_lengths",
         help=help_msg["reference_lengths"],
     )
-    parser.add_argument(
+    out_args.add_argument(
+        "--stats",
+        dest="stats",
+        default=defaults["stats"],
+        type=str,
+        nargs="?",
+        const="",
+        required=True,
+        help=help_msg["stats"],
+    )
+    out_args.add_argument(
+        "--stats-filtered",
+        dest="stats_filtered",
+        default=defaults["stats_filtered"],
+        type=str,
+        nargs="?",
+        const="",
+        help=help_msg["stats_filtered"],
+    )
+    out_args.add_argument(
+        "--bam-filtered",
+        dest="bam_filtered",
+        default=defaults["bam_filtered"],
+        type=str,
+        nargs="?",
+        const="",
+        help=help_msg["bam_filtered"],
+    )
+    out_args.add_argument(
         "--read-length-freqs",
         dest="read_length_freqs",
-        action="store_true",
+        default=defaults["read_length_freqs"],
+        type=str,
+        nargs="?",
+        const="",
         help=help_msg["read_length_freqs"],
     )
-    parser.add_argument(
+    out_args.add_argument(
         "--read-hits-count",
         dest="read_hits_count",
-        action="store_true",
+        default=defaults["read_hits_count"],
+        type=str,
+        nargs="?",
+        const="",
         help=help_msg["read_hits_count"],
     )
-    parser.add_argument(
-        "--only-stats",
-        dest="only_stats",
-        action="store_true",
-        help=help_msg["only_stats"],
+    out_args.add_argument(
+        "--knee-plot",
+        dest="knee_plot",
+        default=defaults["knee_plot"],
+        type=str,
+        nargs="?",
+        const="",
+        help=help_msg["knee_plot"],
     )
-    parser.add_argument(
-        "--plot",
-        dest="plot",
-        action="store_true",
-        help=help_msg["plot"],
-    )
-    parser.add_argument(
-        "--only-stats-filtered",
-        dest="only_stats_filtered",
-        action="store_true",
-        help=help_msg["only_stats_filtered"],
+    out_args.add_argument(
+        "--coverage-plots",
+        dest="coverage_plots",
+        default=defaults["coverage_plots"],
+        type=str,
+        nargs="?",
+        const="",
+        help=help_msg["coverage_plots"],
     )
     parser.add_argument(
         "--chunk-size",
@@ -523,18 +566,44 @@ def calc_chunksize(n_workers, len_iterable, factor=4):
     return chunksize
 
 
-def create_output_files(prefix, bam):
+def create_output_files(
+    prefix,
+    bam,
+    stats,
+    stats_filtered,
+    bam_filtered,
+    read_length_freqs,
+    read_hits_count,
+    knee_plot,
+    coverage_plots,
+):
     if prefix is None:
         prefix = bam.replace(".bam", "")
+
+    if stats == "":
+        stats = f"{prefix}_stats.tsv.gz"
+    if stats_filtered == "":
+        stats_filtered = f"{prefix}_stats-filtered.tsv.gz"
+    if bam_filtered == "":
+        bam_filtered = f"{prefix}.filtered.bam"
+    if read_length_freqs == "":
+        read_length_freqs = f"{prefix}_read-length-freqs.json"
+    if read_hits_count == "":
+        read_hits_count = f"{prefix}_read-hits-count.tsv.gz"
+    if knee_plot == "":
+        knee_plot = f"{prefix}_knee-plot.png"
+    if coverage_plots == "":
+        coverage_plots = f"{prefix}_coverage-plots"
+
     # create output files
     out_files = {
-        "stats": f"{prefix}_stats.tsv.gz",
-        "stats_filtered": f"{prefix}_stats-filtered.tsv.gz",
+        "stats": stats,
+        "stats_filtered": stats_filtered,
         "bam_filtered_tmp": f"{prefix}.filtered.tmp.bam",
-        "bam_filtered": f"{prefix}.filtered.bam",
-        "read_length_freqs": f"{prefix}_read-length-freqs.json",
-        "read_hits_count": f"{prefix}_read-hits-count.tsv.gz",
-        "knee_plot": f"{prefix}_knee-plot.png",
-        "coverage_plot_dir": f"{prefix}_coverage-plots",
+        "bam_filtered": bam_filtered,
+        "read_length_freqs": read_length_freqs,
+        "read_hits_count": read_hits_count,
+        "knee_plot": knee_plot,
+        "coverage_plot_dir": coverage_plots,
     }
     return out_files
