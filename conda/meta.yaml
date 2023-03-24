@@ -24,9 +24,9 @@ requirements:
     - scipy>=1.9.0
     - tqdm==4.50.0
     - pysam>=0.17.0
-    - numpy>=1.21.2
+    - numpy>=1.24
     - Cython>=0.29.24
-    - pyranges>=0.0.112
+    - pyranges>=0.0.118
     - kneed
     - matplotlib>=3.6.0
     
