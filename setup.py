@@ -10,7 +10,7 @@ requirements = [
     "numpy>1.24",
     "pyrle>=0.0.31",
     "sorted-nearest>=0.0.38",
-    "pyranges>=0.0.112",
+    "pyranges>=0.0.118",
     "kneed>=0.8.1",
     "matplotlib>=3.6.0",
 ]
