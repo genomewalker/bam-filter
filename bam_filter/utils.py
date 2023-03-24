@@ -209,7 +209,9 @@ def get_arguments(argv=None):
     misc_args = parser.add_argument_group("miscellaneous arguments")
     out_args = parser.add_argument_group("output arguments")
     parser.add_argument(
-        "bam",
+        "--bam",
+        required=True,
+        dest="bam",
         type=lambda x: is_valid_file(parser, x, "bam"),
         help=help_msg["bam"],
     )
