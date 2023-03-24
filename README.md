@@ -57,8 +57,7 @@ filterBAM only needs a BAM file. For a complete list of options:
 
 ```
 $ filterBAM --help
-
-usage: filterBAM [-h] [-t THREADS] [--reference-trim-length TRIM_ENDS] [--trim-min TRIM_MIN]
+usage: filterBAM [-h] --bam BAM [-t THREADS] [--reference-trim-length TRIM_ENDS] [--trim-min TRIM_MIN]
                  [--trim-max TRIM_MAX] [-p PREFIX] [-A MIN_READ_ANI] [-l MIN_READ_LENGTH]
                  [-n MIN_READ_COUNT] [-b MIN_EXPECTED_BREADTH_RATIO] [-e MIN_NORM_ENTROPY]
                  [-g MIN_NORM_GINI] [-B MIN_BREADTH] [-a MIN_AVG_READ_ANI] [-c MIN_COVERAGE_EVENNESS]
@@ -68,15 +67,12 @@ usage: filterBAM [-h] [-t THREADS] [--reference-trim-length TRIM_ENDS] [--trim-m
                  [--read-length-freqs [READ_LENGTH_FREQS]] [--read-hits-count [READ_HITS_COUNT]]
                  [--knee-plot [KNEE_PLOT]] [--coverage-plots [COVERAGE_PLOTS]]
                  [--chunk-size CHUNK_SIZE] [--debug] [--version]
-                 bam
 
 A simple tool to calculate metrics from a BAM file and filter with uneven coverage.
 
-positional arguments:
-  bam                   BAM file containing aligned reads
-
 optional arguments:
   -h, --help            show this help message and exit
+  --bam BAM             BAM file containing aligned reads (default: None)
   -t THREADS, --threads THREADS
                         Number of threads to use (default: 1)
   -p PREFIX, --prefix PREFIX
@@ -152,7 +148,7 @@ output arguments:
 One would run filterBAM as:
 
 ```bash
-filterBAM --stats --min-read-count 100 --min-expected-breadth-ratio 0.75 --min-read-ani 98 --sort-by-name --sort-memory 1G --reference-lengths gtdb-r202.len.map --threads 16  c55d4e2df1.dedup.bam 
+filterBAM --stats --min-read-count 100 --min-expected-breadth-ratio 0.75 --min-read-ani 98 --sort-by-name --sort-memory 1G --reference-lengths gtdb-r202.len.map --threads 16 --bam c55d4e2df1.dedup.bam 
 ```
 
 **--stats**: Save a TSV file with the statistics for each reference
