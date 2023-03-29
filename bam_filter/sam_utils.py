@@ -841,6 +841,13 @@ def process_bam(
         if chrom.mapped >= min_read_count
     ]
 
+    if len(references) == 0:
+        logging.warning("No reference sequences with alignments found in the BAM file")
+        create_empty_output_files(output_files)
+        sys.exit(0)
+
+    logging.info(f"Keeping {len(references):,} references")
+
     if low_memory:
         logging.info("Low memory mode enabled, writing filtered BAM file to disk")
         samfile.close()
@@ -851,13 +858,6 @@ def process_bam(
             sort_memory=sort_memory,
         )
         samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
-
-    if len(references) == 0:
-        logging.warning("No reference sequences with alignments found in the BAM file")
-        create_empty_output_files(output_files)
-        sys.exit(0)
-
-    logging.info(f"Keeping {len(references):,} references")
 
     if (chunksize is not None) and ((len(references) // chunksize) > threads):
         c_size = chunksize
