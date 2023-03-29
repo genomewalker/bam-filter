@@ -14,6 +14,8 @@ from bam_filter import __version__
 import time
 from itertools import chain
 import numpy as np
+from pathlib import Path
+import pysam
 
 log = logging.getLogger("my_logger")
 log.setLevel(logging.INFO)
@@ -22,6 +24,28 @@ timestr = time.strftime("%Y%m%d-%H%M%S")
 
 def is_debug():
     return logging.getLogger("my_logger").getEffectiveLevel() == logging.DEBUG
+
+
+def create_empty_output_files(out_files):
+    for key, value in out_files.items():
+        if value is not None:
+            if key == "bam_filtered":
+                create_empty_bam(value)
+            elif key == "bam_filtered_tmp":
+                continue
+            else:
+                Path(value).touch()
+
+
+# function that creates an empty bam file
+def create_empty_bam(output):
+    """
+    Create an empty bam file
+    """
+    header = {"HD": {"VN": "1.0", "SO": "unsorted"}}
+    # Create an empty BAM file with the specified header
+    with pysam.AlignmentFile(output, "wb", header=header) as outfile:
+        pass
 
 
 def check_values(val, minval, maxval, parser, var):
@@ -222,6 +246,7 @@ def get_arguments(argv=None):
             check_values(x, minval=1, maxval=1000, parser=parser, var="--threads")
         ),
         dest="threads",
+        metavar="INT",
         default=1,
         help=help_msg["threads"],
     )
@@ -233,6 +258,7 @@ def get_arguments(argv=None):
             )
         ),
         dest="trim_ends",
+        metavar="INT",
         default=0,
         help=help_msg["trim_ends"],
     )
@@ -242,6 +268,7 @@ def get_arguments(argv=None):
             check_values(x, minval=0, maxval=100, parser=parser, var="--trim-min")
         ),
         dest="trim_min",
+        metavar="INT",
         default=10,
         help=help_msg["trim_min"],
     )
@@ -251,6 +278,7 @@ def get_arguments(argv=None):
             check_values(x, minval=0, maxval=100, parser=parser, var="--trim-max")
         ),
         dest="trim_max",
+        metavar="INT",
         default=90,
         help=help_msg["trim_max"],
     )
@@ -259,6 +287,7 @@ def get_arguments(argv=None):
         "--prefix",
         type=str,
         default=defaults["prefix"],
+        metavar="STR",
         dest="prefix",
         help=help_msg["prefix"],
     )
@@ -268,6 +297,7 @@ def get_arguments(argv=None):
         type=lambda x: float(
             check_values(x, minval=0, maxval=100, parser=parser, var="--min-read-ani")
         ),
+        metavar="FLOAT",
         default=defaults["min_read_ani"],
         dest="min_read_ani",
         help=help_msg["min_read_ani"],
@@ -281,6 +311,7 @@ def get_arguments(argv=None):
             )
         ),
         default=defaults["min_read_length"],
+        metavar="INT",
         dest="min_read_length",
         help=help_msg["min_read_length"],
     )
@@ -289,10 +320,11 @@ def get_arguments(argv=None):
         "--min-read-count",
         type=lambda x: int(
             check_values(
-                x, minval=1, maxval=100000, parser=parser, var="--min-read-count"
+                x, minval=1, maxval=np.Inf, parser=parser, var="--min-read-count"
             )
         ),
         default=defaults["min_read_count"],
+        metavar="INT",
         dest="min_read_count",
         help=help_msg["min_read_count"],
     )
@@ -304,6 +336,7 @@ def get_arguments(argv=None):
                 x, minval=0, maxval=1, parser=parser, var="--min-expected-breadth-ratio"
             )
         ),
+        metavar="FLOAT",
         default=defaults["min_expected_breadth_ratio"],
         dest="min_expected_breadth_ratio",
         help=help_msg["min_expected_breadth_ratio"],
@@ -315,6 +348,7 @@ def get_arguments(argv=None):
             x, minval=0, maxval=1, parser=parser, var="--min-normalized-entropy"
         ),
         default=defaults["min_norm_entropy"],
+        metavar="FLOAT",
         dest="min_norm_entropy",
         help=help_msg["min_norm_entropy"],
     )
@@ -325,6 +359,7 @@ def get_arguments(argv=None):
             x, minval=0, maxval=1, parser=parser, var="--min-normalized-gini"
         ),
         default=defaults["min_norm_gini"],
+        metavar="FLOAT",
         dest="min_norm_gini",
         help=help_msg["min_norm_gini"],
     )
@@ -335,6 +370,7 @@ def get_arguments(argv=None):
             check_values(x, minval=0, maxval=1, parser=parser, var="--min-breadth")
         ),
         default=defaults["min_breadth"],
+        metavar="FLOAT",
         dest="min_breadth",
         help=help_msg["min_breadth"],
     )
@@ -346,6 +382,7 @@ def get_arguments(argv=None):
                 x, minval=0, maxval=100, parser=parser, var="--min-avg-read-ani"
             )
         ),
+        metavar="FLOAT",
         default=defaults["min_avg_read_ani"],
         dest="min_avg_read_ani",
         help=help_msg["min_avg_read_ani"],
@@ -358,6 +395,7 @@ def get_arguments(argv=None):
                 x, minval=0, maxval=1, parser=parser, var="--min-coverage-evenness"
             )
         ),
+        metavar="FLOAT",
         default=defaults["min_coverage_evenness"],
         dest="min_coverage_evenness",
         help=help_msg["min_coverage_evenness"],
@@ -371,6 +409,7 @@ def get_arguments(argv=None):
             )
         ),
         default=defaults["min_coeff_var"],
+        metavar="FLOAT",
         dest="min_coeff_var",
         help=help_msg["min_coeff_var"],
     )
@@ -383,6 +422,7 @@ def get_arguments(argv=None):
             )
         ),
         default=defaults["min_coverage_mean"],
+        metavar="FLOAT",
         dest="min_coverage_mean",
         help=help_msg["min_coverage_mean"],
     )
@@ -397,6 +437,7 @@ def get_arguments(argv=None):
         "--sort-memory",
         type=lambda x: check_suffix(x, parser=parser, var="--sort-memory"),
         default=defaults["sort_memory"],
+        metavar="STR",
         dest="sort_memory",
         help=help_msg["sort_memory"],
     )
@@ -412,6 +453,7 @@ def get_arguments(argv=None):
         type=lambda x: check_suffix(x, parser=parser, var="--scale"),
         default=defaults["scale"],
         dest="scale",
+        metavar="STR",
         help=help_msg["scale"],
     )
     # reference_lengths
@@ -419,6 +461,7 @@ def get_arguments(argv=None):
         "-r",
         "--reference-lengths",
         type=lambda x: is_valid_file(parser, x, "reference_lengths"),
+        metavar="FILE",
         default=defaults["reference_lengths"],
         dest="reference_lengths",
         help=help_msg["reference_lengths"],
@@ -428,6 +471,7 @@ def get_arguments(argv=None):
         dest="stats",
         default=defaults["stats"],
         type=str,
+        metavar="FILE",
         nargs="?",
         const="",
         required=True,
@@ -438,6 +482,7 @@ def get_arguments(argv=None):
         dest="stats_filtered",
         default=defaults["stats_filtered"],
         type=str,
+        metavar="FILE",
         nargs="?",
         const="",
         help=help_msg["stats_filtered"],
@@ -446,6 +491,7 @@ def get_arguments(argv=None):
         "--bam-filtered",
         dest="bam_filtered",
         default=defaults["bam_filtered"],
+        metavar="FILE",
         type=str,
         nargs="?",
         const="",
@@ -455,6 +501,7 @@ def get_arguments(argv=None):
         "--read-length-freqs",
         dest="read_length_freqs",
         default=defaults["read_length_freqs"],
+        metavar="FILE",
         type=str,
         nargs="?",
         const="",
@@ -464,6 +511,7 @@ def get_arguments(argv=None):
         "--read-hits-count",
         dest="read_hits_count",
         default=defaults["read_hits_count"],
+        metavar="FILE",
         type=str,
         nargs="?",
         const="",
@@ -473,6 +521,7 @@ def get_arguments(argv=None):
         "--knee-plot",
         dest="knee_plot",
         default=defaults["knee_plot"],
+        metavar="FILE",
         type=str,
         nargs="?",
         const="",
@@ -481,6 +530,7 @@ def get_arguments(argv=None):
     out_args.add_argument(
         "--coverage-plots",
         dest="coverage_plots",
+        metavar="FILE",
         default=defaults["coverage_plots"],
         type=str,
         nargs="?",
@@ -493,6 +543,7 @@ def get_arguments(argv=None):
             check_values(x, minval=1, maxval=100000, parser=parser, var="--chunk-size")
         ),
         default=defaults["chunk_size"],
+        metavar="INT",
         dest="chunk_size",
         help=help_msg["chunk_size"],
     )
@@ -568,6 +619,71 @@ def calc_chunksize(n_workers, len_iterable, factor=4):
     return chunksize
 
 
+# def create_output_files(
+#     prefix,
+#     bam,
+#     stats,
+#     stats_filtered,
+#     bam_filtered,
+#     read_length_freqs,
+#     read_hits_count,
+#     knee_plot,
+#     coverage_plots,
+# ):
+#     if prefix is None:
+#         prefix = bam.replace(".bam", "")
+
+#     out_files = {}
+#     if stats is not None:
+#         if stats == "":
+#             out_files["stats"] = f"{prefix}_stats.tsv.gz"
+#         else:
+#             out_files["stats"] = stats
+#     if stats_filtered is not None:
+#         if stats_filtered == "":
+#             out_files["stats_filtered"] = f"{prefix}_stats-filtered.tsv.gz"
+#         else:
+#             out_files["stats_filtered"] = stats_filtered
+#     if bam_filtered is not None:
+#         if bam_filtered == "":
+#             out_files["bam_filtered"] = f"{prefix}.filtered.bam"
+#         else:
+#             out_files["bam_filtered"] = bam_filtered
+#     if read_length_freqs is not None:
+#         if read_length_freqs == "":
+#             out_files["read_length_freqs"] = f"{prefix}_read-length-freqs.json"
+#         else:
+#             out_files["read_length_freqs"] = read_length_freqs
+#     if read_hits_count is not None:
+#         if read_hits_count == "":
+#             out_files["read_hits_count"] = f"{prefix}_read-hits-count.tsv.gz"
+#         else:
+#             out_files["read_hits_count"] = read_hits_count
+#     if knee_plot is not None:
+#         if knee_plot == "":
+#             out_files["knee_plot"] = f"{prefix}_knee-plot.png"
+#         else:
+#             out_files["knee_plot"] = knee_plot
+#     if coverage_plots is not None:
+#         if coverage_plots == "":
+#             out_files["coverage_plot_dir"] = f"{prefix}_coverage-plots"
+#         else:
+#             out_files["coverage_plot_dir"] = coverage_plots
+#     out_files["bam_filtered_tmp"] = (f"{prefix}.filtered.tmp.bam",)
+
+
+#     # create output files
+#     out_files = {
+#         "stats": stats,
+#         "stats_filtered": stats_filtered,
+#         "bam_filtered_tmp": f"{prefix}.filtered.tmp.bam",
+#         "bam_filtered": bam_filtered,
+#         "read_length_freqs": read_length_freqs,
+#         "read_hits_count": read_hits_count,
+#         "knee_plot": knee_plot,
+#         "coverage_plot_dir": coverage_plots,
+#     }
+#     return out_files
 def create_output_files(
     prefix,
     bam,

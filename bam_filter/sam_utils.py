@@ -9,7 +9,13 @@ from scipy import stats
 import tqdm
 import logging
 import warnings
-from bam_filter.utils import is_debug, calc_chunksize, initializer
+from bam_filter.utils import (
+    is_debug,
+    calc_chunksize,
+    initializer,
+    create_empty_output_files,
+    create_empty_bam,
+)
 from bam_filter.entropy import entropy, norm_entropy, gini_coeff, norm_gini_coeff
 from collections import defaultdict
 import pyranges as pr
@@ -37,18 +43,6 @@ sys.setrecursionlimit(10**6)
 #     ):
 #         alns.append(aln.to_string())
 #     return alns
-
-
-# function that creates an empty bam file
-def create_empty_bam(output):
-    """
-    Create an empty bam file
-    """
-    header = {"HD": {"VN": "1.0", "SO": "unsorted"}}
-
-    # Create an empty BAM file with the specified header
-    with pysam.AlignmentFile(output, "wb", header=header) as outfile:
-        pass
 
 
 def get_tad(cov, trim_min=10, trim_max=90):
@@ -713,6 +707,7 @@ def process_bam(
     plots_dir="coverage-plots",
     chunksize=None,
     read_length_freqs=False,
+    output_files=None,
 ):
     """
     Processing function: calls pool of worker functions
@@ -740,6 +735,7 @@ def process_bam(
             logging.error(
                 "The BAM file contains references not found in the reference lengths file"
             )
+            sys.exit(1)
             sys.exit(1)
 
     total_refs = samfile.nreferences
@@ -771,8 +767,9 @@ def process_bam(
     ]
 
     if len(references) == 0:
-        logging.error("No reference sequences with alignments found in the BAM file")
-        sys.exit(1)
+        logging.warning("No reference sequences with alignments found in the BAM file")
+        create_empty_output_files(output_files)
+        sys.exit(0)
 
     logging.info(f"Keeping {len(references):,} references")
 

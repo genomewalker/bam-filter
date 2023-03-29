@@ -121,6 +121,7 @@ def main():
         plots_dir=out_files["coverage_plot_dir"],
         chunksize=args.chunk_size,
         read_length_freqs=args.read_length_freqs,
+        output_files=out_files,
     )
     logging.info("Reducing results to a single dataframe")
     # data = list(filter(None, data))
