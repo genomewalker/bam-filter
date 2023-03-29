@@ -45,6 +45,80 @@ sys.setrecursionlimit(10**6)
 #     return alns
 
 
+def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
+    logging.info("Writing temporary filtered BAM file... (be patient)")
+    samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
+    refs_dict = dict(zip(samfile.references, samfile.lengths))
+    (ref_names, ref_lengths) = zip(*refs_dict.items())
+
+    refs_idx = {x: i for i, x in enumerate(ref_names)}
+
+    out_bam_file = pysam.AlignmentFile(
+        output_files["bam_tmp"],
+        "wb",
+        referencenames=list(ref_names),
+        referencelengths=list(ref_lengths),
+        threads=threads,
+    )
+
+    references = [x for x in samfile.references if x in refs_idx.keys()]
+
+    logging.info(f"::: Filtering {len(references):,} references sequentially...")
+    for reference in tqdm.tqdm(
+        references,
+        total=len(references),
+        leave=False,
+        ncols=80,
+        desc="References processed",
+    ):
+        for aln in samfile.fetch(
+            reference=reference, multiple_iterators=False, until_eof=True
+        ):
+            out_bam_file.write(aln)
+    out_bam_file.close()
+    # prof.disable()
+    # # print profiling output
+    # stats = pstats.Stats(prof).strip_dirs().sort_stats("tottime")
+    # stats.print_stats(5)  # top 10 rows
+    pysam.sort(
+        "-@",
+        str(threads),
+        "-m",
+        str(sort_memory),
+        "-o",
+        output_files["bam_tmp_sorted"],
+        output_files["bam_tmp"],
+    )
+
+    logging.info("BAM index not found. Indexing...")
+    save = pysam.set_verbosity(0)
+    samfile = pysam.AlignmentFile(output_files["bam_tmp_sorted"], "rb", threads=threads)
+    chr_lengths = []
+    for chrom in samfile.references:
+        chr_lengths.append(samfile.get_reference_length(chrom))
+    max_chr_length = np.max(chr_lengths)
+    pysam.set_verbosity(save)
+    samfile.close()
+
+    if max_chr_length > 536870912:
+        logging.info("A reference is longer than 2^29, indexing with csi")
+        pysam.index(
+            "-c",
+            "-@",
+            str(threads),
+            output_files["bam_tmp_sorted"],
+        )
+    else:
+        pysam.index(
+            "-@",
+            str(threads),
+            output_files["bam_tmp_sorted"],
+        )
+
+    os.remove(output_files["bam_tmp"])
+    return output_files["bam_tmp_sorted"]
+
+
 def get_tad(cov, trim_min=10, trim_max=90):
     """
     Get the TAD of a coverage
@@ -708,6 +782,8 @@ def process_bam(
     chunksize=None,
     read_length_freqs=False,
     output_files=None,
+    low_memory=False,
+    sort_memory="1G",
 ):
     """
     Processing function: calls pool of worker functions
@@ -720,12 +796,12 @@ def process_bam(
 
     references = samfile.references
 
-    chr_lengths = []
-    for chrom in samfile.references:
-        chr_lengths.append(samfile.get_reference_length(chrom))
+    # chr_lengths = []
+    # for chrom in samfile.references:
+    #     chr_lengths.append(samfile.get_reference_length(chrom))
     pysam.set_verbosity(save)
-    ref_lengths = None
 
+    ref_lengths = None
     if reference_lengths is not None:
         ref_lengths = pd.read_csv(
             reference_lengths, sep="\t", index_col=0, names=["reference", "length"]
@@ -754,7 +830,6 @@ def process_bam(
     #     desc=f"Alignments processed",
     # ):
     #     alns_in_ref[aln.reference_name] += 1
-
     if plot:
         # Check if image folder exists
         if not os.path.exists(plots_dir):
@@ -765,6 +840,17 @@ def process_bam(
         for chrom in samfile.get_index_statistics()
         if chrom.mapped >= min_read_count
     ]
+
+    if low_memory:
+        logging.info("Low memory mode enabled, writing filtered BAM file to disk")
+        samfile.close()
+        bam = write_bam(
+            bam=bam,
+            references=references,
+            output_files=output_files,
+            sort_memory=sort_memory,
+        )
+        samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
 
     if len(references) == 0:
         logging.warning("No reference sequences with alignments found in the BAM file")

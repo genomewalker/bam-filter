@@ -31,7 +31,9 @@ def create_empty_output_files(out_files):
         if value is not None:
             if key == "bam_filtered":
                 create_empty_bam(value)
-            elif key == "bam_filtered_tmp":
+            elif (
+                key == "bam_filtered_tmp" or key == "bam_tmp" or key == "bam_tmp_sorted"
+            ):
                 continue
             else:
                 Path(value).touch()
@@ -219,6 +221,7 @@ help_msg = {
     "help": "Help message",
     "debug": "Print debug messages",
     "reference_lengths": "File with references lengths",
+    "low_memory": "Activate the low memory mode",
     "version": "Print program version",
 }
 
@@ -548,6 +551,12 @@ def get_arguments(argv=None):
         help=help_msg["chunk_size"],
     )
     parser.add_argument(
+        "--low-memory",
+        dest="low_memory",
+        action="store_true",
+        help=help_msg["low_memory"],
+    )
+    parser.add_argument(
         "--debug", dest="debug", action="store_true", help=help_msg["debug"]
     )
     parser.add_argument(
@@ -718,6 +727,8 @@ def create_output_files(
         "stats": stats,
         "stats_filtered": stats_filtered,
         "bam_filtered_tmp": f"{prefix}.filtered.tmp.bam",
+        "bam_tmp": f"{prefix}.tmp.bam",
+        "bam_tmp_sorted": f"{prefix}.tmp.sorted.bam",
         "bam_filtered": bam_filtered,
         "read_length_freqs": read_length_freqs,
         "read_hits_count": read_hits_count,

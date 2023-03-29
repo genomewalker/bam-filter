@@ -122,7 +122,12 @@ def main():
         chunksize=args.chunk_size,
         read_length_freqs=args.read_length_freqs,
         output_files=out_files,
+        sort_memory=args.sort_memory,
+        low_memory=args.low_memory,
     )
+    if args.low_memory:
+        bam = out_files["bam_tmp_sorted"]
+
     logging.info("Reducing results to a single dataframe")
     # data = list(filter(None, data))
     data_df = [x[0] for x in data if x[0] is not None]
@@ -249,6 +254,8 @@ def main():
         )
     else:
         logging.info("Skipping filtering of reference BAM file.")
+    if args.low_memory:
+        os.remove(out_files["bam_tmp_sorted"])
     logging.info("ALL DONE.")
 
 
