@@ -46,16 +46,21 @@ sys.setrecursionlimit(10**6)
 
 
 def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
-    logging.info("Writing temporary filtered BAM file... (be patient)")
+    logging.info("::: Writing temporary filtered BAM file... (be patient)")
     samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
+    print("I am here")
     refs_dict = dict(zip(samfile.references, samfile.lengths))
+    print("I am here1")
 
     # filter references
     refs_dict = {k: v for k, v in refs_dict.items() if k in references}
+    print("I am here2")
 
     (ref_names, ref_lengths) = zip(*refs_dict.items())
+    print("I am here3")
 
     refs_idx = {x: i for i, x in enumerate(ref_names)}
+    print("I am here4")
 
     out_bam_file = pysam.AlignmentFile(
         output_files["bam_tmp"],
@@ -64,10 +69,11 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
         referencelengths=list(ref_lengths),
         threads=threads,
     )
+    print("I am here5")
 
     references = [x for x in samfile.references if x in refs_idx.keys()]
 
-    logging.info(f"::: Filtering {len(references):,} references sequentially...")
+    logging.info(f"::: ::: Filtering {len(references):,} references sequentially...")
     for reference in tqdm.tqdm(
         references,
         total=len(references),
@@ -95,7 +101,7 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
         output_files["bam_tmp"],
     )
 
-    logging.info("BAM index not found. Indexing...")
+    logging.info("::: ::: BAM index not found. Indexing...")
     save = pysam.set_verbosity(0)
     samfile = pysam.AlignmentFile(output_files["bam_tmp_sorted"], "rb", threads=threads)
     chr_lengths = []
@@ -106,7 +112,7 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
     samfile.close()
 
     if max_chr_length > 536870912:
-        logging.info("A reference is longer than 2^29, indexing with csi")
+        logging.info("::: ::: A reference is longer than 2^29, indexing with csi")
         pysam.index(
             "-c",
             "-@",
