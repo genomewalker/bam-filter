@@ -49,6 +49,10 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
     logging.info("Writing temporary filtered BAM file... (be patient)")
     samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
     refs_dict = dict(zip(samfile.references, samfile.lengths))
+
+    # filter references
+    refs_dict = {k: v for k, v in refs_dict.items() if k in references}
+
     (ref_names, ref_lengths) = zip(*refs_dict.items())
 
     refs_idx = {x: i for i, x in enumerate(ref_names)}
@@ -74,6 +78,7 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
         for aln in samfile.fetch(
             reference=reference, multiple_iterators=False, until_eof=True
         ):
+            aln.reference_id = refs_idx[aln.reference_name]
             out_bam_file.write(aln)
     out_bam_file.close()
     # prof.disable()
