@@ -49,7 +49,7 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
     logging.info("::: Writing temporary filtered BAM file... (be patient)")
     samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
 
-    print("I am here")
+    # convert the dictionary to an array
     refs_dict = dict(zip(samfile.references, samfile.lengths))
     my_array = np.array(list(refs_dict.items()))
 
@@ -62,23 +62,12 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
     # convert the filtered array back to a dictionary
     refs_dict = dict(filtered_array)
 
-    print("I am here1")
-
-    # filter references from refs_dict
-    # refs_dict = dict(filter(lambda item: item[0] in references, refs_dict.items()))
-
-    # refs_dict = {k: v for k, v in refs_dict.items() if k in references}
-    print("I am here2")
-
     (ref_names, ref_lengths) = zip(*refs_dict.items())
     ref_lengths = list(ref_lengths)
     # convert reference lengths to integers
     ref_lengths = [int(x) for x in ref_lengths]
 
-    print("I am here3")
-
     refs_idx = {x: i for i, x in enumerate(ref_names)}
-    print("I am here4")
 
     out_bam_file = pysam.AlignmentFile(
         output_files["bam_tmp"],
@@ -87,7 +76,6 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
         referencelengths=ref_lengths,
         threads=threads,
     )
-    print("I am here5")
 
     references = [x for x in samfile.references if x in refs_idx.keys()]
 
@@ -105,10 +93,12 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
             aln.reference_id = refs_idx[aln.reference_name]
             out_bam_file.write(aln)
     out_bam_file.close()
+    samfile.close()
     # prof.disable()
     # # print profiling output
     # stats = pstats.Stats(prof).strip_dirs().sort_stats("tottime")
     # stats.print_stats(5)  # top 10 rows
+    logging.info("::: ::: Sorting BAM file...")
     pysam.sort(
         "-@",
         str(threads),
