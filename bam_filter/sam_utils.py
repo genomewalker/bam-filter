@@ -875,6 +875,7 @@ def process_bam(
             references=references,
             output_files=output_files,
             sort_memory=sort_memory,
+            threads=threads,
         )
         samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
 
