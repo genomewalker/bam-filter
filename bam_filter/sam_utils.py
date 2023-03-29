@@ -48,12 +48,15 @@ sys.setrecursionlimit(10**6)
 def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
     logging.info("::: Writing temporary filtered BAM file... (be patient)")
     samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
+
     print("I am here")
     refs_dict = dict(zip(samfile.references, samfile.lengths))
     print("I am here1")
 
-    # filter references
-    refs_dict = {k: v for k, v in refs_dict.items() if k in references}
+    # filter references from refs_dict
+    refs_dict = dict(filter(lambda item: item[0] in references, refs_dict.items()))
+
+    # refs_dict = {k: v for k, v in refs_dict.items() if k in references}
     print("I am here2")
 
     (ref_names, ref_lengths) = zip(*refs_dict.items())
