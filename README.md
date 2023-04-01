@@ -57,91 +57,87 @@ filterBAM only needs a BAM file. For a complete list of options:
 
 ```
 $ filterBAM --help
-usage: filterBAM [-h] --bam BAM [-t THREADS] [--reference-trim-length TRIM_ENDS] [--trim-min TRIM_MIN]
-                 [--trim-max TRIM_MAX] [-p PREFIX] [-A MIN_READ_ANI] [-l MIN_READ_LENGTH]
-                 [-n MIN_READ_COUNT] [-b MIN_EXPECTED_BREADTH_RATIO] [-e MIN_NORM_ENTROPY]
-                 [-g MIN_NORM_GINI] [-B MIN_BREADTH] [-a MIN_AVG_READ_ANI] [-c MIN_COVERAGE_EVENNESS]
-                 [-V MIN_COEFF_VAR] [-C MIN_COVERAGE_MEAN] [--include-low-detection] [-m SORT_MEMORY]
-                 [-N] [--scale SCALE] [-r REFERENCE_LENGTHS] --stats [STATS]
-                 [--stats-filtered [STATS_FILTERED]] [--bam-filtered [BAM_FILTERED]]
-                 [--read-length-freqs [READ_LENGTH_FREQS]] [--read-hits-count [READ_HITS_COUNT]]
-                 [--knee-plot [KNEE_PLOT]] [--coverage-plots [COVERAGE_PLOTS]]
-                 [--chunk-size CHUNK_SIZE] [--debug] [--version]
+usage: filterBAM [-h] --bam BAM [-t INT] [--reference-trim-length INT] [--trim-min INT]
+                 [--trim-max INT] [-p STR] [-A FLOAT] [-l INT] [-n INT] [-b FLOAT] [-e FLOAT]
+                 [-g FLOAT] [-B FLOAT] [-a FLOAT] [-c FLOAT] [-V FLOAT] [-C FLOAT]
+                 [--include-low-detection] [-m STR] [-N] [--scale STR] [-r FILE] --stats [FILE]
+                 [--stats-filtered [FILE]] [--bam-filtered [FILE]] [--read-length-freqs [FILE]]
+                 [--read-hits-count [FILE]] [--knee-plot [FILE]] [--coverage-plots [FILE]]
+                 [--chunk-size INT] [--tmp-dir DIR] [--low-memory] [--debug] [--version]
 
 A simple tool to calculate metrics from a BAM file and filter with uneven coverage.
 
 optional arguments:
   -h, --help            show this help message and exit
   --bam BAM             BAM file containing aligned reads (default: None)
-  -t THREADS, --threads THREADS
+  -t INT, --threads INT
                         Number of threads to use (default: 1)
-  -p PREFIX, --prefix PREFIX
-                        Prefix used for the output files (default: None)
-  -m SORT_MEMORY, --sort-memory SORT_MEMORY
+  -p STR, --prefix STR  Prefix used for the output files (default: None)
+  -m STR, --sort-memory STR
                         Set maximum memory per thread for sorting; suffix K/M/G recognized (default:
                         1G)
   -N, --sort-by-name    Sort by read names (default: False)
-  --scale SCALE         Scale taxonomic abundance by this factor; suffix K/M recognized (default:
+  --scale STR           Scale taxonomic abundance by this factor; suffix K/M recognized (default:
                         1000000.0)
-  -r REFERENCE_LENGTHS, --reference-lengths REFERENCE_LENGTHS
+  -r FILE, --reference-lengths FILE
                         File with references lengths (default: None)
-  --chunk-size CHUNK_SIZE
-                        Chunk size for parallel processing (default: None)
+  --chunk-size INT      Chunk size for parallel processing (default: None)
+  --tmp-dir DIR         Temporary directory (default: None)
+  --low-memory          Activate the low memory mode (default: False)
   --debug               Print debug messages (default: False)
   --version             Print program version
 
 filtering arguments:
-  -A MIN_READ_ANI, --min-read-ani MIN_READ_ANI
+  -A FLOAT, --min-read-ani FLOAT
                         Minimum read ANI to keep a read (default: 90.0)
-  -l MIN_READ_LENGTH, --min-read-length MIN_READ_LENGTH
+  -l INT, --min-read-length INT
                         Minimum read length (default: 30)
-  -n MIN_READ_COUNT, --min-read-count MIN_READ_COUNT
+  -n INT, --min-read-count INT
                         Minimum read count (default: 3)
-  -b MIN_EXPECTED_BREADTH_RATIO, --min-expected-breadth-ratio MIN_EXPECTED_BREADTH_RATIO
+  -b FLOAT, --min-expected-breadth-ratio FLOAT
                         Minimum expected breadth ratio (default: 0)
-  -e MIN_NORM_ENTROPY, --min-normalized-entropy MIN_NORM_ENTROPY
+  -e FLOAT, --min-normalized-entropy FLOAT
                         Minimum normalized entropy (default: 0)
-  -g MIN_NORM_GINI, --min-normalized-gini MIN_NORM_GINI
+  -g FLOAT, --min-normalized-gini FLOAT
                         Minimum normalized Gini coefficient (default: 1.0)
-  -B MIN_BREADTH, --min-breadth MIN_BREADTH
+  -B FLOAT, --min-breadth FLOAT
                         Minimum breadth (default: 0)
-  -a MIN_AVG_READ_ANI, --min-avg-read-ani MIN_AVG_READ_ANI
+  -a FLOAT, --min-avg-read-ani FLOAT
                         Minimum average read ANI (default: 90.0)
-  -c MIN_COVERAGE_EVENNESS, --min-coverage-evenness MIN_COVERAGE_EVENNESS
+  -c FLOAT, --min-coverage-evenness FLOAT
                         Minimum coverage evenness (default: 0)
-  -V MIN_COEFF_VAR, --min-coeff-var MIN_COEFF_VAR
+  -V FLOAT, --min-coeff-var FLOAT
                         Minimum coverage evenness calculated as SD/MEAN (default: inf)
-  -C MIN_COVERAGE_MEAN, --min-coverage-mean MIN_COVERAGE_MEAN
+  -C FLOAT, --min-coverage-mean FLOAT
                         Minimum coverage mean (default: 0)
   --include-low-detection
                         Include those references that fullfi all filtering criteria but the coverage
                         evenness is 0 (default: False)
 
 miscellaneous arguments:
-  --reference-trim-length TRIM_ENDS
+  --reference-trim-length INT
                         Exclude n bases at the ends of the reference sequences (default: 0)
-  --trim-min TRIM_MIN   Remove coverage that are below this percentile. Used for the Truncated Average
+  --trim-min INT        Remove coverage that are below this percentile. Used for the Truncated Average
                         Depth (TAD) calculation (default: 10)
-  --trim-max TRIM_MAX   Remove coverage that are above this percentile. Used for the Truncated Average
+  --trim-max INT        Remove coverage that are above this percentile. Used for the Truncated Average
                         Depth (TAD) calculation (default: 90)
 
 output arguments:
-  --stats [STATS]       Save a TSV file with the statistics for each reference (default: None)
-  --stats-filtered [STATS_FILTERED]
+  --stats [FILE]        Save a TSV file with the statistics for each reference (default: None)
+  --stats-filtered [FILE]
                         Save a TSV file with the statistics for each reference after filtering
                         (default: None)
-  --bam-filtered [BAM_FILTERED]
+  --bam-filtered [FILE]
                         Save a BAM file with the references that passed the filtering criteria
                         (default: None)
-  --read-length-freqs [READ_LENGTH_FREQS]
+  --read-length-freqs [FILE]
                         Save a JSON file with the read length frequencies mapped to each reference
                         (default: None)
-  --read-hits-count [READ_HITS_COUNT]
+  --read-hits-count [FILE]
                         Save a TSV file with the read hits frequencies mapped to each reference
                         (default: None)
-  --knee-plot [KNEE_PLOT]
-                        Plot knee plot (default: None)
-  --coverage-plots [COVERAGE_PLOTS]
+  --knee-plot [FILE]    Plot knee plot (default: None)
+  --coverage-plots [FILE]
                         Folder where to save genome coverage plots (default: None)
 ```
 
