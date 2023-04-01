@@ -49,6 +49,9 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
     logging.info("::: Writing temporary filtered BAM file... (be patient)")
     samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
 
+    if threads > 4:
+        threads = 4
+
     # convert the dictionary to an array
     refs_dict = dict(zip(samfile.references, samfile.lengths))
     my_array = np.array(list(refs_dict.items()))
@@ -69,12 +72,17 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
 
     refs_idx = {x: i for i, x in enumerate(ref_names)}
 
+    if threads > 4:
+        write_threads = 4
+    else:
+        write_threads = threads
+
     out_bam_file = pysam.AlignmentFile(
         output_files["bam_tmp"],
         "wb",
         referencenames=list(ref_names),
         referencelengths=ref_lengths,
-        threads=threads,
+        threads=write_threads,
     )
 
     references = [x for x in samfile.references if x in refs_idx.keys()]
@@ -1061,13 +1069,17 @@ def filter_reference_BAM(
             (ref_names, ref_lengths) = zip(*refs_dict.items())
 
             refs_idx = {x: i for i, x in enumerate(ref_names)}
+            if threads > 4:
+                write_threads = 4
+            else:
+                write_threads = threads
 
             out_bam_file = pysam.AlignmentFile(
                 out_files["bam_filtered_tmp"],
                 "wb",
                 referencenames=list(ref_names),
                 referencelengths=list(ref_lengths),
-                threads=threads,
+                threads=write_threads,
             )
 
             samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
