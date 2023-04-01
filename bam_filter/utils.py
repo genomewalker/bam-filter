@@ -186,6 +186,7 @@ defaults = {
     "knee_plot": None,
     "read_length_freqs": None,
     "read_hits_count": None,
+    "tmp_dir": None,
 }
 
 help_msg = {
@@ -218,6 +219,7 @@ help_msg = {
     "knee_plot": "Plot knee plot",
     "sort_by_name": "Sort by read names",
     "chunk_size": "Chunk size for parallel processing",
+    "tmp_dir": "Temporary directory",
     "help": "Help message",
     "debug": "Print debug messages",
     "reference_lengths": "File with references lengths",
@@ -549,6 +551,14 @@ def get_arguments(argv=None):
         metavar="INT",
         dest="chunk_size",
         help=help_msg["chunk_size"],
+    )
+    parser.add_argument(
+        "--tmp-dir",
+        type=str,
+        default=defaults["tmp_dir"],
+        metavar="DIR",
+        dest="tmp_dir",
+        help=help_msg["tmp_dir"],
     )
     parser.add_argument(
         "--low-memory",
