@@ -57,24 +57,22 @@ filterBAM only needs a BAM file. For a complete list of options:
 
 ```
 $ filterBAM --help
-
-usage: filterBAM [-h] [-t THREADS] [--reference-trim-length TRIM_ENDS] [--trim-min TRIM_MIN]
+usage: filterBAM [-h] --bam BAM [-t THREADS] [--reference-trim-length TRIM_ENDS] [--trim-min TRIM_MIN]
                  [--trim-max TRIM_MAX] [-p PREFIX] [-A MIN_READ_ANI] [-l MIN_READ_LENGTH]
                  [-n MIN_READ_COUNT] [-b MIN_EXPECTED_BREADTH_RATIO] [-e MIN_NORM_ENTROPY]
                  [-g MIN_NORM_GINI] [-B MIN_BREADTH] [-a MIN_AVG_READ_ANI] [-c MIN_COVERAGE_EVENNESS]
                  [-V MIN_COEFF_VAR] [-C MIN_COVERAGE_MEAN] [--include-low-detection] [-m SORT_MEMORY]
-                 [-N] [--scale SCALE] [-r REFERENCE_LENGTHS] [--read-length-freqs] [--read-hits-count]
-                 [--only-stats] [--plot] [--only-stats-filtered] [--chunk-size CHUNK_SIZE] [--debug]
-                 [--version]
-                 bam
+                 [-N] [--scale SCALE] [-r REFERENCE_LENGTHS] --stats [STATS]
+                 [--stats-filtered [STATS_FILTERED]] [--bam-filtered [BAM_FILTERED]]
+                 [--read-length-freqs [READ_LENGTH_FREQS]] [--read-hits-count [READ_HITS_COUNT]]
+                 [--knee-plot [KNEE_PLOT]] [--coverage-plots [COVERAGE_PLOTS]]
+                 [--chunk-size CHUNK_SIZE] [--debug] [--version]
 
 A simple tool to calculate metrics from a BAM file and filter with uneven coverage.
 
-positional arguments:
-  bam                   BAM file containing aligned reads
-
 optional arguments:
   -h, --help            show this help message and exit
+  --bam BAM             BAM file containing aligned reads (default: None)
   -t THREADS, --threads THREADS
                         Number of threads to use (default: 1)
   -p PREFIX, --prefix PREFIX
@@ -87,14 +85,6 @@ optional arguments:
                         1000000.0)
   -r REFERENCE_LENGTHS, --reference-lengths REFERENCE_LENGTHS
                         File with references lengths (default: None)
-  --read-length-freqs   Save a JSON file with the read length frequencies mapped to each reference
-                        (default: False)
-  --read-hits-count     Save a TSV file with the read hits frequencies mapped to each reference
-                        (default: False)
-  --only-stats          Only produce statistics and skip filtering (default: False)
-  --plot                Plot genome coverage plots (default: False)
-  --only-stats-filtered
-                        Only filter statistics and skip BAM filtering (default: False)
   --chunk-size CHUNK_SIZE
                         Chunk size for parallel processing (default: None)
   --debug               Print debug messages (default: False)
@@ -134,13 +124,34 @@ miscellaneous arguments:
                         Depth (TAD) calculation (default: 10)
   --trim-max TRIM_MAX   Remove coverage that are above this percentile. Used for the Truncated Average
                         Depth (TAD) calculation (default: 90)
+
+output arguments:
+  --stats [STATS]       Save a TSV file with the statistics for each reference (default: None)
+  --stats-filtered [STATS_FILTERED]
+                        Save a TSV file with the statistics for each reference after filtering
+                        (default: None)
+  --bam-filtered [BAM_FILTERED]
+                        Save a BAM file with the references that passed the filtering criteria
+                        (default: None)
+  --read-length-freqs [READ_LENGTH_FREQS]
+                        Save a JSON file with the read length frequencies mapped to each reference
+                        (default: None)
+  --read-hits-count [READ_HITS_COUNT]
+                        Save a TSV file with the read hits frequencies mapped to each reference
+                        (default: None)
+  --knee-plot [KNEE_PLOT]
+                        Plot knee plot (default: None)
+  --coverage-plots [COVERAGE_PLOTS]
+                        Folder where to save genome coverage plots (default: None)
 ```
 
 One would run filterBAM as:
 
 ```bash
-filterBAM --min-read-count 100 --min-expected-breadth-ratio 0.75 --min-read-ani 98 --sort-by-name --sort-memory 1G --reference-lengths gtdb-r202.len.map --threads 16  c55d4e2df1.dedup.bam 
+filterBAM --stats --min-read-count 100 --min-expected-breadth-ratio 0.75 --min-read-ani 98 --sort-by-name --sort-memory 1G --reference-lengths gtdb-r202.len.map --threads 16 --bam c55d4e2df1.dedup.bam 
 ```
+
+**--stats**: Save a TSV file with the statistics for each reference
 
 **--min-read-count**: Minimum number of reads mapped to a reference in the BAM file
 

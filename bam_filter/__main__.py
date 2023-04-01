@@ -25,6 +25,8 @@ import json
 import warnings
 from collections import Counter
 from functools import reduce
+import os
+import tempfile
 
 log = logging.getLogger("my_logger")
 
@@ -57,6 +59,18 @@ def get_lens(obj):
     return obj.get_read_length_freqs()
 
 
+# Check if the temporary directory exists, if not, create it
+def check_tmp_dir_exists(tmpdir):
+    if tmpdir is None:
+        tmpdir = tempfile.TemporaryDirectory(dir=os.getcwd())
+    else:
+        if not os.path.exists(tmpdir):
+            log.error(f"Temporary directory {tmpdir} does not exist")
+            exit(1)
+        tmpdir = tempfile.TemporaryDirectory(dir=tmpdir)
+    return tmpdir
+
+
 def main():
     logging.basicConfig(
         level=logging.DEBUG,
@@ -65,6 +79,9 @@ def main():
     )
 
     args = get_arguments()
+
+    tmp_dir = check_tmp_dir_exists(args.tmp_dir)
+
     if args.trim_min >= args.trim_max:
         log.error("trim_min must be less than trim_max")
         exit(1)
@@ -78,7 +95,28 @@ def main():
     else:
         warnings.filterwarnings("ignore")
 
-    out_files = create_output_files(prefix=args.prefix, bam=args.bam)
+    plot_coverage = False
+    if args.coverage_plots is not None:
+        plot_coverage = True
+
+    if args.stats_filtered is None and (args.bam_filtered is not None):
+        logging.error(
+            "You need to specify a filtereds stats file to obtain the filtered BAM file"
+        )
+        exit(1)
+
+    out_files = create_output_files(
+        prefix=args.prefix,
+        bam=args.bam,
+        stats=args.stats,
+        stats_filtered=args.stats_filtered,
+        bam_filtered=args.bam_filtered,
+        read_length_freqs=args.read_length_freqs,
+        read_hits_count=args.read_hits_count,
+        knee_plot=args.knee_plot,
+        coverage_plots=args.coverage_plots,
+        tmp_dir=tmp_dir,
+    )
 
     bam = check_bam_file(
         bam=args.bam,
@@ -97,24 +135,30 @@ def main():
         trim_min=args.trim_min,
         trim_max=args.trim_max,
         scale=args.scale,
-        plot=args.plot,
+        plot=plot_coverage,
         plots_dir=out_files["coverage_plot_dir"],
         chunksize=args.chunk_size,
         read_length_freqs=args.read_length_freqs,
+        output_files=out_files,
+        sort_memory=args.sort_memory,
+        low_memory=args.low_memory,
     )
+    if args.low_memory:
+        bam = out_files["bam_tmp_sorted"]
+
     logging.info("Reducing results to a single dataframe")
     # data = list(filter(None, data))
     data_df = [x[0] for x in data if x[0] is not None]
     data_df = concat_df(data_df)
 
-    if args.read_length_freqs:
+    if args.read_length_freqs is not None:
         logging.info("Calculating read length frequencies...")
         lens = [x[1] for x in data if x[1] is not None]
         lens = json.dumps(lens, default=obj_dict, ensure_ascii=False, indent=4)
         with open(out_files["read_length_freqs"], "w", encoding="utf-8") as outfile:
             print(lens, file=outfile)
 
-    if args.read_hits_count:
+    if args.read_hits_count is not None:
         logging.info("Calculating read hits counts...")
         hits = [x[2] for x in data if x[2] is not None]
 
@@ -214,9 +258,7 @@ def main():
             "min_norm_gini": min_norm_gini,
         }
 
-    if args.only_stats:
-        logging.info("Skipping filtering...")
-    else:
+    if args.stats_filtered is not None:
         filter_reference_BAM(
             bam=bam,
             df=data_df,
@@ -224,11 +266,14 @@ def main():
             transform_cov_evenness=args.transform_cov_evenness,
             threads=args.threads,
             out_files=out_files,
-            only_stats_filtered=args.only_stats_filtered,
             sort_memory=args.sort_memory,
             sort_by_name=args.sort_by_name,
             min_read_ani=args.min_read_ani,
         )
+    else:
+        logging.info("Skipping filtering of reference BAM file.")
+    if args.low_memory:
+        os.remove(out_files["bam_tmp_sorted"])
     logging.info("ALL DONE.")
 
 

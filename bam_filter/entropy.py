@@ -175,22 +175,26 @@ def find_knee(df, out_plot_name):
 
     if kneedle.knee is None:
         return None, None
-
     min_gini = round(kneedle.elbow, 3)
     min_entropy = round(kneedle.knee_y, 3)
     logging.info(f"Knee point found: gini={min_gini}, entropy={min_entropy}")
-    logging.info("Knee point figure saved at kneedle.png")
-    fig, ax = plt.subplots(nrows=1, ncols=1)
-    plt.suptitle("Knee Point")
-    plt.title(f"Knee point: gini={min_gini}, entropy={min_entropy}")
-    plt.plot(kneedle.x, kneedle.y, "c", label="data")
-    plt.vlines(
-        kneedle.knee, plt.ylim()[0], plt.ylim()[1], linestyles="--", label="knee/elbow"
-    )
-    plt.xlabel("Normalized Gini coefficient")
-    plt.ylabel("Normalized Entropy")
-    plt.legend(loc="best")  # create figure & 1 axis
-    fig.savefig(out_plot_name, dpi=300)
-    plt.close(fig)
+    if out_plot_name is not None:
+        logging.info("Knee point figure saved at kneedle.png")
+        fig, ax = plt.subplots(nrows=1, ncols=1)
+        plt.suptitle("Knee Point")
+        plt.title(f"Knee point: gini={min_gini}, entropy={min_entropy}")
+        plt.plot(kneedle.x, kneedle.y, "c", label="data")
+        plt.vlines(
+            kneedle.knee,
+            plt.ylim()[0],
+            plt.ylim()[1],
+            linestyles="--",
+            label="knee/elbow",
+        )
+        plt.xlabel("Normalized Gini coefficient")
+        plt.ylabel("Normalized Entropy")
+        plt.legend(loc="best")  # create figure & 1 axis
+        fig.savefig(out_plot_name, dpi=300)
+        plt.close(fig)
 
     return min_gini, min_entropy

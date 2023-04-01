@@ -9,10 +9,17 @@ from scipy import stats
 import tqdm
 import logging
 import warnings
-from bam_filter.utils import is_debug, calc_chunksize, initializer
+from bam_filter.utils import (
+    is_debug,
+    calc_chunksize,
+    initializer,
+    create_empty_output_files,
+    create_empty_bam,
+)
 from bam_filter.entropy import entropy, norm_entropy, gini_coeff, norm_gini_coeff
 from collections import defaultdict
 import pyranges as pr
+from pathlib import Path
 
 # import cProfile as profile
 # import pstats
@@ -36,6 +43,99 @@ sys.setrecursionlimit(10**6)
 #     ):
 #         alns.append(aln.to_string())
 #     return alns
+
+
+def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
+    logging.info("::: Writing temporary filtered BAM file... (be patient)")
+    samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
+
+    # convert the dictionary to an array
+    refs_dict = dict(zip(samfile.references, samfile.lengths))
+    my_array = np.array(list(refs_dict.items()))
+
+    # get the indices of the keys to keep
+    keep_indices = np.isin(my_array[:, 0], references)
+
+    # use array indexing to get the key-value pairs to keep
+    filtered_array = my_array[keep_indices]
+
+    # convert the filtered array back to a dictionary
+    refs_dict = dict(filtered_array)
+
+    (ref_names, ref_lengths) = zip(*refs_dict.items())
+    ref_lengths = list(ref_lengths)
+    # convert reference lengths to integers
+    ref_lengths = [int(x) for x in ref_lengths]
+
+    refs_idx = {x: i for i, x in enumerate(ref_names)}
+
+    out_bam_file = pysam.AlignmentFile(
+        output_files["bam_tmp"],
+        "wb",
+        referencenames=list(ref_names),
+        referencelengths=ref_lengths,
+        threads=threads,
+    )
+
+    references = [x for x in samfile.references if x in refs_idx.keys()]
+
+    logging.info(f"::: ::: Filtering {len(references):,} references sequentially...")
+    for reference in tqdm.tqdm(
+        references,
+        total=len(references),
+        leave=False,
+        ncols=80,
+        desc="References processed",
+    ):
+        for aln in samfile.fetch(
+            reference=reference, multiple_iterators=False, until_eof=True
+        ):
+            aln.reference_id = refs_idx[aln.reference_name]
+            out_bam_file.write(aln)
+    out_bam_file.close()
+    samfile.close()
+    # prof.disable()
+    # # print profiling output
+    # stats = pstats.Stats(prof).strip_dirs().sort_stats("tottime")
+    # stats.print_stats(5)  # top 10 rows
+    logging.info("::: ::: Sorting BAM file...")
+    pysam.sort(
+        "-@",
+        str(threads),
+        "-m",
+        str(sort_memory),
+        "-o",
+        output_files["bam_tmp_sorted"],
+        output_files["bam_tmp"],
+    )
+
+    logging.info("::: ::: BAM index not found. Indexing...")
+    save = pysam.set_verbosity(0)
+    samfile = pysam.AlignmentFile(output_files["bam_tmp_sorted"], "rb", threads=threads)
+    chr_lengths = []
+    for chrom in samfile.references:
+        chr_lengths.append(samfile.get_reference_length(chrom))
+    max_chr_length = np.max(chr_lengths)
+    pysam.set_verbosity(save)
+    samfile.close()
+
+    if max_chr_length > 536870912:
+        logging.info("::: ::: A reference is longer than 2^29, indexing with csi")
+        pysam.index(
+            "-c",
+            "-@",
+            str(threads),
+            output_files["bam_tmp_sorted"],
+        )
+    else:
+        pysam.index(
+            "-@",
+            str(threads),
+            output_files["bam_tmp_sorted"],
+        )
+
+    os.remove(output_files["bam_tmp"])
+    return output_files["bam_tmp_sorted"]
 
 
 def get_tad(cov, trim_min=10, trim_max=90):
@@ -700,6 +800,9 @@ def process_bam(
     plots_dir="coverage-plots",
     chunksize=None,
     read_length_freqs=False,
+    output_files=None,
+    low_memory=False,
+    sort_memory="1G",
 ):
     """
     Processing function: calls pool of worker functions
@@ -712,12 +815,12 @@ def process_bam(
 
     references = samfile.references
 
-    chr_lengths = []
-    for chrom in samfile.references:
-        chr_lengths.append(samfile.get_reference_length(chrom))
+    # chr_lengths = []
+    # for chrom in samfile.references:
+    #     chr_lengths.append(samfile.get_reference_length(chrom))
     pysam.set_verbosity(save)
-    ref_lengths = None
 
+    ref_lengths = None
     if reference_lengths is not None:
         ref_lengths = pd.read_csv(
             reference_lengths, sep="\t", index_col=0, names=["reference", "length"]
@@ -727,6 +830,7 @@ def process_bam(
             logging.error(
                 "The BAM file contains references not found in the reference lengths file"
             )
+            sys.exit(1)
             sys.exit(1)
 
     total_refs = samfile.nreferences
@@ -745,7 +849,6 @@ def process_bam(
     #     desc=f"Alignments processed",
     # ):
     #     alns_in_ref[aln.reference_name] += 1
-
     if plot:
         # Check if image folder exists
         if not os.path.exists(plots_dir):
@@ -758,10 +861,23 @@ def process_bam(
     ]
 
     if len(references) == 0:
-        logging.error("No reference sequences with alignments found in the BAM file")
-        sys.exit(1)
+        logging.warning("No reference sequences with alignments found in the BAM file")
+        create_empty_output_files(output_files)
+        sys.exit(0)
 
     logging.info(f"Keeping {len(references):,} references")
+
+    if low_memory:
+        logging.info("Low memory mode enabled, writing filtered BAM file to disk")
+        samfile.close()
+        bam = write_bam(
+            bam=bam,
+            references=references,
+            output_files=output_files,
+            sort_memory=sort_memory,
+            threads=threads,
+        )
+        samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
 
     if (chunksize is not None) and ((len(references) // chunksize) > threads):
         c_size = chunksize
@@ -845,7 +961,6 @@ def filter_reference_BAM(
     threads,
     out_files,
     sort_memory,
-    only_stats_filtered,
     min_read_ani,
     transform_cov_evenness=False,
     sort_by_name=False,
@@ -938,9 +1053,7 @@ def filter_reference_BAM(
         df_filtered.to_csv(
             out_files["stats_filtered"], sep="\t", index=False, compression="gzip"
         )
-        if only_stats_filtered:
-            logging.info("Skipping saving filtered BAM file.")
-        else:
+        if out_files["bam_filtered"] is not None:
             logging.info("Writing filtered BAM file... (be patient)")
             refs_dict = dict(
                 zip(df_filtered["reference"], df_filtered["bam_reference_length"])
@@ -1035,5 +1148,10 @@ def filter_reference_BAM(
                     )
 
             os.remove(out_files["bam_filtered_tmp"])
+        else:
+            logging.info("Skipping filtering BAM file creation...")
     else:
-        logging.info("No references meet the filter conditions. Skipping...")
+        logging.info("No references meet the filter conditions.")
+        # Path(out_files["bam_filtered"]).touch()
+        create_empty_bam(out_files["bam_filtered"])
+        Path(out_files["stats_filtered"]).touch()
