@@ -70,7 +70,7 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
     # convert reference lengths to integers
     ref_lengths = [int(x) for x in ref_lengths]
 
-    refs_idx = {x: i for i, x in enumerate(ref_names)}
+    refs_idx = {sys.intern(str(x)): i for i, x in enumerate(ref_names)}
 
     if threads > 4:
         write_threads = 4
