@@ -713,6 +713,7 @@ def create_output_files(
     read_hits_count,
     knee_plot,
     coverage_plots,
+    tmp_dir,
 ):
     if prefix is None:
         prefix = bam.replace(".bam", "")
@@ -736,9 +737,9 @@ def create_output_files(
     out_files = {
         "stats": stats,
         "stats_filtered": stats_filtered,
-        "bam_filtered_tmp": f"{prefix}.filtered.tmp.bam",
-        "bam_tmp": f"{prefix}.tmp.bam",
-        "bam_tmp_sorted": f"{prefix}.tmp.sorted.bam",
+        "bam_filtered_tmp": f"{tmp_dir.name}/{prefix}.filtered.tmp.bam",
+        "bam_tmp": f"{tmp_dir.name}/{prefix}.tmp.bam",
+        "bam_tmp_sorted": f"{tmp_dir.name}/{prefix}.tmp.sorted.bam",
         "bam_filtered": bam_filtered,
         "read_length_freqs": read_length_freqs,
         "read_hits_count": read_hits_count,

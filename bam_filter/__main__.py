@@ -26,6 +26,7 @@ import warnings
 from collections import Counter
 from functools import reduce
 import os
+import tempfile
 
 log = logging.getLogger("my_logger")
 
@@ -58,6 +59,18 @@ def get_lens(obj):
     return obj.get_read_length_freqs()
 
 
+# Check if the temporary directory exists, if not, create it
+def check_tmp_dir_exists(tmpdir):
+    if tmpdir is None:
+        tmpdir = tempfile.TemporaryDirectory(dir=os.getcwd())
+    else:
+        if not os.path.exists(tmpdir):
+            log.error(f"Temporary directory {tmpdir} does not exist")
+            exit(1)
+        tmpdir = tempfile.TemporaryDirectory(dir=tmpdir)
+    return tmpdir
+
+
 def main():
     logging.basicConfig(
         level=logging.DEBUG,
@@ -66,6 +79,9 @@ def main():
     )
 
     args = get_arguments()
+
+    tmp_dir = check_tmp_dir_exists(args.tmp_dir)
+
     if args.trim_min >= args.trim_max:
         log.error("trim_min must be less than trim_max")
         exit(1)
@@ -99,6 +115,7 @@ def main():
         read_hits_count=args.read_hits_count,
         knee_plot=args.knee_plot,
         coverage_plots=args.coverage_plots,
+        tmp_dir=tmp_dir,
     )
 
     bam = check_bam_file(
