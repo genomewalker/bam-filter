@@ -716,7 +716,7 @@ def create_output_files(
     tmp_dir,
 ):
     if prefix is None:
-        prefix = bam.replace(".bam", "")
+        prefix = Path(bam).with_suffix("").name
 
     if stats == "":
         stats = f"{prefix}_stats.tsv.gz"
