@@ -1068,7 +1068,7 @@ def filter_reference_BAM(
             )
             (ref_names, ref_lengths) = zip(*refs_dict.items())
 
-            refs_idx = {x: i for i, x in enumerate(ref_names)}
+            refs_idx = {sys.intern(str(x)): i for i, x in enumerate(ref_names)}
             if threads > 4:
                 write_threads = 4
             else:

@@ -67,7 +67,7 @@ def check_tmp_dir_exists(tmpdir):
         if not os.path.exists(tmpdir):
             log.error(f"Temporary directory {tmpdir} does not exist")
             exit(1)
-        tmpdir = tempfile.TemporaryDirectory(dir=tmpdir)
+        tmpdir = tempfile.TemporaryDirectory(dir=os.path.abspath(tmpdir))
     return tmpdir
 
 
@@ -81,7 +81,7 @@ def main():
     args = get_arguments()
 
     tmp_dir = check_tmp_dir_exists(args.tmp_dir)
-
+    log.info("Temporary directory: %s", tmp_dir.name)
     if args.trim_min >= args.trim_max:
         log.error("trim_min must be less than trim_max")
         exit(1)
