@@ -269,6 +269,7 @@ def main():
             sort_memory=args.sort_memory,
             sort_by_name=args.sort_by_name,
             min_read_ani=args.min_read_ani,
+            disable_sort=args.disable_sort,
         )
     else:
         logging.info("Skipping filtering of reference BAM file.")

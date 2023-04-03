@@ -218,6 +218,7 @@ help_msg = {
     "coverage_plots": "Folder where to save genome coverage plots",
     "knee_plot": "Plot knee plot",
     "sort_by_name": "Sort by read names",
+    "disable_sort": "Disable sorting of the filtered BAM file",
     "chunk_size": "Chunk size for parallel processing",
     "tmp_dir": "Temporary directory",
     "help": "Help message",
@@ -452,6 +453,12 @@ def get_arguments(argv=None):
         dest="sort_by_name",
         action="store_true",
         help=help_msg["sort_by_name"],
+    )
+    parser.add_argument(
+        "--disable-sort",
+        dest="disable_sort",
+        action="store_true",
+        help=help_msg["disable_sort"],
     )
     parser.add_argument(
         "--scale",

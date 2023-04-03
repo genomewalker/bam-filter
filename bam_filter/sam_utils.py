@@ -972,6 +972,7 @@ def filter_reference_BAM(
     min_read_ani,
     transform_cov_evenness=False,
     sort_by_name=False,
+    disable_sort=False,
 ):
     """Filter BAM based on certain conditions
 
@@ -1109,57 +1110,63 @@ def filter_reference_BAM(
             # # print profiling output
             # stats = pstats.Stats(prof).strip_dirs().sort_stats("tottime")
             # stats.print_stats(5)  # top 10 rows
-            if sort_by_name:
-                logging.info("Sorting BAM file by read name...")
-                pysam.sort(
-                    "-n",
-                    "-@",
-                    str(threads),
-                    "-m",
-                    str(sort_memory),
-                    "-o",
-                    out_files["bam_filtered"],
-                    out_files["bam_filtered_tmp"],
-                )
-            else:
-                pysam.sort(
-                    "-@",
-                    str(threads),
-                    "-m",
-                    str(sort_memory),
-                    "-o",
-                    out_files["bam_filtered"],
-                    out_files["bam_filtered_tmp"],
-                )
-
-                logging.info("BAM index not found. Indexing...")
-                save = pysam.set_verbosity(0)
-                samfile = pysam.AlignmentFile(
-                    out_files["bam_filtered"], "rb", threads=threads
-                )
-                chr_lengths = []
-                for chrom in samfile.references:
-                    chr_lengths.append(samfile.get_reference_length(chrom))
-                max_chr_length = np.max(chr_lengths)
-                pysam.set_verbosity(save)
-                samfile.close()
-
-                if max_chr_length > 536870912:
-                    logging.info("A reference is longer than 2^29, indexing with csi")
-                    pysam.index(
-                        "-c",
+            if not disable_sort:
+                if sort_by_name:
+                    logging.info("Sorting BAM file by read name...")
+                    pysam.sort(
+                        "-n",
                         "-@",
                         str(threads),
+                        "-m",
+                        str(sort_memory),
+                        "-o",
                         out_files["bam_filtered"],
+                        out_files["bam_filtered_tmp"],
                     )
                 else:
-                    pysam.index(
+                    pysam.sort(
                         "-@",
                         str(threads),
+                        "-m",
+                        str(sort_memory),
+                        "-o",
                         out_files["bam_filtered"],
+                        out_files["bam_filtered_tmp"],
                     )
 
-            os.remove(out_files["bam_filtered_tmp"])
+                    logging.info("BAM index not found. Indexing...")
+                    save = pysam.set_verbosity(0)
+                    samfile = pysam.AlignmentFile(
+                        out_files["bam_filtered"], "rb", threads=threads
+                    )
+                    chr_lengths = []
+                    for chrom in samfile.references:
+                        chr_lengths.append(samfile.get_reference_length(chrom))
+                    max_chr_length = np.max(chr_lengths)
+                    pysam.set_verbosity(save)
+                    samfile.close()
+
+                    if max_chr_length > 536870912:
+                        logging.info(
+                            "A reference is longer than 2^29, indexing with csi"
+                        )
+                        pysam.index(
+                            "-c",
+                            "-@",
+                            str(threads),
+                            out_files["bam_filtered"],
+                        )
+                    else:
+                        pysam.index(
+                            "-@",
+                            str(threads),
+                            out_files["bam_filtered"],
+                        )
+
+                os.remove(out_files["bam_filtered_tmp"])
+            else:
+                logging.info("Skipping BAM file sorting...")
+                os.rename(out_files["bam_filtered_tmp"], out_files["bam_filtered"])
         else:
             logging.info("Skipping filtering BAM file creation...")
     else:
