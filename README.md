@@ -60,10 +60,11 @@ $ filterBAM --help
 usage: filterBAM [-h] --bam BAM [-t INT] [--reference-trim-length INT] [--trim-min INT]
                  [--trim-max INT] [-p STR] [-A FLOAT] [-l INT] [-n INT] [-b FLOAT] [-e FLOAT]
                  [-g FLOAT] [-B FLOAT] [-a FLOAT] [-c FLOAT] [-V FLOAT] [-C FLOAT]
-                 [--include-low-detection] [-m STR] [-N] [--scale STR] [-r FILE] --stats [FILE]
-                 [--stats-filtered [FILE]] [--bam-filtered [FILE]] [--read-length-freqs [FILE]]
-                 [--read-hits-count [FILE]] [--knee-plot [FILE]] [--coverage-plots [FILE]]
-                 [--chunk-size INT] [--tmp-dir DIR] [--low-memory] [--debug] [--version]
+                 [--include-low-detection] [-m STR] [-N] [--disable-sort] [--scale STR] [-r FILE]
+                 --stats [FILE] [--stats-filtered [FILE]] [--bam-filtered [FILE]]
+                 [--read-length-freqs [FILE]] [--read-hits-count [FILE]] [--knee-plot [FILE]]
+                 [--coverage-plots [FILE]] [--chunk-size INT] [--tmp-dir DIR] [--low-memory] [--debug]
+                 [--version]
 
 A simple tool to calculate metrics from a BAM file and filter with uneven coverage.
 
@@ -77,6 +78,7 @@ optional arguments:
                         Set maximum memory per thread for sorting; suffix K/M/G recognized (default:
                         1G)
   -N, --sort-by-name    Sort by read names (default: False)
+  --disable-sort        Disable sorting of the filtered BAM file (default: False)
   --scale STR           Scale taxonomic abundance by this factor; suffix K/M recognized (default:
                         1000000.0)
   -r FILE, --reference-lengths FILE
