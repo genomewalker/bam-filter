@@ -187,6 +187,7 @@ defaults = {
     "read_length_freqs": None,
     "read_hits_count": None,
     "tmp_dir": None,
+    "bam_index": None,
 }
 
 help_msg = {
@@ -215,6 +216,7 @@ help_msg = {
     "stats": "Save a TSV file with the statistics for each reference",
     "stats_filtered": "Save a TSV file with the statistics for each reference after filtering",
     "bam_filtered": "Save a BAM file with the references that passed the filtering criteria",
+    "bam_index": "Input BAM file index",
     "coverage_plots": "Folder where to save genome coverage plots",
     "knee_plot": "Plot knee plot",
     "sort_by_name": "Sort by read names",
@@ -244,6 +246,14 @@ def get_arguments(argv=None):
         dest="bam",
         type=lambda x: is_valid_file(parser, x, "bam"),
         help=help_msg["bam"],
+    )
+    parser.add_argument(
+        "--bam-index",
+        required=False,
+        dest="bam_index",
+        default=defaults["bam_index"],
+        type=lambda x: is_valid_file(parser, x, "bam_index"),
+        help=help_msg["bam_index"],
     )
     parser.add_argument(
         "-t",
@@ -744,9 +754,12 @@ def create_output_files(
     out_files = {
         "stats": stats,
         "stats_filtered": stats_filtered,
+        "bam_sorted_tmp": f"{tmp_dir.name}/{prefix}.sorted.tmp.bam",
+        "bam_sorted_tmp_index": f"{tmp_dir.name}/{prefix}.sorted.bam.index",
         "bam_filtered_tmp": f"{tmp_dir.name}/{prefix}.filtered.tmp.bam",
         "bam_tmp": f"{tmp_dir.name}/{prefix}.tmp.bam",
         "bam_tmp_sorted": f"{tmp_dir.name}/{prefix}.tmp.sorted.bam",
+        "bam_tmp_sorted_index": f"{tmp_dir.name}/{prefix}.tmp.sorted.bam.index",
         "bam_filtered": bam_filtered,
         "read_length_freqs": read_length_freqs,
         "read_hits_count": read_hits_count,

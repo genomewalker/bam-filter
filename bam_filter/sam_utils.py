@@ -45,9 +45,9 @@ sys.setrecursionlimit(10**6)
 #     return alns
 
 
-def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
+def write_bam(bam, bam_index, references, output_files, threads=1, sort_memory="1G"):
     logging.info("::: Writing temporary filtered BAM file... (be patient)")
-    samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
+    samfile = pysam.AlignmentFile(bam, "rb", threads=threads, index_filename=bam_index)
 
     if threads > 4:
         threads = 4
@@ -117,7 +117,7 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
         output_files["bam_tmp"],
     )
 
-    logging.info("::: ::: BAM index not found. Indexing...")
+    logging.info("::: ::: Indexing new sorted BAM...")
     save = pysam.set_verbosity(0)
     samfile = pysam.AlignmentFile(output_files["bam_tmp_sorted"], "rb", threads=threads)
     chr_lengths = []
@@ -133,17 +133,21 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
             "-c",
             "-@",
             str(threads),
+            "-o",
+            output_files["bam_tmp_sorted_index"],
             output_files["bam_tmp_sorted"],
         )
     else:
         pysam.index(
             "-@",
             str(threads),
+            "-o",
+            output_files["bam_tmp_sorted_index"],
             output_files["bam_tmp_sorted"],
         )
 
     os.remove(output_files["bam_tmp"])
-    return output_files["bam_tmp_sorted"]
+    return output_files["bam_tmp_sorted"], output_files["bam_tmp_sorted_index"]
 
 
 def get_tad(cov, trim_min=10, trim_max=90):
@@ -229,6 +233,7 @@ def create_pyranges(reference, starts, ends, strands):
 
 def get_bam_stats(
     params,
+    bam_index,
     ref_lengths=None,
     min_read_ani=90.0,
     scale=1e6,
@@ -249,7 +254,7 @@ def get_bam_stats(
     # prof.enable()
     bam, references = params
     results = []
-    samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
+    samfile = pysam.AlignmentFile(bam, "rb", threads=threads, index_filename=bam_index)
 
     read_hits = defaultdict(int)
     for reference in references:
@@ -742,6 +747,8 @@ def check_bam_file(
     threads=1,
     reference_lengths=None,
     sort_memory="1G",
+    bam_index=None,
+    output_files=None,
 ):
     logging.info("Loading BAM file")
     save = pysam.set_verbosity(0)
@@ -771,31 +778,50 @@ def check_bam_file(
     # Check if BAM files is not sorted by coordinates, sort it by coordinates
     if not samfile.header["HD"]["SO"] == "coordinate":
         log.info("BAM file is not sorted by coordinates, sorting it...")
-        sorted_bam = bam.replace(".bam", ".bf-sorted.bam")
+        sorted_bam = output_files["bam_sorted_tmp"]
         pysam.sort("-@", str(threads), "-m", str(sort_memory), "-o", sorted_bam, bam)
         bam = sorted_bam
+        logging.info("::: BAM file sorted. Indexing...")
         pysam.index("-c", "-@", str(threads), bam)
         samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
+        bam_index = None
+
+    if bam_index is not None:
+        logging.info("Using defined BAM index...")
+        return bam, bam_index
 
     if not samfile.has_index():
         logging.info("BAM index not found. Indexing...")
         if max_chr_length > 536870912:
             logging.info("A reference is longer than 2^29, indexing with csi")
-            pysam.index("-c", "-@", str(threads), bam)
+            pysam.index(
+                "-c",
+                "-@",
+                str(threads),
+                "-o",
+                output_files["bam_sorted_tmp_index"],
+                bam,
+            )
         else:
             pysam.index(
                 "-@",
                 str(threads),
+                "-o",
+                output_files["bam_sorted_tmp_index"],
                 bam,
             )
     logging.info("::: BAM file looks good.")
 
-    return bam  # Need to reload the samfile after creating index
+    return (
+        bam,
+        output_files["bam_sorted_tmp_index"],
+    )  # Need to reload the samfile after creating index
 
 
 # Inspired from https://gigabaseorgigabyte.wordpress.com/2017/04/14/getting-the-edit-distance-from-a-bam-alignment-a-journey/
 def process_bam(
     bam,
+    bam_index,
     threads=1,
     reference_lengths=None,
     min_read_ani=90.0,
@@ -819,7 +845,7 @@ def process_bam(
     """
     logging.info("Loading BAM file")
     save = pysam.set_verbosity(0)
-    samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
+    samfile = pysam.AlignmentFile(bam, "rb", threads=threads, index_filename=bam_index)
 
     references = samfile.references
 
@@ -878,14 +904,17 @@ def process_bam(
     if low_memory:
         logging.info("Low memory mode enabled, writing filtered BAM file to disk")
         samfile.close()
-        bam = write_bam(
+        bam, bam_index = write_bam(
             bam=bam,
+            bam_index=bam_index,
             references=references,
             output_files=output_files,
             sort_memory=sort_memory,
             threads=threads,
         )
-        samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
+        samfile = pysam.AlignmentFile(
+            bam, "rb", threads=threads, index_filename=bam_index
+        )
 
     if (chunksize is not None) and ((len(references) // chunksize) > threads):
         c_size = chunksize
@@ -904,6 +933,7 @@ def process_bam(
                 map(
                     functools.partial(
                         get_bam_stats,
+                        bam_index=bam_index,
                         ref_lengths=ref_lengths,
                         min_read_ani=min_read_ani,
                         trim_ends=0,
@@ -930,6 +960,7 @@ def process_bam(
                     p.imap_unordered(
                         functools.partial(
                             get_bam_stats,
+                            bam_index=bam_index,
                             ref_lengths=ref_lengths,
                             min_read_ani=min_read_ani,
                             trim_ends=0,
@@ -964,6 +995,7 @@ def process_bam(
 
 def filter_reference_BAM(
     bam,
+    bam_index,
     df,
     filter_conditions,
     threads,
@@ -1083,7 +1115,9 @@ def filter_reference_BAM(
                 threads=write_threads,
             )
 
-            samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
+            samfile = pysam.AlignmentFile(
+                bam, "rb", threads=threads, index_filename=bam_index
+            )
             references = [x for x in samfile.references if x in refs_idx.keys()]
 
             logging.info(

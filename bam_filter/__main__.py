@@ -118,15 +118,18 @@ def main():
         tmp_dir=tmp_dir,
     )
 
-    bam = check_bam_file(
+    bam, bam_index = check_bam_file(
         bam=args.bam,
+        bam_index=args.bam_index,
         threads=args.threads,
         reference_lengths=args.reference_lengths,
         sort_memory=args.sort_memory,
+        output_files=out_files,
     )
 
     data = process_bam(
         bam=bam,
+        bam_index=bam_index,
         threads=args.threads,
         reference_lengths=args.reference_lengths,
         min_read_count=args.min_read_count,
@@ -145,6 +148,7 @@ def main():
     )
     if args.low_memory:
         bam = out_files["bam_tmp_sorted"]
+        bam_index = out_files["bam_tmp_sorted_index"]
 
     logging.info("Reducing results to a single dataframe")
     # data = list(filter(None, data))
@@ -261,6 +265,7 @@ def main():
     if args.stats_filtered is not None:
         filter_reference_BAM(
             bam=bam,
+            bam_index=bam_index,
             df=data_df,
             filter_conditions=filter_conditions,
             transform_cov_evenness=args.transform_cov_evenness,
@@ -275,6 +280,7 @@ def main():
         logging.info("Skipping filtering of reference BAM file.")
     if args.low_memory:
         os.remove(out_files["bam_tmp_sorted"])
+
     logging.info("ALL DONE.")
 
 
