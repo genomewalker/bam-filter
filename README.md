@@ -57,13 +57,9 @@ filterBAM only needs a BAM file. For a complete list of options:
 
 ```
 $ filterBAM --help
-usage: filterBAM [-h] --bam BAM [-t INT] [--reference-trim-length INT] [--trim-min INT]
-                 [--trim-max INT] [-p STR] [-A FLOAT] [-l INT] [-n INT] [-b FLOAT] [-e FLOAT]
-                 [-g FLOAT] [-B FLOAT] [-a FLOAT] [-c FLOAT] [-V FLOAT] [-C FLOAT]
-                 [--include-low-detection] [-m STR] [-N] [--disable-sort] [--scale STR] [-r FILE]
-                 --stats [FILE] [--stats-filtered [FILE]] [--bam-filtered [FILE]]
-                 [--read-length-freqs [FILE]] [--read-hits-count [FILE]] [--knee-plot [FILE]]
-                 [--coverage-plots [FILE]] [--chunk-size INT] [--tmp-dir DIR] [--low-memory] [--debug]
+usage: filterBAM [-h] --bam BAM [--bam-index BAM_INDEX] [-t INT] [--reference-trim-length INT] [--trim-min INT] [--trim-max INT] [-p STR] [-A FLOAT] [-l INT] [-n INT] [-b FLOAT] [-e FLOAT] [-g FLOAT]
+                 [-B FLOAT] [-a FLOAT] [-c FLOAT] [-V FLOAT] [-C FLOAT] [--include-low-detection] [-m STR] [-N] [--disable-sort] [--scale STR] [-r FILE] --stats [FILE] [--stats-filtered [FILE]]
+                 [--bam-filtered [FILE]] [--read-length-freqs [FILE]] [--read-hits-count [FILE]] [--knee-plot [FILE]] [--coverage-plots [FILE]] [--chunk-size INT] [--tmp-dir DIR] [--low-memory] [--debug]
                  [--version]
 
 A simple tool to calculate metrics from a BAM file and filter with uneven coverage.
@@ -71,16 +67,16 @@ A simple tool to calculate metrics from a BAM file and filter with uneven covera
 optional arguments:
   -h, --help            show this help message and exit
   --bam BAM             BAM file containing aligned reads (default: None)
+  --bam-index BAM_INDEX
+                        Input BAM file index (default: None)
   -t INT, --threads INT
                         Number of threads to use (default: 1)
   -p STR, --prefix STR  Prefix used for the output files (default: None)
   -m STR, --sort-memory STR
-                        Set maximum memory per thread for sorting; suffix K/M/G recognized (default:
-                        1G)
+                        Set maximum memory per thread for sorting; suffix K/M/G recognized (default: 1G)
   -N, --sort-by-name    Sort by read names (default: False)
   --disable-sort        Disable sorting of the filtered BAM file (default: False)
-  --scale STR           Scale taxonomic abundance by this factor; suffix K/M recognized (default:
-                        1000000.0)
+  --scale STR           Scale taxonomic abundance by this factor; suffix K/M recognized (default: 1000000.0)
   -r FILE, --reference-lengths FILE
                         File with references lengths (default: None)
   --chunk-size INT      Chunk size for parallel processing (default: None)
@@ -113,31 +109,24 @@ filtering arguments:
   -C FLOAT, --min-coverage-mean FLOAT
                         Minimum coverage mean (default: 0)
   --include-low-detection
-                        Include those references that fullfi all filtering criteria but the coverage
-                        evenness is 0 (default: False)
+                        Include those references that fullfi all filtering criteria but the coverage evenness is 0 (default: False)
 
 miscellaneous arguments:
   --reference-trim-length INT
                         Exclude n bases at the ends of the reference sequences (default: 0)
-  --trim-min INT        Remove coverage that are below this percentile. Used for the Truncated Average
-                        Depth (TAD) calculation (default: 10)
-  --trim-max INT        Remove coverage that are above this percentile. Used for the Truncated Average
-                        Depth (TAD) calculation (default: 90)
+  --trim-min INT        Remove coverage that are below this percentile. Used for the Truncated Average Depth (TAD) calculation (default: 10)
+  --trim-max INT        Remove coverage that are above this percentile. Used for the Truncated Average Depth (TAD) calculation (default: 90)
 
 output arguments:
   --stats [FILE]        Save a TSV file with the statistics for each reference (default: None)
   --stats-filtered [FILE]
-                        Save a TSV file with the statistics for each reference after filtering
-                        (default: None)
+                        Save a TSV file with the statistics for each reference after filtering (default: None)
   --bam-filtered [FILE]
-                        Save a BAM file with the references that passed the filtering criteria
-                        (default: None)
+                        Save a BAM file with the references that passed the filtering criteria (default: None)
   --read-length-freqs [FILE]
-                        Save a JSON file with the read length frequencies mapped to each reference
-                        (default: None)
+                        Save a JSON file with the read length frequencies mapped to each reference (default: None)
   --read-hits-count [FILE]
-                        Save a TSV file with the read hits frequencies mapped to each reference
-                        (default: None)
+                        Save a TSV file with the read hits frequencies mapped to each reference (default: None)
   --knee-plot [FILE]    Plot knee plot (default: None)
   --coverage-plots [FILE]
                         Folder where to save genome coverage plots (default: None)
