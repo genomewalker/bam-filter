@@ -170,6 +170,7 @@ defaults = {
     "min_norm_gini": 1.0,
     "min_avg_read_ani": 90.0,
     "min_read_ani": 90.0,
+    "max_read_ani": 100.0,
     "min_breadth": 0,
     "min_coverage_evenness": 0,
     "min_coeff_var": np.Inf,
@@ -204,6 +205,7 @@ help_msg = {
     "min_norm_entropy": "Minimum normalized entropy",
     "min_norm_gini": "Minimum normalized Gini coefficient",
     "min_read_ani": "Minimum read ANI to keep a read",
+    "max_read_ani": "Maximum read ANI to keep a read",
     "min_avg_read_ani": "Minimum average read ANI",
     "min_coverage_evenness": "Minimum coverage evenness",
     "min_coeff_var": "Minimum coverage evenness calculated as SD/MEAN",
@@ -317,6 +319,17 @@ def get_arguments(argv=None):
         default=defaults["min_read_ani"],
         dest="min_read_ani",
         help=help_msg["min_read_ani"],
+    )
+    filter_args.add_argument(
+        "-M",
+        "--max-read-ani",
+        type=lambda x: float(
+            check_values(x, minval=0, maxval=100, parser=parser, var="--max-read-ani")
+        ),
+        metavar="FLOAT",
+        default=defaults["max_read_ani"],
+        dest="max_read_ani",
+        help=help_msg["max_read_ani"],
     )
     filter_args.add_argument(
         "-l",

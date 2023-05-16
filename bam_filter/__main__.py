@@ -134,6 +134,7 @@ def main():
         reference_lengths=args.reference_lengths,
         min_read_count=args.min_read_count,
         min_read_ani=args.min_read_ani,
+        max_read_ani=args.max_read_ani,
         trim_ends=args.trim_ends,
         trim_min=args.trim_min,
         trim_max=args.trim_max,
@@ -274,6 +275,7 @@ def main():
             sort_memory=args.sort_memory,
             sort_by_name=args.sort_by_name,
             min_read_ani=args.min_read_ani,
+            max_read_ani=args.max_read_ani,
             disable_sort=args.disable_sort,
         )
     else:

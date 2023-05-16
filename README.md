@@ -57,8 +57,8 @@ filterBAM only needs a BAM file. For a complete list of options:
 
 ```
 $ filterBAM --help
-usage: filterBAM [-h] --bam BAM [--bam-index BAM_INDEX] [-t INT] [--reference-trim-length INT] [--trim-min INT] [--trim-max INT] [-p STR] [-A FLOAT] [-l INT] [-n INT] [-b FLOAT] [-e FLOAT] [-g FLOAT]
-                 [-B FLOAT] [-a FLOAT] [-c FLOAT] [-V FLOAT] [-C FLOAT] [--include-low-detection] [-m STR] [-N] [--disable-sort] [--scale STR] [-r FILE] --stats [FILE] [--stats-filtered [FILE]]
+usage: filterBAM [-h] --bam BAM [--bam-index BAM_INDEX] [-t INT] [--reference-trim-length INT] [--trim-min INT] [--trim-max INT] [-p STR] [-A FLOAT] [-M FLOAT] [-l INT] [-n INT] [-b FLOAT] [-e FLOAT]
+                 [-g FLOAT] [-B FLOAT] [-a FLOAT] [-c FLOAT] [-V FLOAT] [-C FLOAT] [--include-low-detection] [-m STR] [-N] [--disable-sort] [--scale STR] [-r FILE] --stats [FILE] [--stats-filtered [FILE]]
                  [--bam-filtered [FILE]] [--read-length-freqs [FILE]] [--read-hits-count [FILE]] [--knee-plot [FILE]] [--coverage-plots [FILE]] [--chunk-size INT] [--tmp-dir DIR] [--low-memory] [--debug]
                  [--version]
 
@@ -88,6 +88,8 @@ optional arguments:
 filtering arguments:
   -A FLOAT, --min-read-ani FLOAT
                         Minimum read ANI to keep a read (default: 90.0)
+  -M FLOAT, --max-read-ani FLOAT
+                        Maximum read ANI to keep a read (default: 100.0)
   -l INT, --min-read-length INT
                         Minimum read length (default: 30)
   -n INT, --min-read-count INT

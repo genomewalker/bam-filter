@@ -236,6 +236,7 @@ def get_bam_stats(
     bam_index,
     ref_lengths=None,
     min_read_ani=90.0,
+    max_read_ani=100.0,
     scale=1e6,
     trim_ends=0,
     trim_min=10,
@@ -288,7 +289,7 @@ def get_bam_stats(
             contig=reference, multiple_iterators=False, until_eof=True
         ):
             ani_read = (1 - ((aln.get_tag("NM") / aln.infer_query_length()))) * 100
-            if ani_read >= min_read_ani:
+            if ani_read >= min_read_ani and ani_read <= max_read_ani:
                 n_alns += 1
                 read_hits[aln.query_name] += 1
                 if aln.has_tag("AS"):
@@ -825,6 +826,7 @@ def process_bam(
     threads=1,
     reference_lengths=None,
     min_read_ani=90.0,
+    max_read_ani=100.0,
     min_read_count=10,
     trim_ends=0,
     trim_min=10,
@@ -936,6 +938,7 @@ def process_bam(
                         bam_index=bam_index,
                         ref_lengths=ref_lengths,
                         min_read_ani=min_read_ani,
+                        max_read_ani=max_read_ani,
                         trim_ends=0,
                         trim_min=trim_min,
                         trim_max=trim_max,
@@ -963,6 +966,7 @@ def process_bam(
                             bam_index=bam_index,
                             ref_lengths=ref_lengths,
                             min_read_ani=min_read_ani,
+                            max_read_ani=max_read_ani,
                             trim_ends=0,
                             trim_min=trim_min,
                             trim_max=trim_max,
@@ -1002,6 +1006,7 @@ def filter_reference_BAM(
     out_files,
     sort_memory,
     min_read_ani,
+    max_read_ani,
     transform_cov_evenness=False,
     sort_by_name=False,
     disable_sort=False,
@@ -1136,7 +1141,7 @@ def filter_reference_BAM(
                     ani_read = (
                         1 - ((aln.get_tag("NM") / aln.infer_query_length()))
                     ) * 100
-                    if ani_read >= min_read_ani:
+                    if ani_read >= min_read_ani and ani_read <= max_read_ani:
                         aln.reference_id = refs_idx[aln.reference_name]
                         out_bam_file.write(aln)
             out_bam_file.close()
