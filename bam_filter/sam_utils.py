@@ -345,8 +345,8 @@ def get_bam_stats(
 
             mean_coverage_trunc, mean_coverage_trunc_len = get_tad(
                 cov_np,
-                trim_min=10,
-                trim_max=90,
+                trim_min=trim_min,
+                trim_max=trim_max,
             )
 
             cov_pos = cov_np[cov_np > 0]
