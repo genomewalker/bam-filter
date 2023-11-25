@@ -3,7 +3,7 @@ import numpy as np
 import os
 import sys
 import pandas as pd
-from multiprocessing import Pool
+from multiprocessing import Pool, Manager, cpu_count
 import functools
 from scipy import stats
 import tqdm
@@ -15,11 +15,15 @@ from bam_filter.utils import (
     initializer,
     create_empty_output_files,
     create_empty_bam,
+    sort_keys_by_approx_weight,
 )
+import random
 from bam_filter.entropy import entropy, norm_entropy, gini_coeff, norm_gini_coeff
 from collections import defaultdict
 import pyranges as pr
 from pathlib import Path
+import concurrent.futures
+import gc
 
 # import cProfile as profile
 # import pstats
@@ -249,6 +253,9 @@ def get_bam_stats(
     # prof.enable()
     bam, references = params
     results = []
+
+    if threads > 4:
+        threads = 4
     samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
 
     read_hits = defaultdict(int)
@@ -339,8 +346,8 @@ def get_bam_stats(
 
             mean_coverage_trunc, mean_coverage_trunc_len = get_tad(
                 cov_np,
-                trim_min=10,
-                trim_max=90,
+                trim_min=trim_min,
+                trim_max=trim_max,
             )
 
             cov_pos = cov_np[cov_np > 0]
@@ -806,7 +813,6 @@ def process_bam(
     scale=1e6,
     plot=False,
     plots_dir="coverage-plots",
-    chunksize=None,
     read_length_freqs=False,
     output_files=None,
     low_memory=False,
@@ -839,14 +845,10 @@ def process_bam(
                 "The BAM file contains references not found in the reference lengths file"
             )
             sys.exit(1)
-            sys.exit(1)
 
     total_refs = samfile.nreferences
     logging.info(f"Found {total_refs:,} reference sequences")
     # logging.info(f"Found {samfile.mapped:,} alignments")
-    logging.info(
-        f"Removing references without mappings or less than {min_read_count} reads..."
-    )
     # Remove references without mapped reads
     # alns_in_ref = defaultdict(int)
     # for aln in tqdm.tqdm(
@@ -862,11 +864,28 @@ def process_bam(
         if not os.path.exists(plots_dir):
             os.makedirs(plots_dir)
 
-    references = [
-        chrom.contig
-        for chrom in samfile.get_index_statistics()
-        if chrom.mapped >= min_read_count
-    ]
+        # references = [
+        #     chrom.contig
+        #     for chrom in samfile.get_index_statistics()
+        #     if chrom.mapped >= min_read_count
+        # ]
+
+        logging.info(f"Removing references with less than {min_read_count} reads...")
+
+        references_m = {
+            chrom.contig: chrom.mapped
+            for chrom in samfile.get_index_statistics()
+            if chrom.mapped >= min_read_count
+        }
+    else:
+        logging.info(f"Removing references with less than {min_read_count} reads...")
+
+        references_m = {
+            chrom.contig: chrom.mapped
+            for chrom in samfile.get_index_statistics()
+            if chrom.mapped >= min_read_count
+        }
+        references = list(references_m.keys())
 
     if len(references) == 0:
         logging.warning("No reference sequences with alignments found in the BAM file")
@@ -887,18 +906,17 @@ def process_bam(
         )
         samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
 
-    if (chunksize is not None) and ((len(references) // chunksize) > threads):
-        c_size = chunksize
-    else:
-        c_size = calc_chunksize(
-            n_workers=threads, len_iterable=len(references), factor=4
-        )
-    ref_chunks = [references[i : i + c_size] for i in range(0, len(references), c_size)]
+    log.info("::: Creating reference chunks with uniform read amounts...")
+
+    # ify the number of chunks
+    ref_chunks = sort_keys_by_approx_weight(
+        input_dict=references_m, scale=1.5, num_cores=threads
+    )
+    log.info(f"::: Created {len(ref_chunks):,} chunks")
+    ref_chunks = random.sample(ref_chunks, len(ref_chunks))
     params = zip([bam] * len(ref_chunks), ref_chunks)
     try:
-        logging.info(
-            f"Processing {len(ref_chunks):,} chunks of {c_size:,} references each"
-        )
+        logging.info(f"Processing {len(ref_chunks):,} chunks")
         if is_debug():
             data = list(
                 map(
@@ -921,8 +939,8 @@ def process_bam(
         else:
             p = Pool(
                 threads,
-                initializer=initializer,
-                initargs=([params, ref_lengths, scale],),
+                # initializer=initializer,
+                # initargs=([params, shared_dict],),
             )
 
             data = list(
@@ -960,6 +978,26 @@ def process_bam(
         p.join()
         sys.exit(0)
     return data
+
+
+def write_to_file(alns, out_bam_file, header=None):
+    for aln in alns:
+        out_bam_file.write(pysam.AlignedSegment.fromstring(aln, header))
+
+
+def process_references_batch(references, bam, refs_idx, min_read_ani, threads=1):
+    alns = []
+    with pysam.AlignmentFile(bam, "rb", threads=threads) as samfile:
+        for reference in references:
+            for aln in samfile.fetch(
+                reference=reference, multiple_iterators=False, until_eof=True
+            ):
+                ani_read = (1 - ((aln.get_tag("NM") / aln.infer_query_length()))) * 100
+                if ani_read >= min_read_ani:
+                    aln.reference_id = refs_idx[aln.reference_name]
+                    alns.append(aln.to_string())
+
+    return alns
 
 
 def filter_reference_BAM(
@@ -1060,15 +1098,27 @@ def filter_reference_BAM(
         # prof.enable()
         logging.info("Saving filtered stats...")
         df_filtered.to_csv(
-            out_files["stats_filtered"], sep="\t", index=False, compression="gzip"
+            out_files["stats_filtered"],
+            sep="\t",
+            index=False,
         )
         if out_files["bam_filtered"] is not None:
             logging.info("Writing filtered BAM file... (be patient)")
-            refs_dict = dict(
-                zip(df_filtered["reference"], df_filtered["bam_reference_length"])
-            )
-            (ref_names, ref_lengths) = zip(*refs_dict.items())
+            # refs_dict = dict(
+            #     zip(df_filtered["reference"], df_filtered["bam_reference_length"])
+            # )
+            references = df_filtered["reference"].tolist()
+            samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
+            refs_dict = {x: samfile.get_reference_length(x) for x in references}
+            header = samfile.header
 
+            (ref_names, ref_lengths) = zip(*refs_dict.items())
+            ref_dict_m = {
+                chrom.contig: chrom.mapped
+                for chrom in samfile.get_index_statistics()
+                if chrom.contig in ref_names
+            }
+            samfile.close()
             refs_idx = {sys.intern(str(x)): i for i, x in enumerate(ref_names)}
             if threads > 4:
                 write_threads = 4
@@ -1083,28 +1133,84 @@ def filter_reference_BAM(
                 threads=write_threads,
             )
 
-            samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
-            references = [x for x in samfile.references if x in refs_idx.keys()]
-
-            logging.info(
-                f"::: Filtering {len(references):,} references sequentially..."
+            # logging.info(
+            #     f"::: Filtering {len(references):,} references sequentially..."
+            # )
+            # for reference in tqdm.tqdm(
+            #     references,
+            #     total=len(references),
+            #     leave=False,
+            #     ncols=80,
+            #     desc="References processed",
+            # ):
+            #     for aln in samfile.fetch(
+            #         reference=reference, multiple_iterators=False, until_eof=True
+            #     ):
+            #         ani_read = (
+            #             1 - ((aln.get_tag("NM") / aln.infer_query_length()))
+            #         ) * 100
+            #         if ani_read >= min_read_ani:
+            #             aln.reference_id = refs_idx[aln.reference_name]
+            #             out_bam_file.write(aln)
+            num_cores = min(threads, cpu_count())
+            # batch_size = len(references) // num_cores + 1  # Ensure non-zero batch size
+            log.info("::: Creating reference chunks with uniform read amounts...")
+            ref_chunks = sort_keys_by_approx_weight(
+                input_dict=ref_dict_m, scale=1.5, num_cores=threads, verbose=False
             )
-            for reference in tqdm.tqdm(
-                references,
-                total=len(references),
-                leave=False,
-                ncols=80,
-                desc="References processed",
-            ):
-                for aln in samfile.fetch(
-                    reference=reference, multiple_iterators=False, until_eof=True
+            num_cores = min(num_cores, len(ref_chunks))
+            log.info(f"::: Using {num_cores} cores to write {len(ref_chunks)} chunk(s)")
+
+            # with Manager() as manager:
+            #     # Use Manager to create a read-only proxy for the dictionary
+            #     #refs_idx = manager.dict(refs_idx)
+
+            with concurrent.futures.ProcessPoolExecutor(
+                max_workers=num_cores
+            ) as executor:
+                # Use ProcessPoolExecutor to parallelize the processing of references in batches
+                futures = []
+                for batch_references in tqdm.tqdm(
+                    ref_chunks,
+                    total=len(ref_chunks),
+                    desc="Submitted batches",
+                    unit="batch",
+                    ncols=80,
+                    leave=False,
+                    disable=is_debug(),
                 ):
-                    ani_read = (
-                        1 - ((aln.get_tag("NM") / aln.infer_query_length()))
-                    ) * 100
-                    if ani_read >= min_read_ani:
-                        aln.reference_id = refs_idx[aln.reference_name]
-                        out_bam_file.write(aln)
+                    future = executor.submit(
+                        process_references_batch,
+                        batch_references,
+                        bam,
+                        refs_idx,
+                        min_read_ani=min_read_ani,
+                    )
+                    futures.append(future)  # Store the future
+
+                # Use a while loop to continuously check for completed futures
+                log.info("::: Collecting batches...")
+
+                completion_progress_bar = tqdm.tqdm(
+                    total=len(futures),
+                    desc="Completed",
+                    unit="batch",
+                    disable=is_debug(),
+                    ncols=80,
+                    leave=False,
+                )
+                completed_count = 0
+
+                # Use as_completed to iterate over completed futures as they become available
+                for completed_future in concurrent.futures.as_completed(futures):
+                    alns = completed_future.result()
+                    write_to_file(alns=alns, out_bam_file=out_bam_file, header=header)
+                    # Update the progress bar for each completed write
+                    completion_progress_bar.update(1)
+                    completed_count += 1
+                    completed_future.cancel()  # Cancel the future to free memory
+                    gc.collect()  # Force garbage collection
+                completion_progress_bar.close()
             out_bam_file.close()
             # prof.disable()
             # # print profiling output
@@ -1124,6 +1230,7 @@ def filter_reference_BAM(
                         out_files["bam_filtered_tmp"],
                     )
                 else:
+                    logging.info("Sorting BAM file by coordinates...")
                     pysam.sort(
                         "-@",
                         str(threads),

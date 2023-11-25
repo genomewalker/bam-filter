@@ -16,20 +16,153 @@ from itertools import chain
 import numpy as np
 from pathlib import Path
 import pysam
+import math
+import tempfile
+
 
 log = logging.getLogger("my_logger")
 log.setLevel(logging.INFO)
 timestr = time.strftime("%Y%m%d-%H%M%S")
 
 
+def handle_warning(message, category, filename, lineno, file=None, line=None):
+    print("A warning occurred:")
+    print(message)
+    print("Do you wish to continue?")
+
+    while True:
+        response = input("y/n: ").lower()
+        if response not in {"y", "n"}:
+            print("Not understood.")
+        else:
+            break
+
+    if response == "n":
+        raise category(message)
+
+
+# Check if the temporary directory exists, if not, create it
+def check_tmp_dir_exists(tmpdir):
+    if tmpdir is None:
+        tmpdir = tempfile.TemporaryDirectory(dir=os.getcwd())
+    else:
+        if not os.path.exists(tmpdir):
+            log.error(f"Temporary directory {tmpdir} does not exist")
+            exit(1)
+        tmpdir = tempfile.TemporaryDirectory(dir=os.path.abspath(tmpdir))
+    return tmpdir
+
+
 def is_debug():
     return logging.getLogger("my_logger").getEffectiveLevel() == logging.DEBUG
+
+
+def sort_keys_by_approx_weight(
+    input_dict, scale=1, num_cores=1, refinement_steps=10, verbose=False
+):
+    # Check for division by zero
+    if scale == 0:
+        raise ValueError("Scale cannot be zero.")
+
+    # Calculate the target weight for each chunk
+    target_weight = int(scale * max(input_dict.values()))
+
+    # Sort keys by their weights in descending order
+    sorted_keys = sorted(input_dict, key=lambda k: input_dict[k], reverse=True)
+
+    # Calculate total weight
+    total_weight = sum(input_dict.values())
+
+    # Calculate the number of chunks based on the target weight
+    num_chunks = max(1, math.ceil(total_weight / target_weight))
+
+    # Initialize chunks with their total weights
+    chunks = [[] for _ in range(num_chunks)]
+    total_weights = [0] * num_chunks
+
+    # Create a progress bar
+    progress_bar = tqdm.tqdm(
+        total=len(sorted_keys),
+        desc="Distributing keys",
+        unit="k",
+        unit_scale=True,
+        unit_divisor=1000,
+        disable=False,  # Replace with your logic or a boolean value
+        leave=False,
+        ncols=80,
+    )
+
+    # Distribute keys into chunks
+    for key in sorted_keys:
+        min_chunk = min(range(num_chunks), key=lambda i: total_weights[i])
+        chunks[min_chunk].append(key)
+        total_weights[min_chunk] += input_dict[key]
+
+        # Update the progress bar
+        progress_bar.update(1)
+
+    # Close the progress bar
+    progress_bar.close()
+
+    # Remove empty chunks
+    chunks = [chunk for chunk in chunks if chunk]
+
+    # Ensure a balanced number of reads in each chunk
+    max_reads = max(len(chunk) for chunk in chunks)
+    for chunk in chunks:
+        while len(chunk) < max_reads:
+            # Add elements from other chunks if needed
+            other_chunk = next((c for c in chunks if c != chunk and c), None)
+            if other_chunk:
+                element = other_chunk.pop(0)
+                chunk.append(element)
+
+    # Initial balance
+    initial_balance = max(total_weights) - min(total_weights)
+
+    # Refinement step
+    for _ in range(refinement_steps):
+        # Sort chunks by their total weights in ascending order
+        sorted_chunks = sorted(range(num_chunks), key=lambda i: total_weights[i])
+
+        # Move keys between chunks to minimize the difference in total weights
+        for src_chunk in sorted_chunks[:-1]:
+            dest_chunk = sorted_chunks[-1]
+            if total_weights[dest_chunk] - total_weights[src_chunk] > 1:
+                # Move one key from dest_chunk to src_chunk
+                key_to_move = chunks[dest_chunk].pop(0)
+                chunks[src_chunk].append(key_to_move)
+                total_weights[src_chunk] += input_dict[key_to_move]
+                total_weights[dest_chunk] -= input_dict[key_to_move]
+
+        # Check for improvement in balance
+        current_balance = max(total_weights) - min(total_weights)
+        if current_balance >= initial_balance:
+            break  # No improvement, exit the loop
+
+        # Update initial balance for the next iteration
+        initial_balance = current_balance
+
+    chunks = [chunk for chunk in chunks if chunk]
+
+    # Print the min, max, and average weight of each chunk
+    if verbose:
+        for i, chunk in enumerate(chunks, 1):
+            chunk_weights = [input_dict[key] for key in chunk]
+            min_weight = min(chunk_weights)
+            max_weight = max(chunk_weights)
+            avg_weight = sum(chunk_weights) / len(chunk_weights)
+            print(
+                f"Chunk {i}: Total = {sum(chunk_weights)}, Min Weight = {min_weight}, Max Weight = {max_weight}, Average Weight = {avg_weight}"
+            )
+
+    return chunks
 
 
 def create_empty_output_files(out_files):
     for key, value in out_files.items():
         if value is not None:
-            if key == "bam_filtered":
+            if key == "bam_filtered" or key == "bam_reassigned":
                 create_empty_bam(value)
             elif (
                 key == "bam_filtered_tmp" or key == "bam_tmp" or key == "bam_tmp_sorted"
@@ -162,6 +295,78 @@ def is_valid_file(parser, arg, var):
         return arg
 
 
+# From https://stackoverflow.com/a/59617044/15704171
+def convert_list_to_str(lst):
+    n = len(lst)
+    if not n:
+        return ""
+    if n == 1:
+        return lst[0]
+    return ", ".join(lst[:-1]) + f" or {lst[-1]}"
+
+
+lca_ranks = [
+    "superkingdom",
+    "domain",
+    "lineage",
+    "kingdom",
+    "subkingdom",
+    "superphylum",
+    "phylum",
+    "subphylum",
+    "superclass",
+    "class",
+    "subclass",
+    "infraclass",
+    "clade",
+    "cohort",
+    "subcohort",
+    "superorder",
+    "order",
+    "suborder",
+    "infraorder",
+    "parvorder",
+    "superfamily",
+    "family",
+    "subfamily",
+    "tribe",
+    "subtribe",
+    "infratribe",
+    "genus",
+    "subgenus",
+    "section",
+    "series",
+    "subseries",
+    "subsection",
+    "species",
+    "species group",
+    "species subgroup",
+    "subspecies",
+    "varietas",
+    "morph",
+    "subvariety",
+    "forma",
+    "forma specialis",
+    "biotype",
+    "genotype",
+    "isolate",
+    "pathogroup",
+    "serogroup",
+    "serotype",
+    "strain",
+]
+
+
+def check_lca_ranks(val, parser, var):
+    value = str(val)
+    if value in lca_ranks:
+        return value
+    else:
+        parser.error(
+            f"argument {var}: Invalid value {value}. Filter has to be one of {convert_list_to_str(lca_ranks)}"
+        )
+
+
 defaults = {
     "min_read_length": 30,
     "min_read_count": 3,
@@ -183,10 +388,16 @@ defaults = {
     "stats": None,
     "stats_filtered": None,
     "bam_filtered": None,
+    "bam_reassigned": None,
     "knee_plot": None,
     "read_length_freqs": None,
     "read_hits_count": None,
     "tmp_dir": None,
+    "reassign_iters": 25,
+    "reassign_scale": 0.9,
+    "reassign_target": "mapq",
+    "rank_lca": "species",
+    "lca_summary": None,
 }
 
 help_msg = {
@@ -215,6 +426,7 @@ help_msg = {
     "stats": "Save a TSV file with the statistics for each reference",
     "stats_filtered": "Save a TSV file with the statistics for each reference after filtering",
     "bam_filtered": "Save a BAM file with the references that passed the filtering criteria",
+    "bam_reassigned": "Save a BAM file without multimapping reads",
     "coverage_plots": "Folder where to save genome coverage plots",
     "knee_plot": "Plot knee plot",
     "sort_by_name": "Sort by read names",
@@ -225,6 +437,17 @@ help_msg = {
     "debug": "Print debug messages",
     "reference_lengths": "File with references lengths",
     "low_memory": "Activate the low memory mode",
+    "reassign": "Run an EM algorithm to reassign reads to references",
+    "reassign_method": "Method for the EM algorithm",
+    "reassign_iters": "Number of iterations for the EM algorithm",
+    "reassign_scale": "Scale to select the best weithing alignments",
+    "reassign_target": "Which target to use for the EM algorith, Only mapq or pident.",
+    "lca": "Calculate LCA for each read and estimate abundances",
+    "names": "Names dmp file from taxonomy",
+    "nodes": "Nodes dmp file from taxonomy",
+    "acc2taxid": "acc2taxid file from taxonomy",
+    "rank_lca": "Rank to use for LCA calculation",
+    "lca_summary": "Save a TSV file with the LCA summary",
     "version": "Print program version",
 }
 
@@ -234,18 +457,53 @@ def get_arguments(argv=None):
         description="A simple tool to calculate metrics from a BAM file and filter with uneven coverage.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    # add subparser for filtering options:
-    filter_args = parser.add_argument_group("filtering arguments")
-    misc_args = parser.add_argument_group("miscellaneous arguments")
-    out_args = parser.add_argument_group("output arguments")
     parser.add_argument(
+        "--version",
+        action="version",
+        version="%(prog)s " + __version__,
+        help=help_msg["version"],
+    )
+    parser.add_argument(
+        "--debug", dest="debug", action="store_true", help=help_msg["debug"]
+    )
+
+    sub_parsers = parser.add_subparsers(
+        help="positional arguments",
+        dest="action",
+    )
+
+    # Create parent subparser. Note `add_help=False` and creation via `argparse.`
+    parent_parser = argparse.ArgumentParser(add_help=False)
+
+    required = parent_parser.add_argument_group("required arguments")
+    required.add_argument(
         "--bam",
         required=True,
         dest="bam",
         type=lambda x: is_valid_file(parser, x, "bam"),
         help=help_msg["bam"],
     )
-    parser.add_argument(
+    # required = parent_parser.add_argument_group("required arguments")
+    optional = parent_parser.add_argument_group("optional arguments")
+    optional.add_argument(
+        "-p",
+        "--prefix",
+        type=str,
+        default=defaults["prefix"],
+        metavar="STR",
+        dest="prefix",
+        help=help_msg["prefix"],
+    )
+    optional.add_argument(
+        "-r",
+        "--reference-lengths",
+        type=lambda x: is_valid_file(parser, x, "reference_lengths"),
+        metavar="FILE",
+        default=defaults["reference_lengths"],
+        dest="reference_lengths",
+        help=help_msg["reference_lengths"],
+    )
+    optional.add_argument(
         "-t",
         "--threads",
         type=lambda x: int(
@@ -256,48 +514,91 @@ def get_arguments(argv=None):
         default=1,
         help=help_msg["threads"],
     )
-    misc_args.add_argument(
-        "--reference-trim-length",
+    # Create the parser sub-command for db creation
+    parser_reassign = sub_parsers.add_parser(
+        "reassign",
+        help="Reassign reads to references using an EM algorithm",
+        parents=[parent_parser],
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    # create the parser sub-commands
+    parser_filter = sub_parsers.add_parser(
+        "filter",
+        help="Filter references based on coverage and other metrics",
+        parents=[parent_parser],
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser_lca = sub_parsers.add_parser(
+        "lca",
+        help="Calculate LCA for each read and estimate abundances at each rank",
+        parents=[parent_parser],
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+
+    # createdb_required_args = parser_createdb.add_argument_group("required arguments")
+    # reassign_required_args = parser_reassign.add_argument_group(
+    #     "Re-assign required arguments"
+    # )
+    reassign_optional_args = parser_reassign.add_argument_group(
+        "Re-assign optional arguments"
+    )
+
+    filter_required_args = parser_filter.add_argument_group("Filter required arguments")
+    # filter_optional_args = parser_filter.add_argument_group("Filter optional arguments")
+
+    # lca_required_args = parser_lca.add_argument_group("LCA required arguments")
+    lca_optional_args = parser_lca.add_argument_group("LCA optional arguments")
+
+    # add subparser for filtering options:
+    # reassign_args = parser.add_argument_group("reassign arguments")
+    filtering_filt_args = parser_filter.add_argument_group("filtering arguments")
+    # lca_args = parser.add_argument_group("lca arguments")
+    misc_filter_args = parser_filter.add_argument_group("miscellaneous arguments")
+    out_filter_args = parser_filter.add_argument_group("output arguments")
+    # parser.add_argument(
+    #     "--bam",
+    #     required=True,
+    #     dest="bam",
+    #     type=lambda x: is_valid_file(parser, x, "bam"),
+    #     help=help_msg["bam"],
+    # )
+    # parser.add_argument(
+    #     "-t",
+    #     "--threads",
+    #     type=lambda x: int(
+    #         check_values(x, minval=1, maxval=1000, parser=parser, var="--threads")
+    #     ),
+    #     dest="threads",
+    #     metavar="INT",
+    #     default=1,
+    #     help=help_msg["threads"],
+    # )
+
+    reassign_optional_args.add_argument(
+        "-i",
+        "--iters",
         type=lambda x: int(
             check_values(
-                x, minval=0, maxval=10000, parser=parser, var="---reference-trim-length"
+                x, minval=0, maxval=100000, parser=parser, var="--reassign-n-iters"
             )
         ),
-        dest="trim_ends",
         metavar="INT",
-        default=0,
-        help=help_msg["trim_ends"],
+        default=defaults["reassign_iters"],
+        dest="reassign_iters",
+        help=help_msg["reassign_iters"],
     )
-    misc_args.add_argument(
-        "--trim-min",
-        type=lambda x: int(
-            check_values(x, minval=0, maxval=100, parser=parser, var="--trim-min")
+    reassign_optional_args.add_argument(
+        "-s",
+        "--scale",
+        type=lambda x: float(
+            check_values(x, minval=0, maxval=1, parser=parser, var="--scale")
         ),
-        dest="trim_min",
-        metavar="INT",
-        default=10,
-        help=help_msg["trim_min"],
+        metavar="FLOAT",
+        default=defaults["reassign_scale"],
+        dest="reassign_scale",
+        help=help_msg["reassign_scale"],
     )
-    misc_args.add_argument(
-        "--trim-max",
-        type=lambda x: int(
-            check_values(x, minval=0, maxval=100, parser=parser, var="--trim-max")
-        ),
-        dest="trim_max",
-        metavar="INT",
-        default=90,
-        help=help_msg["trim_max"],
-    )
-    parser.add_argument(
-        "-p",
-        "--prefix",
-        type=str,
-        default=defaults["prefix"],
-        metavar="STR",
-        dest="prefix",
-        help=help_msg["prefix"],
-    )
-    filter_args.add_argument(
+    reassign_optional_args.add_argument(
         "-A",
         "--min-read-ani",
         type=lambda x: float(
@@ -308,7 +609,7 @@ def get_arguments(argv=None):
         dest="min_read_ani",
         help=help_msg["min_read_ani"],
     )
-    filter_args.add_argument(
+    reassign_optional_args.add_argument(
         "-l",
         "--min-read-length",
         type=lambda x: int(
@@ -321,7 +622,7 @@ def get_arguments(argv=None):
         dest="min_read_length",
         help=help_msg["min_read_length"],
     )
-    filter_args.add_argument(
+    reassign_optional_args.add_argument(
         "-n",
         "--min-read-count",
         type=lambda x: int(
@@ -334,7 +635,103 @@ def get_arguments(argv=None):
         dest="min_read_count",
         help=help_msg["min_read_count"],
     )
-    filter_args.add_argument(
+    reassign_optional_args.add_argument(
+        "-o",
+        "--out-bam",
+        dest="bam_reassigned",
+        default=defaults["bam_reassigned"],
+        metavar="FILE",
+        type=str,
+        nargs="?",
+        const="",
+        help=help_msg["bam_reassigned"],
+    )
+    reassign_optional_args.add_argument(
+        "-m",
+        "--sort-memory",
+        type=lambda x: check_suffix(x, parser=parser, var="--sort-memory"),
+        default=defaults["sort_memory"],
+        metavar="STR",
+        dest="sort_memory",
+        help=help_msg["sort_memory"],
+    )
+    reassign_optional_args.add_argument(
+        "-N",
+        "--sort-by-name",
+        dest="sort_by_name",
+        action="store_true",
+        help=help_msg["sort_by_name"],
+    )
+    misc_filter_args.add_argument(
+        "--reference-trim-length",
+        type=lambda x: int(
+            check_values(
+                x, minval=0, maxval=10000, parser=parser, var="---reference-trim-length"
+            )
+        ),
+        dest="trim_ends",
+        metavar="INT",
+        default=0,
+        help=help_msg["trim_ends"],
+    )
+    misc_filter_args.add_argument(
+        "--trim-min",
+        type=lambda x: int(
+            check_values(x, minval=0, maxval=100, parser=parser, var="--trim-min")
+        ),
+        dest="trim_min",
+        metavar="INT",
+        default=10,
+        help=help_msg["trim_min"],
+    )
+    misc_filter_args.add_argument(
+        "--trim-max",
+        type=lambda x: int(
+            check_values(x, minval=0, maxval=100, parser=parser, var="--trim-max")
+        ),
+        dest="trim_max",
+        metavar="INT",
+        default=90,
+        help=help_msg["trim_max"],
+    )
+    filtering_filt_args.add_argument(
+        "-A",
+        "--min-read-ani",
+        type=lambda x: float(
+            check_values(x, minval=0, maxval=100, parser=parser, var="--min-read-ani")
+        ),
+        metavar="FLOAT",
+        default=defaults["min_read_ani"],
+        dest="min_read_ani",
+        help=help_msg["min_read_ani"],
+    )
+    filtering_filt_args.add_argument(
+        "-l",
+        "--min-read-length",
+        type=lambda x: int(
+            check_values(
+                x, minval=1, maxval=100000, parser=parser, var="--min-read-length"
+            )
+        ),
+        default=defaults["min_read_length"],
+        metavar="INT",
+        dest="min_read_length",
+        help=help_msg["min_read_length"],
+    )
+    filtering_filt_args.add_argument(
+        "-n",
+        "--min-read-count",
+        type=lambda x: int(
+            check_values(
+                x, minval=1, maxval=np.Inf, parser=parser, var="--min-read-count"
+            )
+        ),
+        default=defaults["min_read_count"],
+        metavar="INT",
+        dest="min_read_count",
+        help=help_msg["min_read_count"],
+    )
+    filtering_filt_args.add_argument(
         "-b",
         "--min-expected-breadth-ratio",
         type=lambda x: float(
@@ -347,7 +744,7 @@ def get_arguments(argv=None):
         dest="min_expected_breadth_ratio",
         help=help_msg["min_expected_breadth_ratio"],
     )
-    filter_args.add_argument(
+    filtering_filt_args.add_argument(
         "-e",
         "--min-normalized-entropy",
         type=lambda x: check_values_auto(
@@ -358,7 +755,7 @@ def get_arguments(argv=None):
         dest="min_norm_entropy",
         help=help_msg["min_norm_entropy"],
     )
-    filter_args.add_argument(
+    filtering_filt_args.add_argument(
         "-g",
         "--min-normalized-gini",
         type=lambda x: check_values_auto(
@@ -369,7 +766,7 @@ def get_arguments(argv=None):
         dest="min_norm_gini",
         help=help_msg["min_norm_gini"],
     )
-    filter_args.add_argument(
+    filtering_filt_args.add_argument(
         "-B",
         "--min-breadth",
         type=lambda x: float(
@@ -380,7 +777,7 @@ def get_arguments(argv=None):
         dest="min_breadth",
         help=help_msg["min_breadth"],
     )
-    filter_args.add_argument(
+    filtering_filt_args.add_argument(
         "-a",
         "--min-avg-read-ani",
         type=lambda x: float(
@@ -393,7 +790,7 @@ def get_arguments(argv=None):
         dest="min_avg_read_ani",
         help=help_msg["min_avg_read_ani"],
     )
-    filter_args.add_argument(
+    filtering_filt_args.add_argument(
         "-c",
         "--min-coverage-evenness",
         type=lambda x: float(
@@ -406,7 +803,7 @@ def get_arguments(argv=None):
         dest="min_coverage_evenness",
         help=help_msg["min_coverage_evenness"],
     )
-    filter_args.add_argument(
+    filtering_filt_args.add_argument(
         "-V",
         "--min-coeff-var",
         type=lambda x: float(
@@ -419,7 +816,7 @@ def get_arguments(argv=None):
         dest="min_coeff_var",
         help=help_msg["min_coeff_var"],
     )
-    filter_args.add_argument(
+    filtering_filt_args.add_argument(
         "-C",
         "--min-coverage-mean",
         type=lambda x: float(
@@ -432,13 +829,13 @@ def get_arguments(argv=None):
         dest="min_coverage_mean",
         help=help_msg["min_coverage_mean"],
     )
-    filter_args.add_argument(
+    filtering_filt_args.add_argument(
         "--include-low-detection",
         dest="transform_cov_evenness",
         action="store_true",
         help=help_msg["transform_cov_evenness"],
     )
-    parser.add_argument(
+    misc_filter_args.add_argument(
         "-m",
         "--sort-memory",
         type=lambda x: check_suffix(x, parser=parser, var="--sort-memory"),
@@ -447,20 +844,20 @@ def get_arguments(argv=None):
         dest="sort_memory",
         help=help_msg["sort_memory"],
     )
-    parser.add_argument(
+    misc_filter_args.add_argument(
         "-N",
         "--sort-by-name",
         dest="sort_by_name",
         action="store_true",
         help=help_msg["sort_by_name"],
     )
-    parser.add_argument(
+    misc_filter_args.add_argument(
         "--disable-sort",
         dest="disable_sort",
         action="store_true",
         help=help_msg["disable_sort"],
     )
-    parser.add_argument(
+    misc_filter_args.add_argument(
         "--scale",
         type=lambda x: check_suffix(x, parser=parser, var="--scale"),
         default=defaults["scale"],
@@ -469,16 +866,16 @@ def get_arguments(argv=None):
         help=help_msg["scale"],
     )
     # reference_lengths
-    parser.add_argument(
-        "-r",
-        "--reference-lengths",
-        type=lambda x: is_valid_file(parser, x, "reference_lengths"),
-        metavar="FILE",
-        default=defaults["reference_lengths"],
-        dest="reference_lengths",
-        help=help_msg["reference_lengths"],
-    )
-    out_args.add_argument(
+    # filter_optional_args.add_argument(
+    #     "-r",
+    #     "--reference-lengths",
+    #     type=lambda x: is_valid_file(parser, x, "reference_lengths"),
+    #     metavar="FILE",
+    #     default=defaults["reference_lengths"],
+    #     dest="reference_lengths",
+    #     help=help_msg["reference_lengths"],
+    # )
+    filter_required_args.add_argument(
         "--stats",
         dest="stats",
         default=defaults["stats"],
@@ -489,7 +886,7 @@ def get_arguments(argv=None):
         required=True,
         help=help_msg["stats"],
     )
-    out_args.add_argument(
+    out_filter_args.add_argument(
         "--stats-filtered",
         dest="stats_filtered",
         default=defaults["stats_filtered"],
@@ -499,7 +896,7 @@ def get_arguments(argv=None):
         const="",
         help=help_msg["stats_filtered"],
     )
-    out_args.add_argument(
+    out_filter_args.add_argument(
         "--bam-filtered",
         dest="bam_filtered",
         default=defaults["bam_filtered"],
@@ -509,7 +906,7 @@ def get_arguments(argv=None):
         const="",
         help=help_msg["bam_filtered"],
     )
-    out_args.add_argument(
+    out_filter_args.add_argument(
         "--read-length-freqs",
         dest="read_length_freqs",
         default=defaults["read_length_freqs"],
@@ -519,7 +916,7 @@ def get_arguments(argv=None):
         const="",
         help=help_msg["read_length_freqs"],
     )
-    out_args.add_argument(
+    out_filter_args.add_argument(
         "--read-hits-count",
         dest="read_hits_count",
         default=defaults["read_hits_count"],
@@ -529,7 +926,7 @@ def get_arguments(argv=None):
         const="",
         help=help_msg["read_hits_count"],
     )
-    out_args.add_argument(
+    out_filter_args.add_argument(
         "--knee-plot",
         dest="knee_plot",
         default=defaults["knee_plot"],
@@ -539,7 +936,7 @@ def get_arguments(argv=None):
         const="",
         help=help_msg["knee_plot"],
     )
-    out_args.add_argument(
+    out_filter_args.add_argument(
         "--coverage-plots",
         dest="coverage_plots",
         metavar="FILE",
@@ -549,17 +946,17 @@ def get_arguments(argv=None):
         const="",
         help=help_msg["coverage_plots"],
     )
-    parser.add_argument(
-        "--chunk-size",
-        type=lambda x: int(
-            check_values(x, minval=1, maxval=100000, parser=parser, var="--chunk-size")
-        ),
-        default=defaults["chunk_size"],
-        metavar="INT",
-        dest="chunk_size",
-        help=help_msg["chunk_size"],
-    )
-    parser.add_argument(
+    # parser.add_argument(
+    #     "--chunk-size",
+    #     type=lambda x: int(
+    #         check_values(x, minval=1, maxval=100000, parser=parser, var="--chunk-size")
+    #     ),
+    #     default=defaults["chunk_size"],
+    #     metavar="INT",
+    #     dest="chunk_size",
+    #     help=help_msg["chunk_size"],
+    # )
+    misc_filter_args.add_argument(
         "--tmp-dir",
         type=str,
         default=defaults["tmp_dir"],
@@ -567,20 +964,59 @@ def get_arguments(argv=None):
         dest="tmp_dir",
         help=help_msg["tmp_dir"],
     )
-    parser.add_argument(
+    misc_filter_args.add_argument(
         "--low-memory",
         dest="low_memory",
         action="store_true",
         help=help_msg["low_memory"],
     )
-    parser.add_argument(
-        "--debug", dest="debug", action="store_true", help=help_msg["debug"]
+
+    lca_optional_args.add_argument(
+        "--names",
+        metavar="FILE",
+        type=lambda x: is_valid_file(parser, x, "names"),
+        dest="names",
+        help=help_msg["names"],
     )
-    parser.add_argument(
-        "--version",
-        action="version",
-        version="%(prog)s " + __version__,
-        help=help_msg["version"],
+    lca_optional_args.add_argument(
+        "--nodes",
+        metavar="FILE",
+        type=lambda x: is_valid_file(parser, x, "nodes"),
+        dest="nodes",
+        help=help_msg["nodes"],
+    )
+    lca_optional_args.add_argument(
+        "--acc2taxid",
+        metavar="FILE",
+        type=lambda x: is_valid_file(parser, x, "acc2taxid"),
+        dest="acc2taxid",
+        help=help_msg["acc2taxid"],
+    )
+    lca_optional_args.add_argument(
+        "--rank-lca",
+        metavar="STR",
+        type=lambda x: str(check_lca_ranks(x, parser=parser, var="--rank-lca")),
+        default=defaults["rank_lca"],
+        dest="rank_lca",
+        help=help_msg["rank_lca"],
+    )
+    lca_optional_args.add_argument(
+        "--lca-summary",
+        dest="lca_summary",
+        metavar="FILE",
+        default=defaults["lca_summary"],
+        type=str,
+        nargs="?",
+        const="",
+        help=help_msg["lca_summary"],
+    )
+    lca_optional_args.add_argument(
+        "--scale",
+        type=lambda x: check_suffix(x, parser=parser, var="--scale"),
+        default=defaults["scale"],
+        dest="scale",
+        metavar="STR",
+        help=help_msg["scale"],
     )
     args = parser.parse_args(None if sys.argv[1:] else ["-h"])
     return args
@@ -711,46 +1147,59 @@ def calc_chunksize(n_workers, len_iterable, factor=4):
 #     }
 #     return out_files
 def create_output_files(
-    prefix,
     bam,
-    stats,
-    stats_filtered,
-    bam_filtered,
-    read_length_freqs,
-    read_hits_count,
-    knee_plot,
-    coverage_plots,
     tmp_dir,
+    prefix=None,
+    stats="",
+    stats_filtered="",
+    bam_reassigned="",
+    bam_filtered="",
+    read_length_freqs="",
+    read_hits_count="",
+    knee_plot="",
+    coverage_plots="",
+    lca_summary="",
 ):
     if prefix is None:
         prefix = Path(bam).with_suffix("").name
 
-    if stats == "":
+    if tmp_dir is not None:
+        tmp_dir = tmp_dir.name
+
+    if stats == "" or stats is None:
         stats = f"{prefix}_stats.tsv.gz"
-    if stats_filtered == "":
+    if stats_filtered == "" or stats_filtered is None:
         stats_filtered = f"{prefix}_stats-filtered.tsv.gz"
-    if bam_filtered == "":
+    if bam_filtered == "" or bam_filtered is None:
         bam_filtered = f"{prefix}.filtered.bam"
-    if read_length_freqs == "":
+    if bam_reassigned == "" or bam_reassigned is None:
+        bam_reassigned = f"{prefix}.reassigned.bam"
+    if read_length_freqs == "" or read_length_freqs is None:
         read_length_freqs = f"{prefix}_read-length-freqs.json"
-    if read_hits_count == "":
+    if read_hits_count == "" or read_hits_count is None:
         read_hits_count = f"{prefix}_read-hits-count.tsv.gz"
-    if knee_plot == "":
+    if knee_plot == "" or knee_plot is None:
         knee_plot = f"{prefix}_knee-plot.png"
-    if coverage_plots == "":
+    if coverage_plots == "" or coverage_plots is None:
         coverage_plots = f"{prefix}_coverage-plots"
+    if lca_summary == "" or lca_summary is None:
+        lca_summary = f"{prefix}_lca-summary.tsv.gz"
 
     # create output files
     out_files = {
         "stats": stats,
         "stats_filtered": stats_filtered,
-        "bam_filtered_tmp": f"{tmp_dir.name}/{prefix}.filtered.tmp.bam",
-        "bam_tmp": f"{tmp_dir.name}/{prefix}.tmp.bam",
-        "bam_tmp_sorted": f"{tmp_dir.name}/{prefix}.tmp.sorted.bam",
+        "bam_filtered_tmp": f"{tmp_dir}/{prefix}.filtered.tmp.bam",
+        "bam_tmp": f"{tmp_dir}/{prefix}.tmp.bam",
+        "bam_tmp_sorted": f"{tmp_dir}/{prefix}.tmp.sorted.bam",
         "bam_filtered": bam_filtered,
+        "bam_reassigned_tmp": f"{tmp_dir}/{prefix}.reassigned.tmp.bam",
+        "bam_reassigned_sorted": f"{tmp_dir}/{prefix}.reassigned.sorted.bam",
+        "bam_reassigned": bam_reassigned,
         "read_length_freqs": read_length_freqs,
         "read_hits_count": read_hits_count,
         "knee_plot": knee_plot,
         "coverage_plot_dir": coverage_plots,
+        "lca_summary": lca_summary,
     }
     return out_files
