@@ -8,11 +8,11 @@
 A simple tool to process a BAM file and filter references with uneven coverages and estimate taxonomic abundances. FilterBAM has three main goals:
 - Reassign reads to the reference they belong using an E-M algorithm that takes into account the read length and the alignment score. The alignment score is calculated using the following equation:
 
-  \[ \text{{Alignment Score}} = \left( \frac{{\text{{Identity}}}}{{\log(\text{{Read Length}})}} \right) \times \sqrt{\text{{Read Length}}} \]
+  $$\text{{Alignment Score}} = \left( \frac{{\text{{Identity}}}}{{\log(\text{{Read Length}})}} \right) \times \sqrt{\text{{Read Length}}}$$
 
   Where:
-  - \(\text{{Identity}}\) is the percentage identity of the alignment.
-  - \(\text{{Read Length}}\) is the length of the read.
+  - `Identity` is the percentage identity of the alignment.
+  - `Read Length` is the length of the read.
 
   This equation incorporates both the percentage identity and the length of the read, with the logarithmic and square root components contributing to the weighting of these factors in the final alignment score. The logarithmic component is used to reduce the impact of the read length in the alignment score, while the square root component is used to increase the impact of the percentage identity.
 
