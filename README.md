@@ -349,7 +349,11 @@ filterBAM lca --bam c55d4e2df1.dedup.filtered.bam --names ./taxonomy/names.dmp -
 ```
 
 **--names**: Names dmp file from taxonomy 
+
 **--nodes**: Nodes dmp file from taxonomy 
+
 **--acc2taxid**: acc2taxid file from taxonomy 
+
 **--rank-lca**: Rank to use for LCA calculation 
+
 **--scale**: Scale taxonomic abundance by this factor; suffix K/M recognized 
