@@ -348,8 +348,8 @@ One would run filterBAM `lca` as follows:
 filterBAM lca --bam c55d4e2df1.dedup.filtered.bam --names ./taxonomy/names.dmp --nodes ./taxonomy/nodes.dmp --acc2taxid ./taxonomy/acc2taxid.map.gz --threads 10 --lca-rank genus
 ```
 
-**--names**: Names dmp file from taxonomy
-**--nodes**: Nodes dmp file from taxonomy
-**--acc2taxid**: acc2taxid file from taxonomy
-**--rank-lca**: Rank to use for LCA calculation
-**--scale**: Scale taxonomic abundance by this factor; suffix K/M recognized
+**--names**: Names dmp file from taxonomy 
+**--nodes**: Nodes dmp file from taxonomy 
+**--acc2taxid**: acc2taxid file from taxonomy 
+**--rank-lca**: Rank to use for LCA calculation 
+**--scale**: Scale taxonomic abundance by this factor; suffix K/M recognized 
