@@ -401,7 +401,7 @@ def write_reassigned_bam(
 
 
 def calculate_alignment_score(identity, read_length):
-    return (identity / math.log(read_length + 1)) * math.sqrt(read_length)
+    return (identity / math.log(read_length)) * math.sqrt(read_length)
 
 
 def get_bam_data(parms, ref_lengths=None, percid=90, min_read_length=30, threads=1):
@@ -428,8 +428,8 @@ def get_bam_data(parms, ref_lengths=None, percid=90, min_read_length=30, threads
                 aln.query_length if aln.query_length != 0 else aln.infer_query_length()
             )
 
-            # if query_length < min_read_length:
-            #     continue
+            if query_length < min_read_length:
+                continue
 
             pident = (1 - ((aln.get_tag("NM") / query_length))) * 100
             if pident >= percid:

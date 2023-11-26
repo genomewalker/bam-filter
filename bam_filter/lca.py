@@ -6,7 +6,6 @@ from functools import partial
 import pandas as pd
 import logging
 import networkx as nx
-from concurrent.futures import ProcessPoolExecutor
 import sys
 from bam_filter.utils import (
     calc_chunksize,
@@ -56,7 +55,6 @@ def find_most_likely_continuation_worker(partial_path_end, full_graph, index):
         len(nx.shortest_path(full_graph, source="root", target=partial_path_end))
         <= index + 1
     ):
-        print(partial_path_end)
         return (
             partial_path_end,
             {
@@ -87,23 +85,14 @@ def find_most_likely_continuation_worker(partial_path_end, full_graph, index):
     )
 
 
-def find_most_likely_continuation(full_graph, leaves, index, num_workers=1):
+def find_most_likely_continuation(full_graph, leaves, index):
     result_dict = {}
 
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        futures = [
-            executor.submit(
-                find_most_likely_continuation_worker,
-                partial_path_end,
-                full_graph,
-                index,
-            )
-            for partial_path_end in leaves
-        ]
-
-        for future in tqdm(futures, total=len(leaves), leave=False, ncols=80):
-            partial_path_end, result = future.result()
-            result_dict[partial_path_end] = result
+    for partial_path_end in tqdm(leaves, leave=False, ncols=80):
+        partial_path_end, result = find_most_likely_continuation_worker(
+            partial_path_end, full_graph, index
+        )
+        result_dict[partial_path_end] = result
 
     return result_dict
 
@@ -114,10 +103,11 @@ def calculate_cumulative_weight_and_path(graph, node, lengths):
         if node in lengths:
             return 0, 0, [node]
         else:
-            nei = list(graph.neighbors(node))[0]
-            cumulative_weight = graph[node][nei].get("weight", 0)
-            cumulative_norm_weight = graph[node][nei].get("norm_weight", 0)
-            return cumulative_weight, cumulative_norm_weight, [node]
+            # nei = list(graph.neighbors(node))[0]
+            # cumulative_weight = graph[node][nei].get("weight", 0)
+            # cumulative_norm_weight = graph[node][nei].get("norm_weight", 0)
+            # return cumulative_weight, cumulative_norm_weight, [node]
+            return 0, 0, [node]
 
     # Recursive case: calculate cumulative weight and path by summing the edge weight
     # and norm_weight with the cumulative weight and path of its parent(s)
@@ -359,6 +349,7 @@ def do_lca(args):
             res["weight"] = 0
             res = pd.concat([root_row, res])
             gs.append(res)
+
     gs = concat_df(gs).drop_duplicates()
 
     G = nx.from_pandas_edgelist(gs, create_using=nx.DiGraph(), edge_attr=True)
@@ -391,7 +382,7 @@ def do_lca(args):
             for t in v[1:]:
                 tax_path_set.intersection_update(t)
 
-            tax_path = list(tax_path_set)
+            tax_path = [edge for edge in v[0] if edge in tax_path_set]
 
             if len(tax_path) <= index_r + 1:
                 discarded_lca[tuple(tax_path)] += 1
@@ -399,25 +390,28 @@ def do_lca(args):
 
             for_lca[tuple(tax_path)] += 1
         else:
+            if len(k) <= index_r + 1:
+                discarded_lca[tuple(k)] += 1
+                continue
             unique.append(k)
             cum_tax[v[0]] += 1
 
     log.info(
-        f"Unique: {len(unique)} | LCA: {len(for_lca)} | Discarded: {len(discarded_lca)}"
+        f"Unique: {len(unique)} | LCA: {sum(for_lca.values())} | Discarded: {sum(discarded_lca.values())}"
     )
-    log.info("Creating LCA dataframe")
-    if len(for_lca) > 0:
-        for_lca_df = []
-        for k, v in tqdm(for_lca.items(), total=len(for_lca), leave=False, ncols=80):
-            for_lca_df.append(create_lca_df(list(k), v))
 
-    log.info("Adding weights to the unique mapping taxonomic graph")
+    log.info("Creating unique mapping taxonomic graph")
     gs = []
     for k, v in tqdm(cum_tax.items(), total=len(cum_tax), leave=False, ncols=80):
         gs.append(create_tax_graph_w(list(k), v, ref_lengths, scale=scale))
 
     df = concat_df(gs)
+
     if len(for_lca) > 0:
+        log.info("Creating taxonomic graph with LCA nodes")
+        for_lca_df = []
+        for k, v in tqdm(for_lca.items(), total=len(for_lca), leave=False, ncols=80):
+            for_lca_df.append(create_lca_df(list(k), v))
         df_l = concat_df(for_lca_df)
         df_l["weight"] = 0
         df_l["norm_weight"] = 0
@@ -432,7 +426,6 @@ def do_lca(args):
     log.info("Calculating cumulative weights and paths on the taxonomic graph")
     cumulative_weights_and_paths = {}
     modified_graph = Gr.copy()  # Create a copy of the original graph
-
     for node in Gr.nodes:
         (
             cumulative_weight,
@@ -473,16 +466,16 @@ def do_lca(args):
         log.info(
             f"Finding most likely reference for the LCA nodes [{threads} threads]]"
         )
-        test = find_most_likely_continuation(
+        lca2ref = find_most_likely_continuation(
             full_graph=modified_graph.reverse(),
             leaves=leaves,
             index=index_r,
-            num_workers=threads,
         )
 
         lca_dfs = []
-        for k, v in test.items():
+        for k, v in lca2ref.items():
             tax_path = nx.shortest_path(G, target=k)["root"]
+
             root_row = pd.DataFrame(
                 {"source": ["root"], "target": ["root"], "weight": 0}
             )

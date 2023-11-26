@@ -418,7 +418,7 @@ help_msg = {
     "min_coverage_evenness": "Minimum coverage evenness",
     "min_coeff_var": "Minimum coverage evenness calculated as SD/MEAN",
     "min_coverage_mean": "Minimum coverage mean",
-    "transform_cov_evenness": "Include those references that fullfi all filtering criteria but the coverage evenness is 0",
+    "transform_cov_evenness": "Include those references that fulfill all filtering criteria but the coverage evenness is 0",
     "sort_memory": "Set maximum memory per thread for sorting; suffix K/M/G recognized",
     "scale": "Scale taxonomic abundance by this factor; suffix K/M recognized",
     "read_length_freqs": "Save a JSON file with the read length frequencies mapped to each reference",
@@ -661,6 +661,14 @@ def get_arguments(argv=None):
         dest="sort_by_name",
         action="store_true",
         help=help_msg["sort_by_name"],
+    )
+    reassign_optional_args.add_argument(
+        "--tmp-dir",
+        type=str,
+        default=defaults["tmp_dir"],
+        metavar="DIR",
+        dest="tmp_dir",
+        help=help_msg["tmp_dir"],
     )
     misc_filter_args.add_argument(
         "--reference-trim-length",
@@ -993,9 +1001,9 @@ def get_arguments(argv=None):
         help=help_msg["acc2taxid"],
     )
     lca_optional_args.add_argument(
-        "--rank-lca",
+        "--lca-rank",
         metavar="STR",
-        type=lambda x: str(check_lca_ranks(x, parser=parser, var="--rank-lca")),
+        type=lambda x: str(check_lca_ranks(x, parser=parser, var="--lca-rank")),
         default=defaults["rank_lca"],
         dest="rank_lca",
         help=help_msg["rank_lca"],
