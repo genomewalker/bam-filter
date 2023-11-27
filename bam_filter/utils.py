@@ -1026,6 +1026,15 @@ def get_arguments(argv=None):
         metavar="STR",
         help=help_msg["scale"],
     )
+    lca_optional_args.add_argument(
+        "-m",
+        "--sort-memory",
+        type=lambda x: check_suffix(x, parser=parser, var="--sort-memory"),
+        default=defaults["sort_memory"],
+        metavar="STR",
+        dest="sort_memory",
+        help=help_msg["sort_memory"],
+    )
     args = parser.parse_args(None if sys.argv[1:] else ["-h"])
     return args
 

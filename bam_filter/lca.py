@@ -14,6 +14,7 @@ from bam_filter.utils import (
     is_debug,
     create_output_files,
 )
+from bam_filter.sam_utils import check_bam_file
 from collections import defaultdict
 from functools import reduce
 import operator
@@ -251,6 +252,13 @@ def do_lca(args):
 
     out_files = create_output_files(
         bam=bam, prefix=args.prefix, lca_summary=args.lca_summary, tmp_dir=None
+    )
+
+    bam = check_bam_file(
+        bam=args.bam,
+        threads=args.threads,
+        reference_lengths=args.reference_lengths,
+        sort_memory=args.sort_memory,
     )
 
     samfile = pysam.AlignmentFile(bam, "rb", threads=threads)

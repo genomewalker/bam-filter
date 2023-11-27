@@ -23,7 +23,7 @@ import os
 import concurrent.futures
 import math
 import warnings
-
+from bam_filter.sam_utils import check_bam_file
 # import cProfile as prof
 # import pstats
 
@@ -749,6 +749,13 @@ def reassign(args):
 
     args = get_arguments()
     bam = args.bam
+
+    bam = check_bam_file(
+        bam=args.bam,
+        threads=args.threads,
+        reference_lengths=args.reference_lengths,
+        sort_memory=args.sort_memory,
+    )
 
     tmp_dir = check_tmp_dir_exists(args.tmp_dir)
     log.info("Temporary directory: %s", tmp_dir.name)
