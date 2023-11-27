@@ -128,12 +128,15 @@ def sort_keys_by_approx_weight(
         # Move keys between chunks to minimize the difference in total weights
         for src_chunk in sorted_chunks[:-1]:
             dest_chunk = sorted_chunks[-1]
-            if total_weights[dest_chunk] - total_weights[src_chunk] > 1:
-                # Move one key from dest_chunk to src_chunk
-                key_to_move = chunks[dest_chunk].pop(0)
-                chunks[src_chunk].append(key_to_move)
-                total_weights[src_chunk] += input_dict[key_to_move]
-                total_weights[dest_chunk] -= input_dict[key_to_move]
+
+            # Check if the source and destination chunks are not empty
+            if chunks[src_chunk] and chunks[dest_chunk]:
+                if total_weights[dest_chunk] - total_weights[src_chunk] > 1:
+                    # Move one key from dest_chunk to src_chunk
+                    key_to_move = chunks[dest_chunk].pop(0)
+                    chunks[src_chunk].append(key_to_move)
+                    total_weights[src_chunk] += input_dict[key_to_move]
+                    total_weights[dest_chunk] -= input_dict[key_to_move]
 
         # Check for improvement in balance
         current_balance = max(total_weights) - min(total_weights)

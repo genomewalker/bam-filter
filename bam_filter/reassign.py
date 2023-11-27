@@ -24,6 +24,7 @@ import concurrent.futures
 import math
 import warnings
 from bam_filter.sam_utils import check_bam_file
+
 # import cProfile as prof
 # import pstats
 
@@ -289,6 +290,7 @@ def write_reassigned_bam(
     # batch_size = len(references) // num_cores + 1  # Ensure non-zero batch size
     # batch_size = calc_chunksize(n_workers=num_cores, len_iterable=len(references))
     log.info("::: Creating reference chunks with uniform read amounts...")
+
     ref_chunks = sort_keys_by_approx_weight(
         input_dict=ref_counts, scale=1.5, num_cores=threads
     )
