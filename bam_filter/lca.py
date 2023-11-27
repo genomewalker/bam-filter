@@ -269,11 +269,11 @@ def do_lca(args):
 
     if reference_lengths is not None:
         ref_lengths = pd.read_csv(
-            reference_lengths, sep="\t", index_col=0, names=["reference", "length"]
+            reference_lengths, sep="\t", index_col=False, names=["reference", "length"]
         )
         ref_lengths = dict(zip(ref_lengths["reference"], ref_lengths["length"]))
         # check if the dataframe contains all the References in the BAM file
-        if not set(references).issubset(set(ref_lengths.index)):
+        if not set(references).issubset(set(ref_lengths.keys())):
             logging.error(
                 "The BAM file contains references not found in the reference lengths file"
             )
