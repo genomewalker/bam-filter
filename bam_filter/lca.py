@@ -471,9 +471,7 @@ def do_lca(args):
         )
         leaves = list(df1_d.keys())
 
-        log.info(
-            f"Finding most likely reference for the LCA nodes [{threads} threads]]"
-        )
+        log.info(f"Finding most likely reference for the LCA nodes")
         lca2ref = find_most_likely_continuation(
             full_graph=modified_graph.reverse(),
             leaves=leaves,
@@ -564,6 +562,10 @@ def do_lca(args):
             for node, data in tqdm(
                 cumulative_weights_and_paths.items(),
                 total=len(cumulative_weights_and_paths),
+                leave=False,
+                ncols=80,
+                desc="Writing results",
+                unit="nodes",
             ):
                 if data["cumulative_weight"] > 0:
                     taxid = taxids[node][0]
