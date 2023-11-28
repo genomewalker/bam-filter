@@ -57,28 +57,51 @@ def is_debug():
     return logging.getLogger("my_logger").getEffectiveLevel() == logging.DEBUG
 
 
+def refine_chunks(chunks, input_dict, target_weight):
+    # Calculate the current weight of each chunk
+    chunk_weights = [sum(input_dict[key] for key in chunk) for chunk in chunks]
+
+    while max(chunk_weights) - min(chunk_weights) > target_weight:
+        # Find the chunk with the maximum weight
+        src_chunk = chunk_weights.index(max(chunk_weights))
+
+        # Find the chunk with the minimum weight
+        dest_chunk = chunk_weights.index(min(chunk_weights))
+
+        # Find the key in the source chunk with the maximum weight
+        max_weight_key = max(chunks[src_chunk], key=lambda key: input_dict[key])
+
+        # Move the key with maximum weight from the source to the destination chunk
+        chunks[src_chunk].remove(max_weight_key)
+        chunks[dest_chunk].append(max_weight_key)
+
+        # Recalculate chunk weights
+        chunk_weights = [sum(input_dict[key] for key in chunk) for chunk in chunks]
+
+    # Remove empty chunks
+    chunks = [chunk for chunk in chunks if chunk]
+
+    return chunks
+
+
 def sort_keys_by_approx_weight(
     input_dict, scale=1, num_cores=1, refinement_steps=10, verbose=False
 ):
-    # Check for division by zero
     if scale == 0:
         raise ValueError("Scale cannot be zero.")
 
     # Calculate the target weight for each chunk
     target_weight = int(scale * max(input_dict.values()))
 
+    # Determine the initial number of chunks based on the number of cores
+    num_chunks = num_cores
+
     # Sort keys by their weights in descending order
     sorted_keys = sorted(input_dict, key=lambda k: input_dict[k], reverse=True)
 
-    # Calculate total weight
-    total_weight = sum(input_dict.values())
-
-    # Calculate the number of chunks based on the target weight
-    num_chunks = max(1, math.ceil(total_weight / target_weight))
-
-    # Initialize chunks with their total weights
+    # Initialize chunks
     chunks = [[] for _ in range(num_chunks)]
-    total_weights = [0] * num_chunks
+    total_weight = [0] * num_chunks
 
     # Create a progress bar
     progress_bar = tqdm.tqdm(
@@ -87,66 +110,50 @@ def sort_keys_by_approx_weight(
         unit="k",
         unit_scale=True,
         unit_divisor=1000,
-        disable=False,  # Replace with your logic or a boolean value
+        disable=False,
         leave=False,
         ncols=80,
     )
 
-    # Distribute keys into chunks
+    # Distribute keys into chunks with weights close to target_weight
     for key in sorted_keys:
-        min_chunk = min(range(num_chunks), key=lambda i: total_weights[i])
-        chunks[min_chunk].append(key)
-        total_weights[min_chunk] += input_dict[key]
+        # Find the chunk with the least total weight
+        min_chunk_index = min(range(num_chunks), key=lambda i: total_weight[i])
 
-        # Update the progress bar
-        progress_bar.update(1)
+        # If adding the key doesn't exceed the target weight, add it to the chunk
+        if total_weight[min_chunk_index] + input_dict[key] <= target_weight:
+            chunks[min_chunk_index].append(key)
+            total_weight[min_chunk_index] += input_dict[key]
+        else:
+            # Find the chunk with the weight closest to the target_weight
+            closest_chunk_index = min(
+                range(num_chunks),
+                key=lambda i: abs(total_weight[i] + input_dict[key] - target_weight),
+            )
+            chunks[closest_chunk_index].append(key)
+            total_weight[closest_chunk_index] += input_dict[key]
 
     # Close the progress bar
     progress_bar.close()
 
-    # Remove empty chunks
-    chunks = [chunk for chunk in chunks if chunk]
-
-    # Ensure a balanced number of reads in each chunk
-    max_reads = max(len(chunk) for chunk in chunks)
-    for chunk in chunks:
-        while len(chunk) < max_reads:
-            # Add elements from other chunks if needed
-            other_chunk = next((c for c in chunks if c != chunk and c), None)
-            if other_chunk:
-                element = other_chunk.pop(0)
-                chunk.append(element)
-
     # Initial balance
-    initial_balance = max(total_weights) - min(total_weights)
+    initial_balance = max(len(chunk) for chunk in chunks) - min(
+        len(chunk) for chunk in chunks
+    )
 
     # Refinement step
     for _ in range(refinement_steps):
-        # Sort chunks by their total weights in ascending order
-        sorted_chunks = sorted(range(num_chunks), key=lambda i: total_weights[i])
-
-        # Move keys between chunks to minimize the difference in total weights
-        for src_chunk in sorted_chunks[:-1]:
-            dest_chunk = sorted_chunks[-1]
-
-            # Check if the source and destination chunks are not empty
-            if chunks[src_chunk] and chunks[dest_chunk]:
-                if total_weights[dest_chunk] - total_weights[src_chunk] > 1:
-                    # Move one key from dest_chunk to src_chunk
-                    key_to_move = chunks[dest_chunk].pop(0)
-                    chunks[src_chunk].append(key_to_move)
-                    total_weights[src_chunk] += input_dict[key_to_move]
-                    total_weights[dest_chunk] -= input_dict[key_to_move]
+        chunks = refine_chunks(chunks, input_dict, target_weight)
 
         # Check for improvement in balance
-        current_balance = max(total_weights) - min(total_weights)
+        current_balance = max(len(chunk) for chunk in chunks) - min(
+            len(chunk) for chunk in chunks
+        )
         if current_balance >= initial_balance:
             break  # No improvement, exit the loop
 
         # Update initial balance for the next iteration
         initial_balance = current_balance
-
-    chunks = [chunk for chunk in chunks if chunk]
 
     # Print the min, max, and average weight of each chunk
     if verbose:

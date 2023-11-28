@@ -914,7 +914,7 @@ def process_bam(
 
     # ify the number of chunks
     ref_chunks = sort_keys_by_approx_weight(
-        input_dict=references_m, scale=1.5, num_cores=threads
+        input_dict=references_m, scale=1, num_cores=threads, verbose=True
     )
     log.info(f"::: Created {len(ref_chunks):,} chunks")
     ref_chunks = random.sample(ref_chunks, len(ref_chunks))
@@ -1160,7 +1160,7 @@ def filter_reference_BAM(
             # batch_size = len(references) // num_cores + 1  # Ensure non-zero batch size
             log.info("::: Creating reference chunks with uniform read amounts...")
             ref_chunks = sort_keys_by_approx_weight(
-                input_dict=ref_dict_m, scale=1.5, num_cores=threads, verbose=False
+                input_dict=ref_dict_m, scale=1, num_cores=threads, verbose=False
             )
             num_cores = min(num_cores, len(ref_chunks))
             log.info(f"::: Using {num_cores} cores to write {len(ref_chunks)} chunk(s)")

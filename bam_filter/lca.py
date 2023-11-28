@@ -305,7 +305,7 @@ def do_lca(args):
 
     log.info("Getting reference to read mapping")
     ref_chunks = sort_keys_by_approx_weight(
-        references_m, scale=1.5, num_cores=threads, refinement_steps=100
+        references_m, scale=1, num_cores=threads, refinement_steps=100
     )
 
     ref_chunks = random.sample(ref_chunks, len(ref_chunks))

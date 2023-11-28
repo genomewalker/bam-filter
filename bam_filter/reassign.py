@@ -117,6 +117,10 @@ def resolve_multimaps(data, scale=0.9, iters=10):
         data_unique = data[data["n_aln"] == 1]
         n_unique = data_unique.shape[0]
 
+        if n_unique == data.shape[0]:
+            progress_bar.close()
+            log.info("::: ::: No more multimapping reads. Stopping.")
+            return data
         data = data[(data["n_aln"] > 1) & (data["prob"] > 0)]
 
         # total_n_unique = np.sum(query_counts_array[data["source"]] <= 1)
@@ -292,7 +296,7 @@ def write_reassigned_bam(
     log.info("::: Creating reference chunks with uniform read amounts...")
 
     ref_chunks = sort_keys_by_approx_weight(
-        input_dict=ref_counts, scale=1.5, num_cores=threads
+        input_dict=ref_counts, scale=1, num_cores=num_cores
     )
     num_cores = min(num_cores, len(ref_chunks))
     log.info(f"::: Using {num_cores} cores to write {len(ref_chunks)} chunk(s)")
@@ -531,7 +535,7 @@ def reassign_reads(
     log.info("::: Creating reference chunks with uniform read amounts...")
     # ify the number of chunks
     ref_chunks = sort_keys_by_approx_weight(
-        input_dict=references_m, scale=1.5, num_cores=threads
+        input_dict=references_m, scale=1, num_cores=threads
     )
     log.info(f"::: Created {len(ref_chunks):,} chunks")
     ref_chunks = random.sample(ref_chunks, len(ref_chunks))
