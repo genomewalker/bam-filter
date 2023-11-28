@@ -13,6 +13,7 @@ from bam_filter.utils import (
     concat_df,
     is_debug,
     create_output_files,
+    create_empty_output_files,
 )
 from bam_filter.sam_utils import check_bam_file
 from collections import defaultdict
@@ -260,6 +261,10 @@ def do_lca(args):
         reference_lengths=args.reference_lengths,
         sort_memory=args.sort_memory,
     )
+    if bam is None:
+        logging.warning("No reference sequences with alignments found in the BAM file")
+        create_empty_output_files(out_files)
+        sys.exit(1)
 
     samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
     references = samfile.references

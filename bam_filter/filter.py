@@ -21,6 +21,7 @@ from bam_filter.utils import (
     concat_df,
     check_tmp_dir_exists,
     handle_warning,
+    create_empty_output_files,
 )
 from bam_filter.entropy import find_knee
 import json
@@ -28,6 +29,7 @@ import warnings
 from collections import Counter
 from functools import reduce
 import os
+import sys
 
 log = logging.getLogger("my_logger")
 
@@ -97,6 +99,11 @@ def filter_references(args):
         reference_lengths=args.reference_lengths,
         sort_memory=args.sort_memory,
     )
+    if bam is None:
+        logging.warning("No reference sequences with alignments found in the BAM file")
+        create_empty_output_files(out_files)
+        sys.exit(0)
+
     data = process_bam(
         bam=bam,
         threads=args.threads,

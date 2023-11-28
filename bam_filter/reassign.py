@@ -719,6 +719,10 @@ def reassign_reads(
             references_m[i] = k
     log.info(f"::: ::: Keeping {len(references_m):,} references")
     s_c = None
+    if len(references_m) == 0:
+        log.warning("::: No reference sequences with alignments found in the BAM file")
+        create_empty_output_files(out_files)
+        sys.exit(0)
     # convert columns queryId from q and subjectId from s to a tuple
     log.info("::: Creating filtered set...")
     entries = defaultdict(set)
@@ -755,6 +759,14 @@ def reassign(args):
 
     args = get_arguments()
     bam = args.bam
+    tmp_dir = check_tmp_dir_exists(args.tmp_dir)
+    log.info("Temporary directory: %s", tmp_dir.name)
+    out_files = create_output_files(
+        prefix=args.prefix,
+        bam=args.bam,
+        tmp_dir=tmp_dir,
+        # bam_reassigned=args.bam_reassigned,
+    )
 
     bam = check_bam_file(
         bam=args.bam,
@@ -762,16 +774,10 @@ def reassign(args):
         reference_lengths=args.reference_lengths,
         sort_memory=args.sort_memory,
     )
-
-    tmp_dir = check_tmp_dir_exists(args.tmp_dir)
-    log.info("Temporary directory: %s", tmp_dir.name)
-
-    out_files = create_output_files(
-        prefix=args.prefix,
-        bam=args.bam,
-        tmp_dir=tmp_dir,
-        # bam_reassigned=args.bam_reassigned,
-    )
+    if bam is None:
+        logging.warning("No reference sequences with alignments found in the BAM file")
+        create_empty_output_files(out_files)
+        sys.exit(0)
 
     logging.getLogger("my_logger").setLevel(
         logging.DEBUG if args.debug else logging.INFO

@@ -754,54 +754,64 @@ def check_bam_file(
     save = pysam.set_verbosity(0)
 
     # Use a with statement to ensure proper closing of the samfile
-    with pysam.AlignmentFile(bam, "rb", threads=threads) as samfile:
-        references = samfile.references
+    try:
+        with pysam.AlignmentFile(bam, "rb", threads=threads) as samfile:
+            references = samfile.references
 
-        chr_lengths = []
-        for chrom in samfile.references:
-            chr_lengths.append(samfile.get_reference_length(chrom))
-        max_chr_length = np.max(chr_lengths)
+            chr_lengths = []
+            for chrom in samfile.references:
+                chr_lengths.append(samfile.get_reference_length(chrom))
+            max_chr_length = np.max(chr_lengths)
 
-        pysam.set_verbosity(save)
-        ref_lengths = None
+            pysam.set_verbosity(save)
+            ref_lengths = None
 
-        if reference_lengths is not None:
-            ref_lengths = pd.read_csv(
-                reference_lengths, sep="\t", index_col=0, names=["reference", "length"]
-            )
-            # check if the dataframe contains all the References in the BAM file
-            if not set(references).issubset(set(ref_lengths.index)):
-                logging.error(
-                    "The BAM file contains references not found in the reference lengths file"
+            if reference_lengths is not None:
+                ref_lengths = pd.read_csv(
+                    reference_lengths,
+                    sep="\t",
+                    index_col=0,
+                    names=["reference", "length"],
                 )
-                sys.exit(1)
-            max_chr_length = np.max(ref_lengths["length"].tolist())
+                # check if the dataframe contains all the References in the BAM file
+                if not set(references).issubset(set(ref_lengths.index)):
+                    logging.error(
+                        "The BAM file contains references not found in the reference lengths file"
+                    )
+                    sys.exit(1)
+                max_chr_length = np.max(ref_lengths["length"].tolist())
 
-        # Check if BAM files is not sorted by coordinates, sort it by coordinates
-        if not samfile.header["HD"]["SO"] == "coordinate":
-            log.info("BAM file is not sorted by coordinates, sorting it...")
-            sorted_bam = bam.replace(".bam", ".bf-sorted.bam")
-            pysam.sort(
-                "-@", str(threads), "-m", str(sort_memory), "-o", sorted_bam, bam
-            )
-            bam = sorted_bam
-            pysam.index("-c", "-@", str(threads), bam)
-            samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
-
-        if not samfile.has_index():
-            logging.info("BAM index not found. Indexing...")
-            if max_chr_length > 536870912:
-                logging.info("A reference is longer than 2^29, indexing with csi")
+            # Check if BAM files is not sorted by coordinates, sort it by coordinates
+            if not samfile.header["HD"]["SO"] == "coordinate":
+                log.info("BAM file is not sorted by coordinates, sorting it...")
+                sorted_bam = bam.replace(".bam", ".bf-sorted.bam")
+                pysam.sort(
+                    "-@", str(threads), "-m", str(sort_memory), "-o", sorted_bam, bam
+                )
+                bam = sorted_bam
                 pysam.index("-c", "-@", str(threads), bam)
-            else:
-                pysam.index(
-                    "-@",
-                    str(threads),
-                    bam,
-                )
-        logging.info("::: BAM file looks good.")
+                samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
 
-    return bam  # No need to reload the samfile after creating index, thanks to the with statement
+            if not samfile.has_index():
+                logging.info("BAM index not found. Indexing...")
+                if max_chr_length > 536870912:
+                    logging.info("A reference is longer than 2^29, indexing with csi")
+                    pysam.index("-c", "-@", str(threads), bam)
+                else:
+                    pysam.index(
+                        "-@",
+                        str(threads),
+                        bam,
+                    )
+            logging.info("::: BAM file looks good.")
+
+        return bam  # No need to reload the samfile after creating index, thanks to the with statement
+    except ValueError as ve:
+        if "file has no sequences defined (mode='rb')" in str(ve):
+            return None
+        else:
+            log.error(f"Message:\n{ve}")
+            exit(1)
 
 
 # Inspired from https://gigabaseorgigabyte.wordpress.com/2017/04/14/getting-the-edit-distance-from-a-bam-alignment-a-journey/
