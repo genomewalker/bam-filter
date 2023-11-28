@@ -119,7 +119,7 @@ def resolve_multimaps(data, scale=0.9, iters=10):
 
         if n_unique == data.shape[0]:
             progress_bar.close()
-            log.info("::: ::: No more multimapping reads. Stopping.")
+            log.info("::: ::: No more multimapping reads. Early stopping.")
             return data
         data = data[(data["n_aln"] > 1) & (data["prob"] > 0)]
 
