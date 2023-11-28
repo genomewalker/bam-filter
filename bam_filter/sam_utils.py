@@ -914,7 +914,7 @@ def process_bam(
 
     # ify the number of chunks
     ref_chunks = sort_keys_by_approx_weight(
-        input_dict=references_m, scale=1, num_cores=threads, verbose=True
+        input_dict=references_m, scale=1, num_cores=threads, verbose=False
     )
     log.info(f"::: Created {len(ref_chunks):,} chunks")
     ref_chunks = random.sample(ref_chunks, len(ref_chunks))
