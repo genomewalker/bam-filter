@@ -13,6 +13,9 @@ requirements = [
     "pyranges>=0.0.118",
     "kneed>=0.8.1",
     "matplotlib>=3.6.0",
+    "taxopy>=0.12.0",
+    "python-datatable>=1.1.3",
+    "networkx>=3.2.1",
 ]
 
 setup(
