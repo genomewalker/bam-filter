@@ -172,10 +172,21 @@ def sort_keys_by_approx_weight(
 def create_empty_output_files(out_files):
     for key, value in out_files.items():
         if value is not None:
-            if key == "bam_filtered" or key == "bam_reassigned":
+            # check if file exists, if not create it
+            if os.path.exists(value):
+                continue
+            if (
+                key == "bam_filtered"
+                or key == "bam_reassigned"
+                or key == "bam_reassigned"
+            ):
                 create_empty_bam(value)
             elif (
-                key == "bam_filtered_tmp" or key == "bam_tmp" or key == "bam_tmp_sorted"
+                key == "bam_filtered_tmp"
+                or key == "bam_tmp"
+                or key == "bam_tmp_sorted"
+                or key == "bam_reassigned_tmp"
+                or key == "bam_reassigned_sorted"
             ):
                 continue
             else:
@@ -1177,6 +1188,7 @@ def create_output_files(
     bam,
     tmp_dir,
     prefix=None,
+    mode=None,
     stats="",
     stats_filtered="",
     bam_reassigned="",
@@ -1192,6 +1204,8 @@ def create_output_files(
 
     if tmp_dir is not None:
         tmp_dir = tmp_dir.name
+    else:
+        tmp_dir = check_tmp_dir_exists(tmp_dir).name
 
     if stats == "" or stats is None:
         stats = f"{prefix}_stats.tsv.gz"
@@ -1213,20 +1227,45 @@ def create_output_files(
         lca_summary = f"{prefix}_lca-summary.tsv.gz"
 
     # create output files
-    out_files = {
-        "stats": stats,
-        "stats_filtered": stats_filtered,
-        "bam_filtered_tmp": f"{tmp_dir}/{prefix}.filtered.tmp.bam",
-        "bam_tmp": f"{tmp_dir}/{prefix}.tmp.bam",
-        "bam_tmp_sorted": f"{tmp_dir}/{prefix}.tmp.sorted.bam",
-        "bam_filtered": bam_filtered,
-        "bam_reassigned_tmp": f"{tmp_dir}/{prefix}.reassigned.tmp.bam",
-        "bam_reassigned_sorted": f"{tmp_dir}/{prefix}.reassigned.sorted.bam",
-        "bam_reassigned": bam_reassigned,
-        "read_length_freqs": read_length_freqs,
-        "read_hits_count": read_hits_count,
-        "knee_plot": knee_plot,
-        "coverage_plot_dir": coverage_plots,
-        "lca_summary": lca_summary,
-    }
+    if mode == "filter":
+        out_files = {
+            "stats": stats,
+            "stats_filtered": stats_filtered,
+            "bam_filtered_tmp": f"{tmp_dir}/{prefix}.filtered.tmp.bam",
+            "bam_filtered": bam_filtered,
+            "read_length_freqs": read_length_freqs,
+            "read_hits_count": read_hits_count,
+            "knee_plot": knee_plot,
+            "coverage_plot_dir": coverage_plots,
+        }
+    elif mode == "reassign":
+        out_files = {
+            "bam_reassigned_tmp": f"{tmp_dir}/{prefix}.reassigned.tmp.bam",
+            "bam_reassigned_sorted": f"{tmp_dir}/{prefix}.reassigned.sorted.bam",
+            "bam_reassigned": bam_reassigned,
+        }
+    elif mode == "lca":
+        out_files = {
+            "lca_summary": lca_summary,
+        }
+    else:
+        log.error("Mode not recognized")
+        exit(1)
     return out_files
+
+    # out_files = {
+    #     "stats": stats,
+    #     "stats_filtered": stats_filtered,
+    #     "bam_filtered_tmp": f"{tmp_dir}/{prefix}.filtered.tmp.bam",
+    #     "bam_tmp": f"{tmp_dir}/{prefix}.tmp.bam",
+    #     "bam_tmp_sorted": f"{tmp_dir}/{prefix}.tmp.sorted.bam",
+    #     "bam_filtered": bam_filtered,
+    #     "bam_reassigned_tmp": f"{tmp_dir}/{prefix}.reassigned.tmp.bam",
+    #     "bam_reassigned_sorted": f"{tmp_dir}/{prefix}.reassigned.sorted.bam",
+    #     "bam_reassigned": bam_reassigned,
+    #     "read_length_freqs": read_length_freqs,
+    #     "read_hits_count": read_hits_count,
+    #     "knee_plot": knee_plot,
+    #     "coverage_plot_dir": coverage_plots,
+    #     "lca_summary": lca_summary,
+    # }

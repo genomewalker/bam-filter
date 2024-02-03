@@ -11,7 +11,6 @@ You should have received a copy of the GNU General Public License along with thi
 see <https://www.gnu.org/licenses/>.
 """
 
-
 import logging
 import pandas as pd
 from bam_filter.sam_utils import process_bam, filter_reference_BAM, check_bam_file
@@ -91,6 +90,7 @@ def filter_references(args):
         knee_plot=args.knee_plot,
         coverage_plots=args.coverage_plots,
         tmp_dir=tmp_dir,
+        mode="filter",
     )
 
     bam = check_bam_file(

@@ -765,6 +765,7 @@ def reassign(args):
         prefix=args.prefix,
         bam=args.bam,
         tmp_dir=tmp_dir,
+        mode="reassign",
         # bam_reassigned=args.bam_reassigned,
     )
 
