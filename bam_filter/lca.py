@@ -252,7 +252,11 @@ def do_lca(args):
     scale = args.scale
 
     out_files = create_output_files(
-        bam=bam, prefix=args.prefix, lca_summary=args.lca_summary, tmp_dir=None
+        bam=bam,
+        prefix=args.prefix,
+        lca_summary=args.lca_summary,
+        tmp_dir=None,
+        mode="lca",
     )
 
     bam = check_bam_file(
