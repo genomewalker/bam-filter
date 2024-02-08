@@ -604,34 +604,105 @@ def reassign_reads(
     reads = list()
     refs = list()
     empty_df = 0
+    # new_data = list()
+    # for i in tqdm.tqdm(range(len(data)), total=len(data), leave=False, ncols=80):
+    #     empty_df += data[i][3]
+    #     reads.extend(list(data[i][1]))
+    #     refs.extend(list(data[i][2]))
+    #     data[i] = data[i][0]
+    new_data = list()
     for i in tqdm.tqdm(range(len(data)), total=len(data), leave=False, ncols=80):
         empty_df += data[i][3]
         reads.extend(list(data[i][1]))
         refs.extend(list(data[i][2]))
-        data[i] = data[i][0]
-    log.info(f"::: ::: Found {empty_df:,} references without alignments")
 
-    data = dt.rbind([x for x in data])
+        # Check if the frame has more than 2 billion rows
+        if data[i][0].nrows > 2e9:
+            # Calculate the number of chunks needed
+            num_chunks = (data[i][0].nrows // 1e9) + (data[i][0].nrows % 1e9 > 0)
+            log.warning(f"Frame has more than 2 billion rows. Splitting into {num_chunks:,} chunks...")
 
+            chunks = []
+
+            # Create chunks of 1 billion rows each
+            for chunk_idx in range(num_chunks):
+                start = int(chunk_idx * 1e9)
+                end = int(min((chunk_idx + 1) * 1e9, data[i][0].nrows))
+                chunks.append(data[i][0][start:end, :])
+
+            # Substitute data[i] with the first chunk
+            data[i] = chunks[0]
+
+            # Append the rest of the chunks to new_data
+            for chunk in chunks[1:]:
+                new_data.append(chunk)
+        else:
+            # If the frame is not larger than 2 billion rows, keep it as is
+            data[i] = data[i][0]
+
+    # Combine data with new_data
+    data.extend(new_data)
+    log.info(f"::: ::: Removed {empty_df:,} references without alignments")
+
+    # data = dt.rbind([x for x in data])
+
+    # log.info("::: Indexing references...")
+    # refs = dt.Frame(list(set(refs)))
+    # refs.names = ["subjectId"]
+    # refs["sidx"] = dt.Frame(list(range(refs.shape[0])))
+    # refs.key = "subjectId"
+
+    # log.info("::: Indexing reads...")
+    # reads = dt.Frame(list(set(reads)))
+    # reads.names = ["queryId"]
+    # reads["qidx"] = dt.Frame([(i + refs.shape[0]) for i in range(reads.shape[0])])
+    # reads.key = "queryId"
+
+    # log.info("::: Combining data...")
+    # data = data[:, :, dt.join(reads)]
+    # data = data[:, :, dt.join(refs)]
+
+    # Initialize refs DataFrame
     log.info("::: Indexing references...")
     refs = dt.Frame(list(set(refs)))
     refs.names = ["subjectId"]
     refs["sidx"] = dt.Frame(list(range(refs.shape[0])))
     refs.key = "subjectId"
 
+    # Initialize reads DataFrame
     log.info("::: Indexing reads...")
     reads = dt.Frame(list(set(reads)))
     reads.names = ["queryId"]
     reads["qidx"] = dt.Frame([(i + refs.shape[0]) for i in range(reads.shape[0])])
     reads.key = "queryId"
-
+    n_alns_0 = 0
+    # Loop through each DataFrame in the list and update it with the joined version
     log.info("::: Combining data...")
-    data = data[:, :, dt.join(reads)]
-    data = data[:, :, dt.join(refs)]
+    for i, x in tqdm.tqdm(
+        enumerate(data),
+        total=len(data),
+        desc="Processing batches",
+        unit="batch",
+        disable=is_debug(),
+        leave=False,
+        ncols=80,
+    ):
+        # Perform join with reads and then refs
+        x = x[:, :, dt.join(reads)]
+        x = x[:, :, dt.join(refs)]
+        n_alns_0 += x.shape[0]
+        del x["queryId"]
+        del x["subjectId"]
+        x = x[:, [dt.f.qidx, dt.f.sidx, dt.f.var, dt.f.slen]].to_numpy()
+        # Substitute the original DataFrame with the joined version in the list
+        data[i] = x
 
-    del data["queryId"]
-    del data["subjectId"]
-    n_alns_0 = data.shape[0]
+    # After the loop, use dt.rbind() to combine all the DataFrames in the list
+    # data = dt.rbind([x for x in data])
+
+    # del data["queryId"]
+    # del data["subjectId"]
+    # n_alns_0 = data.shape[0]
     n_reads_0 = reads.shape[0]
     n_refs_0 = refs.shape[0]
     log.info(
@@ -639,7 +710,8 @@ def reassign_reads(
     )
 
     log.info("::: Allocating data structures...")
-    mat = data[:, [dt.f.qidx, dt.f.sidx, dt.f.var, dt.f.slen]].to_numpy()
+    # mat = data[:, [dt.f.qidx, dt.f.sidx, dt.f.var, dt.f.slen]].to_numpy()
+    mat = np.vstack(data)
     data = None
 
     # Create a zeros array with the same number of rows as 'mat'
