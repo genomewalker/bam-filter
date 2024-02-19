@@ -838,9 +838,8 @@ def reassign(args):
         bam=args.bam,
         tmp_dir=tmp_dir,
         mode="reassign",
-        # bam_reassigned=args.bam_reassigned,
+        bam_reassigned=args.bam_reassigned,
     )
-
     bam = check_bam_file(
         bam=args.bam,
         threads=args.threads,
