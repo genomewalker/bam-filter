@@ -318,8 +318,10 @@ Full list of options:
   
 ```bash
 filterBAM lca --help
+filterBAM lca --help
 usage: filterBAM lca [-h] --bam BAM [-p STR] [-r FILE] [-t INT] [--names FILE] [--nodes FILE]
-                     [--acc2taxid FILE] [--lca-rank STR] [--lca-summary [FILE]] [--scale STR]
+                     [--acc2taxid FILE] [--lca-rank STR] [--lca-summary [FILE]] [--scale STR] [-m STR]
+                     [--custom]
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -339,6 +341,9 @@ LCA optional arguments:
   --lca-rank STR        Rank to use for LCA calculation (default: species)
   --lca-summary [FILE]  Save a TSV file with the LCA summary (default: None)
   --scale STR           Scale taxonomic abundance by this factor; suffix K/M recognized (default: 1000000.0)
+  -m STR, --sort-memory STR
+                        Set maximum memory per thread for sorting; suffix K/M/G recognized (default: 1G)
+  --custom              Use custom taxdump files (default: False)
 ```
 
 

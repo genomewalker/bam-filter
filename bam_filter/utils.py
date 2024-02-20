@@ -16,7 +16,6 @@ from itertools import chain
 import numpy as np
 from pathlib import Path
 import pysam
-import math
 import tempfile
 
 
@@ -469,6 +468,7 @@ help_msg = {
     "acc2taxid": "acc2taxid file from taxonomy",
     "rank_lca": "Rank to use for LCA calculation",
     "lca_summary": "Save a TSV file with the LCA summary",
+    "custom": "Use custom taxdump files",
     "version": "Print program version",
 }
 
@@ -1055,6 +1055,12 @@ def get_arguments(argv=None):
         metavar="STR",
         dest="sort_memory",
         help=help_msg["sort_memory"],
+    )
+    lca_optional_args.add_argument(
+        "--custom",
+        dest="custom",
+        action="store_true",
+        help=help_msg["custom"],
     )
     args = parser.parse_args(None if sys.argv[1:] else ["-h"])
     return args

@@ -180,20 +180,22 @@ def get_ref2read(params, dat, threads=1):
 def get_tax(ref, parms):
     taxdb = parms["taxdb"]
     acc2taxid = parms["acc2taxid"]
+    custom = parms["custom"]
     if ref in acc2taxid:
         taxid = acc2taxid[ref]
         # taxid = txp.taxid_from_name(ref, taxdb)[0]
         taxonomy_info = txp.Taxon(taxid, taxdb).rank_name_dictionary
         taxonomy_info["taxid"] = taxid
         taxonomy_info["ref"] = ref
-        taxonomy_info["subspecies"] = f"S__{ref}"
+        if custom:
+            taxonomy_info["subspecies"] = f"S__{ref}"
     else:
         log.debug(f"No taxid found for {ref}")
         taxonomy_info = None
     return taxonomy_info
 
 
-def get_taxonomy_info(refids, taxdb, acc2taxid, nprocs=1):
+def get_taxonomy_info(refids, taxdb, acc2taxid, nprocs=1, custom=False):
     """Function to get the references taxonomic information for a given taxonomy id
 
     Args:
@@ -204,14 +206,146 @@ def get_taxonomy_info(refids, taxdb, acc2taxid, nprocs=1):
         dict: A list of taxonomy information
     """
 
-    acc2taxid_df = pd.read_csv(acc2taxid, sep="\t", index_col=None)[
-        ["accession", "taxid"]
-    ].rename(columns={"accession": "reference"}, inplace=False)
-    # Filter rows in refids from dataframe
-    acc2taxid_df = acc2taxid_df.loc[acc2taxid_df["reference"].isin(refids)]
-    acc2taxid_dict = acc2taxid_df.set_index("reference").T.to_dict("records")
+    # acc2taxid_df = pd.read_csv(acc2taxid, sep="\t", index_col=None, engine="pyarrow")[
+    #     ["accession", "taxid"]
+    # ].rename(columns={"accession": "reference"}, inplace=False)
+    # print("here0")
+    # # Filter rows in refids from dataframe
+    # acc2taxid_df = acc2taxid_df.loc[acc2taxid_df["reference"].isin(refids)]
+    # print("here1")
+    # acc2taxid_dict = acc2taxid_df.set_index("reference").T.to_dict("records")
 
-    parms = {"taxdb": taxdb, "acc2taxid": acc2taxid_dict[0]}
+    # parms = {"taxdb": taxdb, "acc2taxid": acc2taxid_dict[0]}
+    # Initialize the progress bar without a total; it will update dynamically based on rows
+    if custom:
+        log.info("Using custom taxdump files...")
+    log.info("Processing acc2taxid file...")
+
+    # pbar = tqdm(
+    #     desc="Processing Rows ",
+    #     unit=" row",
+    #     leave=False,
+    #     ncols=100,
+    # )
+    # Initialize an empty DataFrame to hold the filtered results
+    if custom:
+        cols = ["accession", "taxid"]
+        name = "accession"
+    else:
+        cols = ["accession.version", "taxid"]
+        name = "accession.version"
+
+    # Convert refids to a set for efficient lookup
+    refids_set = set(refids)
+    early_stop = False
+    # Initialize progress bars
+    pbar_refs = tqdm(
+        total=len(refids_set), desc="Found Refs", position=0, leave=False, ncols=80
+    )
+    pbar_lines = tqdm(
+        desc="Lines Read", unit=" lines", position=1, leave=False, ncols=80
+    )
+
+    # Store found refs and their counts
+    found_refs = set()
+    records = []  # To store records instead of DataFrames
+
+    try:
+        for chunk in pd.read_csv(
+            acc2taxid, sep="\t", usecols=cols, chunksize=1_000_000
+        ):
+            # Update the lines read progress bar
+            pbar_lines.update(chunk.shape[0])
+
+            # Filter the chunk for relevant rows
+            relevant_rows = chunk[chunk[name].isin(refids_set)].copy()
+            if not relevant_rows.empty:
+                # Determine newly found references in this chunk
+                newly_found = set(relevant_rows[name].unique()) - found_refs
+                found_refs.update(newly_found)
+
+                # Update the refs found progress bar
+                pbar_refs.update(len(newly_found))
+
+                # Append relevant rows to the records list
+                records.append(relevant_rows)
+
+            # Early stop if all references have been found
+            if found_refs == refids_set:
+                early_stop = True
+                break
+    finally:
+        # Ensure progress bars are closed in case of interruption
+        pbar_lines.close()
+        pbar_refs.close()
+
+    if early_stop:
+        log.info("::: All references found. Stopping early.")
+
+    filtered_df = (
+        pd.concat(records, ignore_index=True) if records else pd.DataFrame(columns=cols)
+    )
+    filtered_df.rename(columns={name: "reference"}, inplace=True)
+    acc2taxid_dict = filtered_df.set_index("reference").to_dict()["taxid"]
+    # if custom:
+    #     cols = ["accession", "taxid"]
+    #     name = "accession"
+    # else:
+    #     cols = ["accession.version", "taxid"]
+    #     name = "accession.version"
+
+    # filtered_dfs = []
+    # with Pool(processes=nprocs) as pool:
+    #     # Initialize an indefinite progress bar
+    #     pbar = tqdm(desc="Processing Rows", unit=" chunk", leave=True)
+
+    #     # Use imap_unordered for lazy evaluation and processing of chunks
+    #     for result in pool.imap_unordered(
+    #         process_chunk,
+    #         chunk_generator(name, cols, acc2taxid, refids_set),
+    #         chunksize=10,
+    #     ):
+    #         if result is not None:
+    #             filtered_dfs.append(result)
+    #             pbar.update(1)  # Update the progress bar for each processed chunk
+    #         else:
+    #             break  # No more data, exit the loop
+
+    #     pbar.close()  # Close the progress bar when done
+    # acc2taxid_dict = process_data(name, cols, acc2taxid, refids, nprocs)
+    # parms = {"taxdb": taxdb, "acc2taxid": acc2taxid_dict, "custom": custom}
+
+    # filtered_dfs = []
+    # with Pool(processes=nprocs) as pool:
+    #     pbar = tqdm(desc="Processing file", unit=" chunk", leave=False)
+
+    #     for result in pool.imap(
+    #         process_chunk,
+    #         chunk_generator(name, cols, acc2taxid, refids),
+    #         chunksize=10,
+    #     ):
+    #         if result is not None:
+    #             filtered_dfs.append(result)
+    #             pbar.update(1)  # Update the progress bar for each processed chunk
+    #         else:
+    #             break  # No more data, exit the loop
+
+    #     pbar.close()  # Close the progress bar when done
+    # # Concatenate the filtered DataFrames
+    # filtered_df = pd.concat(filtered_dfs, ignore_index=True)
+
+    # # Concatenate the filtered DataFrames
+    # filtered_df = pd.concat(filtered_dfs, ignore_index=True)
+    # # exit if dataframe is empty
+    # if filtered_df.empty:
+    #     log.error("No taxids found in acc2taxid file")
+    #     sys.exit(1)
+    # # Continue with your data processing
+    # filtered_df.rename(columns={name: "reference"}, inplace=True)
+
+    log.info(f"::: Read {filtered_df.shape[0]:,} rows from acc2taxid file...")
+
+    parms = {"taxdb": taxdb, "acc2taxid": acc2taxid_dict, "custom": custom}
     func = partial(get_tax, parms=parms)
     if debug is True or len(refids) < 100000:
         taxonomy_info = list(map(func, refids))
@@ -297,7 +431,7 @@ def do_lca(args):
     )
     acc2taxid = acc2taxid
     taxonomy_info, tax_ranks = get_taxonomy_info(
-        references, taxdb, acc2taxid, nprocs=threads
+        references, taxdb, acc2taxid, nprocs=threads, custom=args.custom
     )
     tax_ranks.reverse()
     index_r = tax_ranks.index(sel_rank)
@@ -480,7 +614,7 @@ def do_lca(args):
         )
         leaves = list(df1_d.keys())
 
-        log.info(f"Finding most likely reference for the LCA nodes")
+        log.info("Finding most likely reference for the LCA nodes")
         lca2ref = find_most_likely_continuation(
             full_graph=modified_graph.reverse(),
             leaves=leaves,
