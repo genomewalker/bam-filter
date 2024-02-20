@@ -181,10 +181,17 @@ def get_tax(ref, parms):
     taxdb = parms["taxdb"]
     acc2taxid = parms["acc2taxid"]
     custom = parms["custom"]
+    missing = set()
     if ref in acc2taxid:
         taxid = acc2taxid[ref]
         # taxid = txp.taxid_from_name(ref, taxdb)[0]
-        taxonomy_info = txp.Taxon(taxid, taxdb).rank_name_dictionary
+        try:
+            taxonomy_info = txp.Taxon(taxid, taxdb).rank_name_dictionary
+        except txp.exceptions.TaxidError:
+            log.debug(f"No taxid found for {ref}")
+            taxonomy_info = None
+            missing.add(ref)
+            return taxonomy_info
         taxonomy_info["taxid"] = taxid
         taxonomy_info["ref"] = ref
         if custom:
@@ -192,6 +199,7 @@ def get_tax(ref, parms):
     else:
         log.debug(f"No taxid found for {ref}")
         taxonomy_info = None
+        missing.add(ref)
     return taxonomy_info
 
 

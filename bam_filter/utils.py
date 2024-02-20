@@ -468,6 +468,7 @@ help_msg = {
     "acc2taxid": "acc2taxid file from taxonomy",
     "rank_lca": "Rank to use for LCA calculation",
     "lca_summary": "Save a TSV file with the LCA summary",
+    "lca_missing": "Save a TSV file with references with missing taxids",
     "custom": "Use custom taxdump files",
     "version": "Print program version",
 }
