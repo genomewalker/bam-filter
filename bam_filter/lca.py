@@ -21,7 +21,7 @@ from functools import reduce
 import operator
 import random
 import gzip
-
+import datatable as dt
 log = logging.getLogger("my_logger")
 
 debug = is_debug()
@@ -243,56 +243,13 @@ def get_taxonomy_info(refids, taxdb, acc2taxid, nprocs=1, custom=False):
         cols = ["accession.version", "taxid"]
         name = "accession.version"
 
-    # Convert refids to a set for efficient lookup
-    refids_set = set(refids)
-    early_stop = False
-    # Initialize progress bars
-    pbar_refs = tqdm(
-        total=len(refids_set), desc="Found Refs", position=0, leave=False, ncols=80
-    )
-    pbar_lines = tqdm(
-        desc="Lines Read", unit=" lines", position=1, leave=False, ncols=80
-    )
+    filtered_df = dt.fread(acc2taxid, verbose=True, nthreads=nprocs)
+    filt = dt.Frame(refids, names=[name])
+    filt["FOO"] = 1
+    filt.key = name
+    filtered_df = filtered_df[:, :, dt.join(filt)][~dt.isna(dt.f.FOO),:].to_pandas()
+    filtered_df = filtered_df[cols]
 
-    # Store found refs and their counts
-    found_refs = set()
-    records = []  # To store records instead of DataFrames
-
-    try:
-        for chunk in pd.read_csv(
-            acc2taxid, sep="\t", usecols=cols, chunksize=1_000_000
-        ):
-            # Update the lines read progress bar
-            pbar_lines.update(chunk.shape[0])
-
-            # Filter the chunk for relevant rows
-            relevant_rows = chunk[chunk[name].isin(refids_set)].copy()
-            if not relevant_rows.empty:
-                # Determine newly found references in this chunk
-                newly_found = set(relevant_rows[name].unique()) - found_refs
-                found_refs.update(newly_found)
-
-                # Update the refs found progress bar
-                pbar_refs.update(len(newly_found))
-
-                # Append relevant rows to the records list
-                records.append(relevant_rows)
-
-            # Early stop if all references have been found
-            if found_refs == refids_set:
-                early_stop = True
-                break
-    finally:
-        # Ensure progress bars are closed in case of interruption
-        pbar_lines.close()
-        pbar_refs.close()
-
-    if early_stop:
-        log.info("::: All references found. Stopping early.")
-
-    filtered_df = (
-        pd.concat(records, ignore_index=True) if records else pd.DataFrame(columns=cols)
-    )
     filtered_df.rename(columns={name: "reference"}, inplace=True)
     acc2taxid_dict = filtered_df.set_index("reference").to_dict()["taxid"]
     # if custom:
@@ -441,6 +398,8 @@ def do_lca(args):
     taxonomy_info, tax_ranks = get_taxonomy_info(
         references, taxdb, acc2taxid, nprocs=threads, custom=args.custom
     )
+    print(taxonomy_info)
+    print(tax_ranks)
     tax_ranks.reverse()
     index_r = tax_ranks.index(sel_rank)
 
