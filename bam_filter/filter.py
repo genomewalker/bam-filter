@@ -95,7 +95,7 @@ def filter_references(args):
 
     bam = check_bam_file(
         bam=args.bam,
-        threads=args.threads,
+        threads=4,
         reference_lengths=args.reference_lengths,
         sort_memory=args.sort_memory,
     )

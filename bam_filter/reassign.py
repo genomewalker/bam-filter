@@ -240,7 +240,11 @@ def write_to_file(alns, out_bam_file, header=None):
 
 def process_references_batch(references, entries, bam, refs_idx, threads=4):
     alns = []
-    with pysam.AlignmentFile(bam, "rb", threads=threads) as samfile:
+    if threads > 4:
+        s_threads = 4
+    else:
+        s_threads = threads
+    with pysam.AlignmentFile(bam, "rb", threads=s_threads) as samfile:
         for reference in references:
             r_ids = entries[reference]
             for aln in samfile.fetch(
@@ -269,7 +273,11 @@ def write_reassigned_bam(
     # else:
     #     out_bam = out_files["bam_reassigned_sorted"]
     out_bam = out_files["bam_reassigned"]
-    samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
+    if threads > 4:
+        s_threads = 4
+    else:
+        s_threads = threads
+    samfile = pysam.AlignmentFile(bam, "rb", threads=s_threads)
     references = list(entries.keys())
     refs_dict = {x: samfile.get_reference_length(x) for x in references}
     header = samfile.header
@@ -380,7 +388,11 @@ def write_reassigned_bam(
 
     logging.info("BAM index not found. Indexing...")
     save = pysam.set_verbosity(0)
-    samfile = pysam.AlignmentFile(out_bam, "rb", threads=threads)
+    if threads > 4:
+        s_threads = 4
+    else:
+        s_threads = threads
+    samfile = pysam.AlignmentFile(out_bam, "rb", threads=s_threads)
     chr_lengths = []
     for chrom in samfile.references:
         chr_lengths.append(samfile.get_reference_length(chrom))
@@ -412,7 +424,11 @@ def calculate_alignment_score(identity, read_length):
 
 def get_bam_data(parms, ref_lengths=None, percid=90, min_read_length=30, threads=1):
     bam, references = parms
-    samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
+    if threads > 4:
+        s_threads = 4
+    else:
+        s_threads = threads
+    samfile = pysam.AlignmentFile(bam, "rb", threads=s_threads)
 
     results = []
     reads = set()
@@ -491,7 +507,11 @@ def reassign_reads(
 
     log.info("::: Loading BAM file")
     save = pysam.set_verbosity(0)
-    samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
+    if threads > 4:
+        s_threads = 4
+    else:
+        s_threads = threads
+    samfile = pysam.AlignmentFile(bam, "rb", threads=s_threads)
 
     references = samfile.references
 
