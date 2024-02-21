@@ -114,10 +114,14 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
     # # print profiling output
     # stats = pstats.Stats(prof).strip_dirs().sort_stats("tottime")
     # stats.print_stats(5)  # top 10 rows
+    if threads > 4:
+        s_threads = 4
+    else:
+        s_threads = threads
     logging.info("::: ::: Sorting BAM file...")
     pysam.sort(
         "-@",
-        str(threads),
+        str(s_threads),
         "-m",
         str(sort_memory),
         "-o",
@@ -144,13 +148,13 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
         pysam.index(
             "-c",
             "-@",
-            str(threads),
+            str(s_threads),
             output_files["bam_tmp_sorted"],
         )
     else:
         pysam.index(
             "-@",
-            str(threads),
+            str(s_threads),
             output_files["bam_tmp_sorted"],
         )
 
@@ -798,8 +802,12 @@ def check_bam_file(
             if not samfile.header["HD"]["SO"] == "coordinate":
                 log.info("BAM file is not sorted by coordinates, sorting it...")
                 sorted_bam = bam.replace(".bam", ".bf-sorted.bam")
+                if threads > 4:
+                    s_threads = 4
+                else:
+                    s_threads = threads
                 pysam.sort(
-                    "-@", str(threads), "-m", str(sort_memory), "-o", sorted_bam, bam
+                    "-@", str(s_threads), "-m", str(sort_memory), "-o", sorted_bam, bam
                 )
                 bam = sorted_bam
                 pysam.index("-c", "-@", str(threads), bam)
@@ -1266,10 +1274,14 @@ def filter_reference_BAM(
             if not disable_sort:
                 if sort_by_name:
                     logging.info("Sorting BAM file by read name...")
+                    if threads > 4:
+                        s_threads = 4
+                    else:
+                        s_threads = threads
                     pysam.sort(
                         "-n",
                         "-@",
-                        str(threads),
+                        str(s_threads),
                         "-m",
                         str(sort_memory),
                         "-o",
@@ -1280,7 +1292,7 @@ def filter_reference_BAM(
                     logging.info("Sorting BAM file by coordinates...")
                     pysam.sort(
                         "-@",
-                        str(threads),
+                        str(s_threads),
                         "-m",
                         str(sort_memory),
                         "-o",

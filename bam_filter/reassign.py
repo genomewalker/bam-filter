@@ -363,12 +363,16 @@ def write_reassigned_bam(
     # stats = pstats.Stats(prof).strip_dirs().sort_stats("tottime")
     # stats.print_stats(5)  # top 10 rows
     log.info("::: ::: Sorting BAM file...")
+    if threads > 4:
+        s_threads = 4
+    else:
+        s_threads = threads
     if sort_by_name:
         log.info("::: ::: Sorting by name...")
         pysam.sort(
             "-n",
             "-@",
-            str(threads),
+            str(s_threads),
             "-m",
             str(sort_memory),
             "-o",
@@ -378,7 +382,7 @@ def write_reassigned_bam(
     else:
         pysam.sort(
             "-@",
-            str(threads),
+            str(s_threads),
             "-m",
             str(sort_memory),
             "-o",
