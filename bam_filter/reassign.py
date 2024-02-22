@@ -644,7 +644,9 @@ def reassign_reads(
         if data[i][0].nrows > 2e9:
             # Calculate the number of chunks needed
             num_chunks = (data[i][0].nrows // 1e9) + (data[i][0].nrows % 1e9 > 0)
-            log.warning(f"Frame has more than 2 billion rows. Splitting into {num_chunks:,} chunks...")
+            log.warning(
+                f"Frame has more than 2 billion rows. Splitting into {num_chunks:,} chunks..."
+            )
 
             chunks = []
 

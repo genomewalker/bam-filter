@@ -1244,6 +1244,8 @@ def create_output_files(
             "read_hits_count": read_hits_count,
             "knee_plot": knee_plot,
             "coverage_plot_dir": coverage_plots,
+            "bam_tmp": f"{tmp_dir}/{prefix}.tmp.bam",
+            "bam_tmp_sorted": f"{tmp_dir}/{prefix}.tmp.sorted.bam",
         }
     elif mode == "reassign":
         out_files = {

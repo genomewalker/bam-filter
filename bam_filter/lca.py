@@ -22,6 +22,7 @@ import operator
 import random
 import gzip
 import datatable as dt
+
 log = logging.getLogger("my_logger")
 
 debug = is_debug()
@@ -247,7 +248,7 @@ def get_taxonomy_info(refids, taxdb, acc2taxid, nprocs=1, custom=False):
     filt = dt.Frame(refids, names=[name])
     filt["FOO"] = 1
     filt.key = name
-    filtered_df = filtered_df[:, :, dt.join(filt)][~dt.isna(dt.f.FOO),:].to_pandas()
+    filtered_df = filtered_df[:, :, dt.join(filt)][~dt.isna(dt.f.FOO), :].to_pandas()
     filtered_df = filtered_df[cols]
 
     filtered_df.rename(columns={name: "reference"}, inplace=True)
