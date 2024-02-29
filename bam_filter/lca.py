@@ -134,7 +134,7 @@ def calculate_cumulative_weight_and_path(graph, node, lengths):
     return cumulative_weight, cumulative_norm_weight, cumulative_path
 
 
-def create_tax_graph_w(tax_path, weight, lengths, ref_stats, scale=1_000_000):
+def create_tax_graph_w(tax_path, weight, lengths, ref_stats=None, scale=1_000_000):
     root_row = pd.DataFrame({"source": ["root"], "target": ["root"], "weight": 0})
     res = list(zip(tax_path, tax_path[1:]))
     # get last element
@@ -426,19 +426,22 @@ def do_lca(args):
             dat[k] = tuple(tax_list)
         except KeyError:
             continue
-
+    ref_stats = None
     if args.lca_stats:
         log.info("Loading reference stats...")
         ref_stats = pd.read_csv(args.lca_stats, sep="\t", index_col=False)
         ref_stats = ref_stats[["reference", "n_reads", "n_reads_tad"]]
         ref_stats = ref_stats[ref_stats["n_reads_tad"] > 0]
-        # convert to a named dictionary with reference as key and include n_reads and n_reads_tad
-        ref_stats = dict(
-            zip(
-                ref_stats["reference"],
-                zip(ref_stats["n_reads"], ref_stats["n_reads_tad"]),
+        if ref_stats.empty:
+            del ref_stats
+        else:
+            # convert to a named dictionary with reference as key and include n_reads and n_reads_tad
+            ref_stats = dict(
+                zip(
+                    ref_stats["reference"],
+                    zip(ref_stats["n_reads"], ref_stats["n_reads_tad"]),
+                )
             )
-        )
 
     log.info("Getting reference to read mapping")
     ref_chunks = sort_keys_by_approx_weight(
@@ -503,7 +506,7 @@ def do_lca(args):
 
     dat = None
 
-    log.info("Calculating LCA..")
+    log.info("Calculating LCA...")
     cum_tax = defaultdict(int)
     unique = []
 
