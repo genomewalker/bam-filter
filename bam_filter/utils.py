@@ -469,6 +469,7 @@ help_msg = {
     "rank_lca": "Rank to use for LCA calculation",
     "lca_summary": "Save a TSV file with the LCA summary",
     "lca_missing": "Save a TSV file with references with missing taxids",
+    "lca_stats": "A TSV file from the filter subcommand",
     "custom": "Use custom taxdump files",
     "version": "Print program version",
 }
@@ -1062,6 +1063,17 @@ def get_arguments(argv=None):
         dest="custom",
         action="store_true",
         help=help_msg["custom"],
+    )
+    lca_optional_args.add_argument(
+        "--stats",
+        dest="lca_stats",
+        default=defaults["stats"],
+        type=str,
+        metavar="FILE",
+        nargs="?",
+        const="",
+        required=False,
+        help=help_msg["lca_stats"],
     )
     args = parser.parse_args(None if sys.argv[1:] else ["-h"])
     return args

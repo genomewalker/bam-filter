@@ -428,6 +428,12 @@ def calculate_alignment_score(identity, read_length):
 
 def get_bam_data(parms, ref_lengths=None, percid=90, min_read_length=30, threads=1):
     bam, references = parms
+    dt.options.progress.enabled = True
+    dt.options.progress.clear_on_success = True
+    if threads > 1:
+        dt.options.nthreads = threads - 1
+    else:
+        dt.options.nthreads = 1
     if threads > 4:
         s_threads = 4
     else:

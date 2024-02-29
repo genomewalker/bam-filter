@@ -317,11 +317,9 @@ To assess the first question we use the concepts defined [here](https://doi.org/
 Full list of options:
   
 ```bash
-filterBAM lca --help
-filterBAM lca --help
-usage: filterBAM lca [-h] --bam BAM [-p STR] [-r FILE] [-t INT] [--names FILE] [--nodes FILE]
-                     [--acc2taxid FILE] [--lca-rank STR] [--lca-summary [FILE]] [--scale STR] [-m STR]
-                     [--custom]
+$ filterBAM lca --help
+usage: filterBAM lca [-h] --bam BAM [-p STR] [-r FILE] [-t INT] [--names FILE] [--nodes FILE] [--acc2taxid FILE] [--lca-rank STR] [--lca-summary [FILE]] [--scale STR]
+                     [-m STR] [--custom] [--stats [FILE]]
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -344,8 +342,11 @@ LCA optional arguments:
   -m STR, --sort-memory STR
                         Set maximum memory per thread for sorting; suffix K/M/G recognized (default: 1G)
   --custom              Use custom taxdump files (default: False)
+  --stats [FILE]        A TSV file from the filter subcommand (default: None)
 ```
 
+
+> If you use the `--stat` option the LCA will use, when the possible, the reads inferred after calculating the TAD abundances. This is useful when the reads are not uniformly distributed across the reference. The program will produce a TSV file with the LCA summary.
 
 One would run filterBAM `lca` as follows:
 
@@ -362,3 +363,4 @@ filterBAM lca --bam c55d4e2df1.dedup.filtered.bam --names ./taxonomy/names.dmp -
 **--rank-lca**: Rank to use for LCA calculation 
 
 **--scale**: Scale taxonomic abundance by this factor; suffix K/M recognized 
+

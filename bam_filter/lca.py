@@ -134,7 +134,7 @@ def calculate_cumulative_weight_and_path(graph, node, lengths):
     return cumulative_weight, cumulative_norm_weight, cumulative_path
 
 
-def create_tax_graph_w(tax_path, weight, lengths, scale=1_000_000):
+def create_tax_graph_w(tax_path, weight, lengths, ref_stats, scale=1_000_000):
     root_row = pd.DataFrame({"source": ["root"], "target": ["root"], "weight": 0})
     res = list(zip(tax_path, tax_path[1:]))
     # get last element
@@ -143,10 +143,24 @@ def create_tax_graph_w(tax_path, weight, lengths, scale=1_000_000):
     res = res.drop_duplicates()
     res["weight"] = 0
     res["norm_weight"] = 0
-    res.iloc[-1, res.columns.get_loc("weight")] = weight
-    res.iloc[-1, res.columns.get_loc("norm_weight")] = round(
-        (weight / lengths[res.iloc[-1, res.columns.get_loc("target")]]) * scale
-    )
+    if ref_stats:
+        target = res.iloc[-1, res.columns.get_loc("target")]
+        if target in ref_stats:
+            if weight <= ref_stats[target][0] and weight > ref_stats[target][1]:
+                res.iloc[-1, res.columns.get_loc("weight")] = ref_stats[target][1]
+                res.iloc[-1, res.columns.get_loc("norm_weight")] = round(
+                    (ref_stats[target][1] / lengths[target]) * scale
+                )
+        else:
+            res.iloc[-1, res.columns.get_loc("weight")] = weight
+            res.iloc[-1, res.columns.get_loc("norm_weight")] = round(
+                (weight / lengths[res.iloc[-1, res.columns.get_loc("target")]]) * scale
+            )
+    else:
+        res.iloc[-1, res.columns.get_loc("weight")] = weight
+        res.iloc[-1, res.columns.get_loc("norm_weight")] = round(
+            (weight / lengths[res.iloc[-1, res.columns.get_loc("target")]]) * scale
+        )
     return res
 
 
@@ -244,7 +258,7 @@ def get_taxonomy_info(refids, taxdb, acc2taxid, nprocs=1, custom=False):
         cols = ["accession.version", "taxid"]
         name = "accession.version"
 
-    filtered_df = dt.fread(acc2taxid, verbose=True, nthreads=nprocs)
+    filtered_df = dt.fread(acc2taxid, verbose=False, nthreads=nprocs)
     filt = dt.Frame(refids, names=[name])
     filt["FOO"] = 1
     filt.key = name
@@ -399,8 +413,7 @@ def do_lca(args):
     taxonomy_info, tax_ranks = get_taxonomy_info(
         references, taxdb, acc2taxid, nprocs=threads, custom=args.custom
     )
-    print(taxonomy_info)
-    print(tax_ranks)
+
     tax_ranks.reverse()
     index_r = tax_ranks.index(sel_rank)
 
@@ -413,6 +426,19 @@ def do_lca(args):
             dat[k] = tuple(tax_list)
         except KeyError:
             continue
+
+    if args.lca_stats:
+        log.info("Loading reference stats...")
+        ref_stats = pd.read_csv(args.lca_stats, sep="\t", index_col=False)
+        ref_stats = ref_stats[["reference", "n_reads", "n_reads_tad"]]
+        ref_stats = ref_stats[ref_stats["n_reads_tad"] > 0]
+        # convert to a named dictionary with reference as key and include n_reads and n_reads_tad
+        ref_stats = dict(
+            zip(
+                ref_stats["reference"],
+                zip(ref_stats["n_reads"], ref_stats["n_reads_tad"]),
+            )
+        )
 
     log.info("Getting reference to read mapping")
     ref_chunks = sort_keys_by_approx_weight(
@@ -470,12 +496,14 @@ def do_lca(args):
             gs.append(res)
 
     gs = concat_df(gs).drop_duplicates()
+    # refine weights if the stats file has been loaded
+    # if the weight in df is <= than the one in ref_s, then use the one in ref_stats
 
     G = nx.from_pandas_edgelist(gs, create_using=nx.DiGraph(), edge_attr=True)
 
     dat = None
 
-    log.info("Calculating LCA")
+    log.info("Calculating LCA..")
     cum_tax = defaultdict(int)
     unique = []
 
@@ -516,13 +544,15 @@ def do_lca(args):
             cum_tax[v[0]] += 1
 
     log.info(
-        f"Unique: {len(unique)} | LCA: {sum(for_lca.values())} | Discarded: {sum(discarded_lca.values())}"
+        f"Unique: {len(unique):,} | LCA: {sum(for_lca.values()):,} | Discarded: {sum(discarded_lca.values()):,}"
     )
 
     log.info("Creating unique mapping taxonomic graph")
+    if ref_stats:
+        log.info("::: Using TAD inferred reads from the stats file...")
     gs = []
     for k, v in tqdm(cum_tax.items(), total=len(cum_tax), leave=False, ncols=80):
-        gs.append(create_tax_graph_w(list(k), v, ref_lengths, scale=scale))
+        gs.append(create_tax_graph_w(list(k), v, ref_lengths, ref_stats, scale=scale))
 
     df = concat_df(gs)
 
