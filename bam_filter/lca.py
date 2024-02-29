@@ -267,61 +267,6 @@ def get_taxonomy_info(refids, taxdb, acc2taxid, nprocs=1, custom=False):
 
     filtered_df.rename(columns={name: "reference"}, inplace=True)
     acc2taxid_dict = filtered_df.set_index("reference").to_dict()["taxid"]
-    # if custom:
-    #     cols = ["accession", "taxid"]
-    #     name = "accession"
-    # else:
-    #     cols = ["accession.version", "taxid"]
-    #     name = "accession.version"
-
-    # filtered_dfs = []
-    # with Pool(processes=nprocs) as pool:
-    #     # Initialize an indefinite progress bar
-    #     pbar = tqdm(desc="Processing Rows", unit=" chunk", leave=True)
-
-    #     # Use imap_unordered for lazy evaluation and processing of chunks
-    #     for result in pool.imap_unordered(
-    #         process_chunk,
-    #         chunk_generator(name, cols, acc2taxid, refids_set),
-    #         chunksize=10,
-    #     ):
-    #         if result is not None:
-    #             filtered_dfs.append(result)
-    #             pbar.update(1)  # Update the progress bar for each processed chunk
-    #         else:
-    #             break  # No more data, exit the loop
-
-    #     pbar.close()  # Close the progress bar when done
-    # acc2taxid_dict = process_data(name, cols, acc2taxid, refids, nprocs)
-    # parms = {"taxdb": taxdb, "acc2taxid": acc2taxid_dict, "custom": custom}
-
-    # filtered_dfs = []
-    # with Pool(processes=nprocs) as pool:
-    #     pbar = tqdm(desc="Processing file", unit=" chunk", leave=False)
-
-    #     for result in pool.imap(
-    #         process_chunk,
-    #         chunk_generator(name, cols, acc2taxid, refids),
-    #         chunksize=10,
-    #     ):
-    #         if result is not None:
-    #             filtered_dfs.append(result)
-    #             pbar.update(1)  # Update the progress bar for each processed chunk
-    #         else:
-    #             break  # No more data, exit the loop
-
-    #     pbar.close()  # Close the progress bar when done
-    # # Concatenate the filtered DataFrames
-    # filtered_df = pd.concat(filtered_dfs, ignore_index=True)
-
-    # # Concatenate the filtered DataFrames
-    # filtered_df = pd.concat(filtered_dfs, ignore_index=True)
-    # # exit if dataframe is empty
-    # if filtered_df.empty:
-    #     log.error("No taxids found in acc2taxid file")
-    #     sys.exit(1)
-    # # Continue with your data processing
-    # filtered_df.rename(columns={name: "reference"}, inplace=True)
 
     log.info(f"::: Read {filtered_df.shape[0]:,} rows from acc2taxid file...")
 
