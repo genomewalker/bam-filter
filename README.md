@@ -6,7 +6,7 @@
 
 
 A simple tool to process a BAM file and filter references with uneven coverages and estimate taxonomic abundances. FilterBAM has three main goals:
-1. Reassign reads to the reference they belong using an E-M algorithm that takes into account the alignment score. The alignment score is calculated using the same equation than [BLAST bit score](https://www.ncbi.nlm.nih.gov/books/NBK62051/):
+1. Reassign reads to the reference they belong using an E-M algorithm that takes into account the alignment score. The alignment score is calculated using the same equation than the [BLAST bit score](https://www.ncbi.nlm.nih.gov/books/NBK62051/) using the information available in the BAM file. The alignment score is calculated as follows:
    
    $$
    \begin{align*}
