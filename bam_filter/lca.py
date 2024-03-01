@@ -381,6 +381,7 @@ def do_lca(args):
         ref_stats = ref_stats[ref_stats["n_reads_tad"] > 0]
         if ref_stats.empty:
             del ref_stats
+            ref_stats = None
         else:
             # convert to a named dictionary with reference as key and include n_reads and n_reads_tad
             ref_stats = dict(
