@@ -438,7 +438,7 @@ def calculate_alignment_score(
         gap_extension_penalty, 
         lambda_value, 
         K_value
-                              ):
+    ):
     # Calculate the raw alignment score
     S = (num_matches * match_reward) - (num_mismatches * mismatch_penalty) - (num_gaps * gap_open_penalty) - (gap_extensions * gap_extension_penalty)
 
@@ -459,7 +459,7 @@ def get_bam_data(
         gap_extension_penalty=2, 
         lambda_value=1.02, 
         K_value=0.21
-                   ):
+    ):
     bam, references = parms
     dt.options.progress.enabled = True
     dt.options.progress.clear_on_success = True
