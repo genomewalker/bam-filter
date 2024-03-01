@@ -12,8 +12,8 @@ A simple tool to process a BAM file and filter references with uneven coverages 
    \begin{align*}
    &\hspace{15pt}\text{Alignment Score} = \frac{\lambda \times S - \log(K)}{\log(2)} \\
    &\hspace{15pt}\text{where:} \\
-   &\hspace{15pt}S = (\text{num\_matches} \times \text{match\_reward}) - (\text{num\_mismatches} \times \text{mismatch\_penalty}) \\
-   &\hspace{30pt} - (\text{num\_gaps} \times \text{gap\_open\_penalty}) - (\text{gap\_extensions} \times \text{gap\_extension\_penalty})
+   &\hspace{15pt}S = (\text{Number of matches} \times \text{Match reward}) - (\text{Number of mismatches} \times \text{Mismatch penalty}) \\
+   &\hspace{30pt} - (\text{Number of gaps} \times \text{Gap open penalty}) - (\text{Gap extensions} \times \text{Gap extension penalty})
    \end{align*}
    $$
 
