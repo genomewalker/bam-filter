@@ -55,7 +55,7 @@ def resolve_multimaps(data, scale=0.9, iters=10):
         progress_bar = tqdm.tqdm(
             total=9,
             desc=f"Iter {current_iter + 1}",
-            unit="step",
+            unit=" step",
             disable=False,  # Replace with your logic or a boolean value
             leave=False,
             ncols=80,
@@ -422,11 +422,44 @@ def write_reassigned_bam(
     os.remove(out_files["bam_reassigned_tmp"])
 
 
-def calculate_alignment_score(identity, read_length):
-    return (identity / math.log(read_length)) * math.sqrt(read_length)
+# def calculate_alignment_score(identity, read_length):
+#     return (identity / math.log(read_length)) * math.sqrt(read_length)
 
+# Values from:
+# https://www.ncbi.nlm.nih.gov/IEB/ToolBox/CPP_DOC/lxr/source/src/algo/blast/core/blast_stat.c
+def calculate_alignment_score(
+        num_matches, 
+        num_mismatches, 
+        num_gaps, 
+        gap_extensions, 
+        match_reward,
+        mismatch_penalty, 
+        gap_open_penalty, 
+        gap_extension_penalty, 
+        lambda_value, 
+        K_value
+    ):
+    # Calculate the raw alignment score
+    S = (num_matches * match_reward) - (num_mismatches * mismatch_penalty) - (num_gaps * gap_open_penalty) - (gap_extensions * gap_extension_penalty)
 
-def get_bam_data(parms, ref_lengths=None, percid=90, min_read_length=30, threads=1):
+    # Calculate the approximate bit score
+    bit_score = (lambda_value * S - math.log(K_value)) / math.log(2)
+
+    return bit_score
+
+def get_bam_data(
+        parms, 
+        ref_lengths=None,
+        percid=90, 
+        min_read_length=30, 
+        threads=1, 
+        match_reward=1, 
+        mismatch_penalty=-1, 
+        gap_open_penalty=1, 
+        gap_extension_penalty=2, 
+        lambda_value=1.02, 
+        K_value=0.21
+    ):
     bam, references = parms
     dt.options.progress.enabled = True
     dt.options.progress.clear_on_success = True
@@ -464,8 +497,12 @@ def get_bam_data(parms, ref_lengths=None, percid=90, min_read_length=30, threads
                 continue
 
             pident = (1 - ((aln.get_tag("NM") / query_length))) * 100
+            num_mismatches = aln.get_tag("NM")
+            num_matches = query_length - num_mismatches
+            num_gaps = aln.get_tag("XO") if aln.has_tag("XO") else 0
+            gap_extensions = aln.get_tag("XG") if aln.has_tag("XG") else 0
             if pident >= percid:
-                var = calculate_alignment_score(pident, query_length)
+                var = calculate_alignment_score(num_matches=num_matches, num_mismatches=num_mismatches, num_gaps=num_gaps, gap_extensions=gap_extensions, match_reward=match_reward, mismatch_penalty=mismatch_penalty, gap_open_penalty=gap_open_penalty, gap_extension_penalty=gap_extension_penalty, lambda_value=lambda_value, K_value=K_value)
                 aln_data.append(
                     (
                         aln.query_name,
@@ -498,6 +535,12 @@ def get_bam_data(parms, ref_lengths=None, percid=90, min_read_length=30, threads
 def reassign_reads(
     bam,
     out_files,
+    match_reward,
+    mismatch_penalty,
+    gap_open_penalty,
+    gap_extension_penalty,
+    lambda_value,
+    K_value,
     reference_lengths=None,
     threads=1,
     min_read_count=1,
@@ -586,7 +629,14 @@ def reassign_reads(
                         ref_lengths=ref_len_dict,
                         percid=min_read_ani,
                         min_read_length=min_read_length,
+                        match_reward=match_reward,
+                        mismatch_penalty=mismatch_penalty,
+                        gap_open_penalty=gap_open_penalty,
+                        gap_extension_penalty=gap_extension_penalty,
+                        lambda_value=lambda_value,
+                        K_value=K_value,
                         threads=4,
+
                     ),
                     parms,
                     chunksize=1,
@@ -608,7 +658,15 @@ def reassign_reads(
                         get_bam_data,
                         ref_lengths=ref_len_dict,
                         percid=min_read_ani,
+                        min_read_length=min_read_length,
+                        match_reward=match_reward,
+                        mismatch_penalty=mismatch_penalty,
+                        gap_open_penalty=gap_open_penalty,
+                        gap_extension_penalty=gap_extension_penalty,
+                        lambda_value=lambda_value,
+                        K_value=K_value,
                         threads=4,
+
                     ),
                     parms,
                     chunksize=1,
@@ -904,5 +962,11 @@ def reassign(args):
         sort_memory=args.sort_memory,
         sort_by_name=args.sort_by_name,
         out_files=out_files,
+        match_reward=args.match_reward,
+        mismatch_penalty=args.mismatch_penalty,
+        gap_open_penalty=args.gap_open_penalty,
+        gap_extension_penalty=args.gap_extension_penalty,
+        lambda_value=args.lambda_value,
+        K_value=args.K_value,
     )
     log.info("Done!")

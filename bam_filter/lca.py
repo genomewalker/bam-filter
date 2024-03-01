@@ -257,7 +257,9 @@ def get_taxonomy_info(refids, taxdb, acc2taxid, nprocs=1, custom=False):
     else:
         cols = ["accession.version", "taxid"]
         name = "accession.version"
-
+    dt.options.progress.enabled = True
+    dt.options.progress.clear_on_success = True
+    dt.options.nthreads = nprocs
     filtered_df = dt.fread(acc2taxid, verbose=False, nthreads=nprocs)
     filt = dt.Frame(refids, names=[name])
     filt["FOO"] = 1
