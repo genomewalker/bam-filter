@@ -415,7 +415,12 @@ defaults = {
     "tmp_dir": None,
     "reassign_iters": 25,
     "reassign_scale": 0.9,
-    "reassign_target": "mapq",
+    "reassign_match_reward": 1,
+    "reassign_mismatch_penalty": -2,
+    "reassign_gap_open_penalty": 5,
+    "reassign_gap_extension_penalty": 2,
+    "reassign_lambda": 1.33,
+    "reassign_k": 0.621,
     "rank_lca": "species",
     "lca_summary": None,
 }
@@ -461,7 +466,12 @@ help_msg = {
     "reassign_method": "Method for the EM algorithm",
     "reassign_iters": "Number of iterations for the EM algorithm",
     "reassign_scale": "Scale to select the best weithing alignments",
-    "reassign_target": "Which target to use for the EM algorith, Only mapq or pident.",
+    "reassign_match_reward": "Match reward for the alignment score ",
+    "reassign_mismatch_penalty": "Mismatch penalty for the alignment score ",
+    "reassign_gap_open_penalty": "Gap open penalty for alignment score computation",
+    "reassign_gap_extension_penalty": "Gap extension penalty for the alignment score",
+    "reassign_lambda": "Lambda parameter for the alignment score",
+    "reassign_k": "K parameter for the alignment score algorithm",
     "lca": "Calculate LCA for each read and estimate abundances",
     "names": "Names dmp file from taxonomy",
     "nodes": "Nodes dmp file from taxonomy",
@@ -657,6 +667,78 @@ def get_arguments(argv=None):
         metavar="INT",
         dest="min_read_count",
         help=help_msg["min_read_count"],
+    )
+    reassign_optional_args.add_argument(
+        "--match-reward",
+        type=lambda x: int(
+            check_values(
+                x, minval=0, maxval=np.Inf, parser=parser, var="--match-reward"
+            )
+        ),
+        default=defaults["reassign_match_reward"],
+        metavar="INT",
+        dest="match_reward",
+        help=help_msg["reassign_match_reward"],
+    )
+    reassign_optional_args.add_argument(
+        "--mismatch-penalty",
+        type=lambda x: int(
+            check_values(
+                x, minval=-np.Inf, maxval=0, parser=parser, var="--mismatch-penalty"
+            )
+        ),
+        default=defaults["reassign_mismatch_penalty"],
+        metavar="INT",
+        dest="mismatch_penalty",
+        help=help_msg["reassign_mismatch_penalty"],
+    )
+    reassign_optional_args.add_argument(
+        "--gap-open-penalty",
+        type=lambda x: int(
+            check_values(
+                x, minval=0, maxval=np.Inf, parser=parser, var="--gap-open-penalty"
+            )
+        ),
+        default=defaults["reassign_gap_open_penalty"],
+        metavar="INT",
+        dest="gap_open_penalty",
+        help=help_msg["reassign_gap_open_penalty"],
+    )
+    reassign_optional_args.add_argument(
+        "--gap-extension-penalty",
+        type=lambda x: int(
+            check_values(
+                x, minval=0, maxval=np.Inf, parser=parser, var="--gap-extension-penalty"
+            )
+        ),
+        default=defaults["reassign_gap_extension_penalty"],
+        metavar="INT",
+        dest="gap_extension_penalty",
+        help=help_msg["reassign_gap_extension_penalty"],
+    )
+    reassign_optional_args.add_argument(
+        "--lambda",
+        type=lambda x: float(
+            check_values(
+                x, minval=0, maxval=np.Inf, parser=parser, var="--lambda"
+            )
+        ),
+        default=defaults["reassign_lambda"],
+        metavar="FLOAT",
+        dest="lambda_value",
+        help=help_msg["reassign_lambda"],
+    )
+    reassign_optional_args.add_argument(
+        "-k",
+        type=lambda x: float(
+            check_values(
+                x, minval=0, maxval=np.Inf, parser=parser, var="-K"
+            )
+        ),
+        default=defaults["reassign_k"],
+        metavar="FLOAT",
+        dest="K_value",
+        help=help_msg["reassign_k"],
     )
     reassign_optional_args.add_argument(
         "-o",

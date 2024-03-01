@@ -6,18 +6,18 @@
 
 
 A simple tool to process a BAM file and filter references with uneven coverages and estimate taxonomic abundances. FilterBAM has three main goals:
-- Reassign reads to the reference they belong using an E-M algorithm that takes into account the read length and the alignment score. The alignment score is calculated using the following equation:
+1. Reassign reads to the reference they belong using an E-M algorithm that takes into account the read length and the alignment score. The alignment score is calculated using the same equation than [BLAST bit scor](https://www.ncbi.nlm.nih.gov/books/NBK62051/):
+   $$
+\text{Alignment Score} = \frac{\lambda \times S - \log(K)}{\log(2)}
+$$
+    * the raw score is \( S = (\text{Number of matches} \times \text{Match reward}) - (\text{Number of mismatches} \times \text{Mismatch penalty}) - (\text{Number of gaps} \times \text{Gap open penalty}) - (\text{Gap extensions} \times \text{Gap extension penalty}) \)
+    * Number of gaps and gap extensions are obtained from the BAM tags **XG** and **XO** if present.
+    * Where _Match reward_ is the score for a match, _mismatch penalty_ is the score for a mismatch, _gap open penalty_ is the score for opening a gap, and _gap extension penalty_ is the score for extending a gap.
+    * \( \lambda \) and \( K \) are parameters dependent upon the scoring system (substitution matrix and gap costs) employed. Check [here](https://www.ncbi.nlm.nih.gov/IEB/ToolBox/CPP_DOC/lxr/source/src/algo/blast/core/blast_stat.c) if you want use a different scoring system.
 
-  $$\text{{Alignment Score}} = \left( \frac{{\text{{Identity}}}}{{\log(\text{{Read Length}})}} \right) \times \sqrt{\text{{Read Length}}}$$
 
-  Where:
-  - `Identity` is the percentage identity of the alignment.
-  - `Read Length` is the length of the read.
-
-  This equation incorporates both the percentage identity and the length of the read, with the logarithmic and square root components contributing to the weighting of these factors in the final alignment score. The logarithmic component is used to reduce the impact of the read length in the alignment score, while the square root component is used to increase the impact of the percentage identity.
-
-- Estimate several metrics for each reference in the BAM file and filter those references that do not meet the defined criteria.
-- Perform an LCA analysis using the reads that passed the filtering criteria and estimate the taxonomic abundances of each rank by normalizing the number of reads by the length of the reference. We resolve to the most likely reference using a likelihood-based approach. The likelihood is calculated for potential taxonomic paths from the partial taxonomic assignment of each read to its descendants in the taxonomy tree. The paths are ranked based on their likelihood, and the most probable reference is selected for each partial rank. It also can use the TAD (Truncated Average Depth) estimated reads for the LCA analysis, so it can minimize the effect of uneven coverages across the reference.
+2. Estimate several metrics for each reference in the BAM file and filter those references that do not meet the defined criteria.
+3. Perform an LCA analysis using the reads that passed the filtering criteria and estimate the taxonomic abundances of each rank by normalizing the number of reads by the length of the reference. We resolve to the most likely reference using a likelihood-based approach. The likelihood is calculated for potential taxonomic paths from the partial taxonomic assignment of each read to its descendants in the taxonomy tree. The paths are ranked based on their likelihood, and the most probable reference is selected for each partial rank. It also can use the TAD (Truncated Average Depth) estimated reads for the LCA analysis, so it can minimize the effect of uneven coverages across the reference.
 
 # Installation
 
@@ -38,24 +38,18 @@ Then we proceed to install using pip:
 pip install bam-filter
 ```
 
-### Using conda
-
-```bash
-conda install -c conda-forge -c bioconda -c genomewalker bam-filter
-```
-
 ### Install from source to use the development version
 
 Using pip
 
 ```bash
-pip install git+ssh://git@github.com/genomewalker/bam-filter.git
+pip install git+https://github.com/genomewalker/bam-filter.git
 ```
 
 By cloning in a dedicated conda environment
 
 ```bash
-git clone git@github.com:genomewalker/bam-filter.git
+git clone https://github.com/genomewalker/bam-filter.git
 cd bam-filter
 conda env create -f environment.yml
 conda activate bam-filter
@@ -94,7 +88,10 @@ Full list of options:
 ```bash
 $ filterBAM reassign --help
 usage: filterBAM reassign [-h] --bam BAM [-p STR] [-r FILE] [-t INT] [-i INT] [-s FLOAT]
-                          [-A FLOAT] [-l INT] [-n INT] [-o [FILE]] [-m STR] [-N] [--tmp-dir DIR]
+                          [-A FLOAT] [-l INT] [-n INT] [--match-reward INT]
+                          [--mismatch-penalty INT] [--gap-open-penalty INT]
+                          [--gap-extension-penalty INT] [--lambda FLOAT] [-k FLOAT] [-o [FILE]]
+                          [-m STR] [-N] [--tmp-dir DIR]
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -117,6 +114,15 @@ Re-assign optional arguments:
                         Minimum read length (default: 30)
   -n INT, --min-read-count INT
                         Minimum read count (default: 3)
+  --match-reward INT    Match reward for the alignment score (default: 1)
+  --mismatch-penalty INT
+                        Mismatch penalty for the alignment score (default: -2)
+  --gap-open-penalty INT
+                        Gap open penalty for alignment score computation (default: 5)
+  --gap-extension-penalty INT
+                        Gap extension penalty for the alignment score (default: 2)
+  --lambda FLOAT        Lambda parameter for the alignment score (default: 1.33)
+  -k FLOAT              K parameter for the alignment score algorithm (default: 0.621)
   -o [FILE], --out-bam [FILE]
                         Save a BAM file without multimapping reads (default: None)
   -m STR, --sort-memory STR
