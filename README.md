@@ -18,7 +18,7 @@ A simple tool to process a BAM file and filter references with uneven coverages 
    $$
 
     * Number of gaps and gap extensions are obtained from the BAM tags **XG** and **XO** if present.
-    * Where **Match reward** is the score for a match, **Mismatch penalty** is the score for a mismatch, **Gap open penalty** is the score for opening a gap, and **Gap extension penalty** is the score for extending a gap.
+    * In the raw score (S),  **Match reward** is the score for a match, **Mismatch penalty** is the score for a mismatch, **Gap open penalty** is the score for opening a gap, and **Gap extension penalty** is the score for extending a gap.
     * **lambda** and **K** are the Karlin-Altschul parameters dependent upon the scoring system (substitution matrix and gap costs) employed. Check [here](https://www.ncbi.nlm.nih.gov/IEB/ToolBox/CPP_DOC/lxr/source/src/algo/blast/core/blast_stat.c) if you want use a different scoring system.
 
 2. Estimate several metrics for each reference in the BAM file and filter those references that do not meet the defined criteria.
