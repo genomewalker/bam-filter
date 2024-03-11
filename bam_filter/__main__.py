@@ -20,6 +20,7 @@ from bam_filter.lca import do_lca
 from bam_filter.utils import (
     get_arguments,
 )
+from bam_filter import __version__
 
 log = logging.getLogger("my_logger")
 
@@ -35,6 +36,7 @@ def main():
     logging.getLogger("my_logger").setLevel(
         logging.DEBUG if args.debug else logging.INFO
     )
+    log.info(f"Using filterBAM version: {__version__}")
     if args.action == "reassign":
         reassign(args)
     elif args.action == "filter":
