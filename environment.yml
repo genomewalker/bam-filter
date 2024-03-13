@@ -4,11 +4,5 @@ channels:
   - bioconda
   - defaults
 dependencies:
-  - python>=3.8,<=3.9
-  - Cython>=0.29.24
-  - pip
-  - pip:
-      - pyrle>=0.0.31
-      - pyranges>=0.0.112
-      - kneed>=0.8.1
-      - matplotlib>=3.6.0
+  - python==3.9
+  - cxx-compiler
