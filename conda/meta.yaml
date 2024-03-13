@@ -14,15 +14,17 @@ build:
 
 requirements:
   build:
-    - python==3.9
+    - python>=3.9,<3.10
     - setuptools
     - pip
     - Cython>=0.29.24
     - cxx-compiler
+    - compilers
   run:
-    - python==3.9
+  - python>=3.9,<3.10
     - Cython>=0.29.24
     - cxx-compiler
+    - compilers
     
 test:
   commands:
