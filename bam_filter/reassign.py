@@ -461,7 +461,7 @@ def get_bam_data(
         K_value=0.21
     ):
     bam, references = parms
-    dt.options.progress.enabled = True
+    dt.options.progress.enabled = False
     dt.options.progress.clear_on_success = True
     if threads > 1:
         dt.options.nthreads = threads - 1
