@@ -56,7 +56,7 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
     else:
         s_threads = threads
     samfile = pysam.AlignmentFile(bam, "rb", threads=s_threads)
-
+    header = samfile.header
     if threads > 4:
         threads = 4
 
@@ -91,6 +91,7 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
         referencenames=list(ref_names),
         referencelengths=ref_lengths,
         threads=write_threads,
+        header=header,
     )
 
     references = [x for x in samfile.references if x in refs_idx.keys()]

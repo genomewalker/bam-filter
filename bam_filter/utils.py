@@ -84,17 +84,19 @@ def refine_chunks(chunks, input_dict, target_weight):
 
 
 def sort_keys_by_approx_weight(
-    input_dict, scale=1, num_cores=1, refinement_steps=10, verbose=False
+    input_dict, scale=1, num_cores=1, refinement_steps=10,verbose=False
 ):
     if scale == 0:
         raise ValueError("Scale cannot be zero.")
 
     # Calculate the target weight for each chunk
-    target_weight = int(scale * max(input_dict.values()))
+    target_weight = scale * int(max(input_dict.values()))
 
     # Determine the initial number of chunks based on the number of cores
-    num_chunks = num_cores
-
+    #num_chunks = num_cores * scale
+    num_chunks = (((sum(input_dict.values()) // target_weight)) // num_cores) + 1
+    if num_chunks < num_cores:
+        num_chunks = num_cores
     # Sort keys by their weights in descending order
     sorted_keys = sorted(input_dict, key=lambda k: input_dict[k], reverse=True)
 
