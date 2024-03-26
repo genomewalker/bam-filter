@@ -149,7 +149,7 @@ def create_tax_graph_w(tax_path, weight, lengths, ref_stats=None, scale=1_000_00
             if weight <= ref_stats[target][0] and weight > ref_stats[target][1]:
                 res.iloc[-1, res.columns.get_loc("weight")] = ref_stats[target][1]
                 res.iloc[-1, res.columns.get_loc("norm_weight")] = round(
-                    (ref_stats[target][1] / lengths[target]) * scale
+                    (ref_stats[target][1] / ref_stats[target][2]) * scale
                 )
         else:
             res.iloc[-1, res.columns.get_loc("weight")] = weight
@@ -377,7 +377,9 @@ def do_lca(args):
     if args.lca_stats:
         log.info("Loading reference stats...")
         ref_stats = pd.read_csv(args.lca_stats, sep="\t", index_col=False)
-        ref_stats = ref_stats[["reference", "n_reads", "n_reads_tad"]]
+        ref_stats = ref_stats[
+            ["reference", "n_reads", "n_reads_tad", "coverage_mean_trunc_len"]
+        ]
         ref_stats = ref_stats[ref_stats["n_reads_tad"] > 0]
         if ref_stats.empty:
             del ref_stats
@@ -387,10 +389,13 @@ def do_lca(args):
             ref_stats = dict(
                 zip(
                     ref_stats["reference"],
-                    zip(ref_stats["n_reads"], ref_stats["n_reads_tad"]),
+                    zip(
+                        ref_stats["n_reads"],
+                        ref_stats["n_reads_tad"],
+                        ref_stats["coverage_mean_trunc_len"],
+                    ),
                 )
             )
-
     log.info("Getting reference to read mapping")
     ref_chunks = sort_keys_by_approx_weight(
         references_m, scale=1, num_cores=threads, refinement_steps=100
