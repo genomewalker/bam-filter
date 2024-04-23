@@ -672,6 +672,7 @@ def reassign_reads(
     reassign_scale=0.9,
     sort_memory="4G",
     sort_by_name=False,
+    disable_sort=False,
 ):
     dt.options.progress.enabled = True
     dt.options.progress.clear_on_success = True
@@ -1112,7 +1113,7 @@ def reassign_reads(
         entries=entries,
         sort_memory=sort_memory,
         min_read_ani=min_read_ani,
-        disable_sort=args.disable_sort,
+        disable_sort=disable_sort,
     )
 
 
@@ -1172,5 +1173,6 @@ def reassign(args):
         gap_extension_penalty=args.gap_extension_penalty,
         lambda_value=args.lambda_value,
         K_value=args.K_value,
+        disable_sort=args.disable_sort,
     )
     log.info("Done!")
