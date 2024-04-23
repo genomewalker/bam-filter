@@ -84,7 +84,7 @@ def refine_chunks(chunks, input_dict, target_weight):
 
 
 def sort_keys_by_approx_weight(
-    input_dict, scale=1, num_cores=1, refinement_steps=10,verbose=False
+    input_dict, scale=1, num_cores=1, refinement_steps=10, verbose=False
 ):
     if scale == 0:
         raise ValueError("Scale cannot be zero.")
@@ -93,7 +93,7 @@ def sort_keys_by_approx_weight(
     target_weight = scale * int(max(input_dict.values()))
 
     # Determine the initial number of chunks based on the number of cores
-    #num_chunks = num_cores * scale
+    # num_chunks = num_cores * scale
     num_chunks = (((sum(input_dict.values()) // target_weight)) // num_cores) + 1
     if num_chunks < num_cores:
         num_chunks = num_cores
@@ -577,6 +577,7 @@ def get_arguments(argv=None):
     reassign_optional_args = parser_reassign.add_argument_group(
         "Re-assign optional arguments"
     )
+    misc_reassign_args = parser_reassign.add_argument_group("miscellaneous arguments")
 
     filter_required_args = parser_filter.add_argument_group("Filter required arguments")
     # filter_optional_args = parser_filter.add_argument_group("Filter optional arguments")
@@ -721,9 +722,7 @@ def get_arguments(argv=None):
     reassign_optional_args.add_argument(
         "--lambda",
         type=lambda x: float(
-            check_values(
-                x, minval=0, maxval=np.Inf, parser=parser, var="--lambda"
-            )
+            check_values(x, minval=0, maxval=np.Inf, parser=parser, var="--lambda")
         ),
         default=defaults["reassign_lambda"],
         metavar="FLOAT",
@@ -733,9 +732,7 @@ def get_arguments(argv=None):
     reassign_optional_args.add_argument(
         "-k",
         type=lambda x: float(
-            check_values(
-                x, minval=0, maxval=np.Inf, parser=parser, var="-K"
-            )
+            check_values(x, minval=0, maxval=np.Inf, parser=parser, var="-K")
         ),
         default=defaults["reassign_k"],
         metavar="FLOAT",
@@ -776,6 +773,12 @@ def get_arguments(argv=None):
         metavar="DIR",
         dest="tmp_dir",
         help=help_msg["tmp_dir"],
+    )
+    misc_reassign_args.add_argument(
+        "--disable-sort",
+        dest="disable_sort",
+        action="store_true",
+        help=help_msg["disable_sort"],
     )
     misc_filter_args.add_argument(
         "--reference-trim-length",
