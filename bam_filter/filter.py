@@ -128,8 +128,9 @@ def filter_references(args):
     logging.info("Reducing results to a single dataframe")
     # data = list(filter(None, data))
     data_df = [x[0] for x in data if x[0] is not None]
+    # remove empty dataframes
+    data_df = [x for x in data_df if not x.empty]
     data_df = concat_df(data_df)
-
     if args.read_length_freqs is not None:
         logging.info("Calculating read length frequencies...")
         lens = [x[1] for x in data if x[1] is not None]

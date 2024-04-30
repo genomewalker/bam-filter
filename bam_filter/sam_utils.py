@@ -272,7 +272,6 @@ def get_bam_stats(
     if threads > 4:
         threads = 4
     samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
-
     read_hits = defaultdict(int)
     for reference in references:
         edit_distances = []
@@ -546,6 +545,7 @@ def get_bam_stats(
     # results = [x[0] for x in results if x[0] is not None]
     results = list(filter(None, results))
     data_df = pd.DataFrame([x.to_summary() for x in results])
+
     # read_hits = (
     #     pd.DataFrame.from_dict(read_hits, orient="index", columns=["count"])
     #     .rename_axis("read_id")
@@ -1018,7 +1018,6 @@ def process_bam(
                     desc="References processed",
                 )
             )
-
             p.close()
             p.join()
 
