@@ -1135,6 +1135,7 @@ def reassign(args):
         mode="reassign",
         bam_reassigned=args.bam_reassigned,
     )
+    sorted_bam = bam.replace(".bam", ".bf-sorted.bam")
     bam = check_bam_file(
         bam=args.bam,
         threads=args.threads,
@@ -1175,4 +1176,12 @@ def reassign(args):
         K_value=args.K_value,
         disable_sort=args.disable_sort,
     )
+    # check if sorted BAM file exists, if yes remove it
+    if os.path.exists(sorted_bam):
+        os.remove(sorted_bam)
+    # check if sorted BAM index file exists, if yes remove it
+    if os.path.exists(sorted_bam + ".bai"):
+        os.remove(sorted_bam + ".bai")
+    elif os.path.exists(sorted_bam + ".csi"):
+        os.remove(sorted_bam + ".csi")
     log.info("Done!")

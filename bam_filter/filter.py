@@ -93,6 +93,7 @@ def filter_references(args):
         mode="filter",
     )
 
+    sorted_bam = args.bam.replace(".bam", ".bf-sorted.bam")
     bam = check_bam_file(
         bam=args.bam,
         threads=4,
@@ -256,4 +257,12 @@ def filter_references(args):
 
     if args.low_memory:
         os.remove(out_files["bam_tmp_sorted"])
+    # check if sorted BAM file exists, if yes remove it
+    if os.path.exists(sorted_bam):
+        os.remove(sorted_bam)
+    # check if sorted BAM index file exists, if yes remove it
+    if os.path.exists(sorted_bam + ".bai"):
+        os.remove(sorted_bam + ".bai")
+    elif os.path.exists(sorted_bam + ".csi"):
+        os.remove(sorted_bam + ".csi")
     logging.info("ALL DONE.")

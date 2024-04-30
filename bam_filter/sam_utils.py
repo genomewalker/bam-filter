@@ -136,7 +136,9 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
         s_threads = 4
     else:
         s_threads = threads
-    samfile = pysam.AlignmentFile(output_files["bam_tmp_sorted"], "rb", threads=s_threads)
+    samfile = pysam.AlignmentFile(
+        output_files["bam_tmp_sorted"], "rb", threads=s_threads
+    )
     chr_lengths = []
     for chrom in samfile.references:
         chr_lengths.append(samfile.get_reference_length(chrom))
