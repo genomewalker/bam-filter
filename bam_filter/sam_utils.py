@@ -58,7 +58,6 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
         s_threads = threads
     samfile = pysam.AlignmentFile(bam, "rb", threads=s_threads)
     header = samfile.header
-    # get read groups
 
     if threads > 4:
         threads = 4
@@ -88,15 +87,19 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
     else:
         write_threads = threads
 
+    new_header = header.to_dict()
+    new_header["SQ"] = [x for x in new_header["SQ"] if x["SN"] in ref_names]
+
     out_bam_file = pysam.AlignmentFile(
         output_files["bam_tmp"],
         "wb",
         referencenames=list(ref_names),
         referencelengths=ref_lengths,
         threads=write_threads,
-        header=header,
+        header=new_header,
     )
-
+    # out_bam_file.set_tag(read_groups)
+    # out_bam_file.set(pg)
     references = [x for x in samfile.references if x in refs_idx.keys()]
 
     logging.info(f"::: ::: Filtering {len(references):,} references sequentially...")
@@ -1183,14 +1186,15 @@ def filter_reference_BAM(
                 write_threads = 4
             else:
                 write_threads = threads
-
+            new_header = header.to_dict()
+            new_header["SQ"] = [x for x in new_header["SQ"] if x["SN"] in ref_names]
             out_bam_file = pysam.AlignmentFile(
                 out_files["bam_filtered_tmp"],
                 "wb",
                 referencenames=list(ref_names),
                 referencelengths=list(ref_lengths),
                 threads=write_threads,
-                header=header,
+                header=new_header,
             )
 
             # logging.info(
