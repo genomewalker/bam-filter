@@ -49,6 +49,10 @@ def check_tmp_dir_exists(tmpdir):
             log.error(f"Temporary directory {tmpdir} does not exist")
             exit(1)
         tmpdir = tempfile.TemporaryDirectory(dir=os.path.abspath(tmpdir))
+        # Check if tmpdir has more than 107 characters
+        if len(tmpdir.name) > 107:
+            log.error(f"Temporary directory {tmpdir.name} has more than 107 characters")
+            exit(1)
     return tmpdir
 
 
