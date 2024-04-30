@@ -281,6 +281,7 @@ def write_reassigned_bam(
     samfile = pysam.AlignmentFile(bam, "rb", threads=s_threads)
     references = list(entries.keys())
     refs_dict = {x: samfile.get_reference_length(x) for x in references}
+    # get group reads
     header = samfile.header
     samfile.close()
     (ref_names, ref_lengths) = zip(*refs_dict.items())
@@ -297,6 +298,7 @@ def write_reassigned_bam(
         referencenames=list(ref_names),
         referencelengths=list(ref_lengths),
         threads=write_threads,
+        header=header,
     )
 
     # num_cores should be multiple of the write_threads
