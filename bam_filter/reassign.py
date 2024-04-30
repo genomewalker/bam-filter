@@ -293,13 +293,16 @@ def write_reassigned_bam(
     else:
         write_threads = threads
 
+    new_header = header.to_dict()
+    new_header["SQ"] = [x for x in new_header["SQ"] if x["SN"] in ref_names]
+
     out_bam_file = pysam.AlignmentFile(
         out_files["bam_reassigned_tmp"],
         "wb",
         referencenames=list(ref_names),
         referencelengths=list(ref_lengths),
         threads=write_threads,
-        header=header,
+        header=new_header,
     )
 
     # num_cores should be multiple of the write_threads
