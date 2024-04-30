@@ -57,6 +57,8 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
         s_threads = threads
     samfile = pysam.AlignmentFile(bam, "rb", threads=s_threads)
     header = samfile.header
+    # get read groups
+
     if threads > 4:
         threads = 4
 
@@ -1168,7 +1170,6 @@ def filter_reference_BAM(
             samfile = pysam.AlignmentFile(bam, "rb", threads=s_threads)
             refs_dict = {x: samfile.get_reference_length(x) for x in references}
             header = samfile.header
-
             (ref_names, ref_lengths) = zip(*refs_dict.items())
             ref_dict_m = {
                 chrom.contig: chrom.mapped
@@ -1188,6 +1189,7 @@ def filter_reference_BAM(
                 referencenames=list(ref_names),
                 referencelengths=list(ref_lengths),
                 threads=write_threads,
+                header=header,
             )
 
             # logging.info(
