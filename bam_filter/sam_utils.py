@@ -89,7 +89,7 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
 
     new_header = header.to_dict()
     new_header["SQ"] = [x for x in new_header["SQ"] if x["SN"] in ref_names]
-    print(new_header)
+
     out_bam_file = pysam.AlignmentFile(
         output_files["bam_tmp"],
         "wb",
