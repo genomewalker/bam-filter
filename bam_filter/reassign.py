@@ -267,6 +267,7 @@ def write_reassigned_bam(
     sort_by_name=False,
     min_read_ani=90,
     min_read_length=30,
+    disable_sort=False,
 ):
     # if out_files["bam_reassigned"] is not None:
     #     out_bam = out_files["bam_reassigned"]
@@ -364,64 +365,68 @@ def write_reassigned_bam(
     # # print profiling output
     # stats = pstats.Stats(prof).strip_dirs().sort_stats("tottime")
     # stats.print_stats(5)  # top 10 rows
-    log.info("::: ::: Sorting BAM file...")
-    if threads > 4:
-        s_threads = 4
-    else:
-        s_threads = threads
-    if sort_by_name:
-        log.info("::: ::: Sorting by name...")
-        pysam.sort(
-            "-n",
-            "-@",
-            str(s_threads),
-            "-m",
-            str(sort_memory),
-            "-o",
-            out_bam,
-            out_files["bam_reassigned_tmp"],
-        )
-    else:
-        pysam.sort(
-            "-@",
-            str(s_threads),
-            "-m",
-            str(sort_memory),
-            "-o",
-            out_bam,
-            out_files["bam_reassigned_tmp"],
-        )
+    if not disable_sort:
+        log.info("::: ::: Sorting BAM file...")
+        if threads > 4:
+            s_threads = 4
+        else:
+            s_threads = threads
+        if sort_by_name:
+            log.info("::: ::: Sorting by name...")
+            pysam.sort(
+                "-n",
+                "-@",
+                str(s_threads),
+                "-m",
+                str(sort_memory),
+                "-o",
+                out_bam,
+                out_files["bam_reassigned_tmp"],
+            )
+        else:
+            pysam.sort(
+                "-@",
+                str(s_threads),
+                "-m",
+                str(sort_memory),
+                "-o",
+                out_bam,
+                out_files["bam_reassigned_tmp"],
+            )
 
-    logging.info("BAM index not found. Indexing...")
-    save = pysam.set_verbosity(0)
-    if threads > 4:
-        s_threads = 4
-    else:
-        s_threads = threads
-    samfile = pysam.AlignmentFile(out_bam, "rb", threads=s_threads)
-    chr_lengths = []
-    for chrom in samfile.references:
-        chr_lengths.append(samfile.get_reference_length(chrom))
-    max_chr_length = np.max(chr_lengths)
-    pysam.set_verbosity(save)
-    samfile.close()
+        logging.info("BAM index not found. Indexing...")
+        save = pysam.set_verbosity(0)
+        if threads > 4:
+            s_threads = 4
+        else:
+            s_threads = threads
+        samfile = pysam.AlignmentFile(out_bam, "rb", threads=s_threads)
+        chr_lengths = []
+        for chrom in samfile.references:
+            chr_lengths.append(samfile.get_reference_length(chrom))
+        max_chr_length = np.max(chr_lengths)
+        pysam.set_verbosity(save)
+        samfile.close()
 
-    if max_chr_length > 536870912:
-        logging.info("A reference is longer than 2^29, indexing with csi")
-        pysam.index(
-            "-c",
-            "-@",
-            str(threads),
-            out_bam,
-        )
-    else:
-        pysam.index(
-            "-@",
-            str(threads),
-            out_bam,
-        )
+        if max_chr_length > 536870912:
+            logging.info("A reference is longer than 2^29, indexing with csi")
+            pysam.index(
+                "-c",
+                "-@",
+                str(threads),
+                out_bam,
+            )
+        else:
+            pysam.index(
+                "-@",
+                str(threads),
+                out_bam,
+            )
 
-    os.remove(out_files["bam_reassigned_tmp"])
+        os.remove(out_files["bam_reassigned_tmp"])
+    else:
+        logging.info("Skipping BAM file sorting...")
+        os.rename(out_files["bam_reassigned_tmp"], out_bam)
 
 
 # def calculate_alignment_score(identity, read_length):
@@ -430,15 +435,15 @@ def write_reassigned_bam(
 # Values from:
 # https://www.ncbi.nlm.nih.gov/IEB/ToolBox/CPP_DOC/lxr/source/src/algo/blast/core/blast_stat.c
 # def calculate_alignment_score(
-#         num_matches, 
-#         num_mismatches, 
-#         num_gaps, 
-#         gap_extensions, 
+#         num_matches,
+#         num_mismatches,
+#         num_gaps,
+#         gap_extensions,
 #         match_reward,
-#         mismatch_penalty, 
-#         gap_open_penalty, 
-#         gap_extension_penalty, 
-#         lambda_value, 
+#         mismatch_penalty,
+#         gap_open_penalty,
+#         gap_extension_penalty,
+#         lambda_value,
 #         K_value
 #     ):
 #     # Calculate the raw alignment score
@@ -450,16 +455,16 @@ def write_reassigned_bam(
 #     return bit_score
 
 # def get_bam_data(
-#         parms, 
+#         parms,
 #         ref_lengths=None,
-#         percid=90, 
-#         min_read_length=30, 
-#         threads=1, 
-#         match_reward=1, 
-#         mismatch_penalty=-1, 
-#         gap_open_penalty=1, 
-#         gap_extension_penalty=2, 
-#         lambda_value=1.02, 
+#         percid=90,
+#         min_read_length=30,
+#         threads=1,
+#         match_reward=1,
+#         mismatch_penalty=-1,
+#         gap_open_penalty=1,
+#         gap_extension_penalty=2,
+#         lambda_value=1.02,
 #         K_value=0.21
 #     ):
 #     bam, references = parms
@@ -534,38 +539,44 @@ def write_reassigned_bam(
 
 
 def calculate_alignment_score(
-        num_matches, 
-        num_mismatches, 
-        num_gaps, 
-        gap_extensions, 
-        match_reward,
-        mismatch_penalty, 
-        gap_open_penalty, 
-        gap_extension_penalty, 
-        precomputed_factor, # This is lambda_value * match_reward / math.log(2)
-        precomputed_log_K # This is math.log(K_value) / math.log(2)
-    ):
+    num_matches,
+    num_mismatches,
+    num_gaps,
+    gap_extensions,
+    match_reward,
+    mismatch_penalty,
+    gap_open_penalty,
+    gap_extension_penalty,
+    precomputed_factor,  # This is lambda_value * match_reward / math.log(2)
+    precomputed_log_K,  # This is math.log(K_value) / math.log(2)
+):
     # Calculate the raw alignment score with reduced arithmetic operations
-    S = (num_matches * match_reward) - (num_mismatches * mismatch_penalty) - (num_gaps * gap_open_penalty) - (gap_extensions * gap_extension_penalty)
+    S = (
+        (num_matches * match_reward)
+        - (num_mismatches * mismatch_penalty)
+        - (num_gaps * gap_open_penalty)
+        - (gap_extensions * gap_extension_penalty)
+    )
 
     # Use precomputed factors to calculate the approximate bit score
     bit_score = precomputed_factor * S - precomputed_log_K
 
     return bit_score
 
+
 def get_bam_data(
-        parms, 
-        ref_lengths=None,
-        percid=90, 
-        min_read_length=30, 
-        threads=1, 
-        match_reward=1, 
-        mismatch_penalty=-1, 
-        gap_open_penalty=1, 
-        gap_extension_penalty=2, 
-        lambda_value=1.02, 
-        K_value=0.21
-    ):
+    parms,
+    ref_lengths=None,
+    percid=90,
+    min_read_length=30,
+    threads=1,
+    match_reward=1,
+    mismatch_penalty=-1,
+    gap_open_penalty=1,
+    gap_extension_penalty=2,
+    lambda_value=1.02,
+    K_value=0.21,
+):
     # Precompute factors for the score calculation to avoid redundant computation
     precomputed_factor = lambda_value * match_reward / math.log(2)
     precomputed_log_K = math.log(K_value) / math.log(2)
@@ -583,10 +594,18 @@ def get_bam_data(
     empty_df = 0
 
     for reference in references:
-        reference_length = int(samfile.get_reference_length(reference)) if ref_lengths is None else int(ref_lengths[reference])
+        reference_length = (
+            int(samfile.get_reference_length(reference))
+            if ref_lengths is None
+            else int(ref_lengths[reference])
+        )
         aln_data = []
-        for aln in samfile.fetch(contig=reference, multiple_iterators=False, until_eof=True):
-            query_length = aln.query_length if aln.query_length != 0 else aln.infer_query_length()
+        for aln in samfile.fetch(
+            contig=reference, multiple_iterators=False, until_eof=True
+        ):
+            query_length = (
+                aln.query_length if aln.query_length != 0 else aln.infer_query_length()
+            )
 
             if query_length >= min_read_length:
                 num_mismatches = aln.get_tag("NM")
@@ -596,13 +615,33 @@ def get_bam_data(
                     num_gaps = aln.get_tag("XO") if aln.has_tag("XO") else 0
                     gap_extensions = aln.get_tag("XG") if aln.has_tag("XG") else 0
 
-                    bit_score = calculate_alignment_score(num_matches, num_mismatches, num_gaps, gap_extensions, match_reward, mismatch_penalty, gap_open_penalty, gap_extension_penalty, precomputed_factor, precomputed_log_K)
-                    aln_data.append((aln.query_name, aln.reference_name, bit_score, reference_length))
+                    bit_score = calculate_alignment_score(
+                        num_matches,
+                        num_mismatches,
+                        num_gaps,
+                        gap_extensions,
+                        match_reward,
+                        mismatch_penalty,
+                        gap_open_penalty,
+                        gap_extension_penalty,
+                        precomputed_factor,
+                        precomputed_log_K,
+                    )
+                    aln_data.append(
+                        (
+                            aln.query_name,
+                            aln.reference_name,
+                            bit_score,
+                            reference_length,
+                        )
+                    )
                     reads.add(aln.query_name)
                     refs.add(aln.reference_name)
-        
+
         if aln_data:
-            aln_data_dt = dt.Frame(aln_data, names=["queryId", "subjectId", "bitScore", "slen"])
+            aln_data_dt = dt.Frame(
+                aln_data, names=["queryId", "subjectId", "bitScore", "slen"]
+            )
             aln_data_dt = aln_data_dt[
                 :1, :, dt.by(dt.f.queryId, dt.f.subjectId), dt.sort(-dt.f.bitScore)
             ]
@@ -613,6 +652,7 @@ def get_bam_data(
     samfile.close()
     combined_results = dt.rbind(results)
     return (combined_results, reads, refs, empty_df)
+
 
 def reassign_reads(
     bam,
@@ -632,6 +672,7 @@ def reassign_reads(
     reassign_scale=0.9,
     sort_memory="4G",
     sort_by_name=False,
+    disable_sort=False,
 ):
     dt.options.progress.enabled = True
     dt.options.progress.clear_on_success = True
@@ -718,7 +759,6 @@ def reassign_reads(
                         lambda_value=lambda_value,
                         K_value=K_value,
                         threads=4,
-
                     ),
                     parms,
                     chunksize=1,
@@ -748,7 +788,6 @@ def reassign_reads(
                         lambda_value=lambda_value,
                         K_value=K_value,
                         threads=4,
-
                     ),
                     parms,
                     chunksize=1,
@@ -869,16 +908,19 @@ def reassign_reads(
     #     # Substitute the original DataFrame with the joined version in the list
     #     data[i] = x
 
-
     # Calculate the total number of rows in advance
-    total_rows = sum(x.shape[0] for x in data)  # This assumes `data` is a list of DataFrames/NumPy arrays
+    total_rows = sum(
+        x.shape[0] for x in data
+    )  # This assumes `data` is a list of DataFrames/NumPy arrays
 
     # Assuming all `x` arrays have the same number of columns after processing, use the first one to determine this
     # IMPORTANT: This line needs to be executed before the loop and assumes all `x` arrays are similar after processing
     num_columns = 4  # Adjust based on your actual data structure
 
     # Preallocate the NumPy array
-    mat = np.empty((total_rows, num_columns), dtype=np.float32)  # Adjust dtype as necessary
+    mat = np.empty(
+        (total_rows, num_columns), dtype=np.float32
+    )  # Adjust dtype as necessary
 
     current_index = 0
     for i, x in tqdm.tqdm(
@@ -891,18 +933,20 @@ def reassign_reads(
         ncols=80,
     ):
         # Perform join with reads and then refs
-        if x.shape[0] > 0:   
+        if x.shape[0] > 0:
             x = x[:, :, dt.join(reads)]
             x = x[:, :, dt.join(refs)]
             n_alns_0 += x.shape[0]
-            
+
             # Process `x` as before, but directly update `mat`
-            x_processed = x[:, [dt.f.qidx, dt.f.sidx, dt.f.bitScore, dt.f.slen]].to_numpy()
+            x_processed = x[
+                :, [dt.f.qidx, dt.f.sidx, dt.f.bitScore, dt.f.slen]
+            ].to_numpy()
             num_rows = x_processed.shape[0]
-            
+
             # Fill the preallocated array
-            mat[current_index:current_index + num_rows, :] = x_processed
-            
+            mat[current_index : current_index + num_rows, :] = x_processed
+
             # Update the current index
             current_index += num_rows
 
@@ -915,8 +959,6 @@ def reassign_reads(
     log.info(
         f"::: References: {n_refs_0:,} | Reads: {n_reads_0:,} | Alignments: {n_alns_0:,}"
     )
-
-
 
     # After the loop, use dt.rbind() to combine all the DataFrames in the list
     # data = dt.rbind([x for x in data])
@@ -962,27 +1004,30 @@ def reassign_reads(
 
     log.info("::: Allocating data...")
 
-
     # Define the dtype for the structured array
-    dtype = np.dtype([
-        ("source", "int"),
-        ("subject", "int"),
-        ("var", "float"),
-        ("slen", "int"),
-        ("s_W", "float"),  # This and following fields are initialized to 0 or a default value
-        ("prob", "float"),
-        ("iter", "int"),
-        ("n_aln", "int"),
-        ("max_prob", "float"),
-    ])
+    dtype = np.dtype(
+        [
+            ("source", "int"),
+            ("subject", "int"),
+            ("var", "float"),
+            ("slen", "int"),
+            (
+                "s_W",
+                "float",
+            ),  # This and following fields are initialized to 0 or a default value
+            ("prob", "float"),
+            ("iter", "int"),
+            ("n_aln", "int"),
+            ("max_prob", "float"),
+        ]
+    )
 
     # Initialize the structured array with zeros directly
     m = np.zeros(mat.shape[0], dtype=dtype)
-    m['source'] = mat[:, 0]
-    m['subject'] = mat[:, 1]
-    m['var'] = mat[:, 2]
-    m['slen'] = mat[:, 3]
-
+    m["source"] = mat[:, 0]
+    m["subject"] = mat[:, 1]
+    m["var"] = mat[:, 2]
+    m["slen"] = mat[:, 3]
 
     # Force a garbage collection to free up memory from any intermediate arrays that are no longer needed
     gc.collect()
@@ -1068,6 +1113,7 @@ def reassign_reads(
         entries=entries,
         sort_memory=sort_memory,
         min_read_ani=min_read_ani,
+        disable_sort=disable_sort,
     )
 
 
@@ -1089,6 +1135,7 @@ def reassign(args):
         mode="reassign",
         bam_reassigned=args.bam_reassigned,
     )
+    sorted_bam = bam.replace(".bam", ".bf-sorted.bam")
     bam = check_bam_file(
         bam=args.bam,
         threads=args.threads,
@@ -1127,5 +1174,14 @@ def reassign(args):
         gap_extension_penalty=args.gap_extension_penalty,
         lambda_value=args.lambda_value,
         K_value=args.K_value,
+        disable_sort=args.disable_sort,
     )
+    # check if sorted BAM file exists, if yes remove it
+    if os.path.exists(sorted_bam):
+        os.remove(sorted_bam)
+    # check if sorted BAM index file exists, if yes remove it
+    if os.path.exists(sorted_bam + ".bai"):
+        os.remove(sorted_bam + ".bai")
+    elif os.path.exists(sorted_bam + ".csi"):
+        os.remove(sorted_bam + ".csi")
     log.info("Done!")

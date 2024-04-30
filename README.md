@@ -93,11 +93,11 @@ Full list of options:
 
 ```bash
 $ filterBAM reassign --help
-usage: filterBAM reassign [-h] --bam BAM [-p STR] [-r FILE] [-t INT] [-i INT] [-s FLOAT]
-                          [-A FLOAT] [-l INT] [-n INT] [--match-reward INT]
+usage: filterBAM reassign [-h] --bam BAM [-p STR] [-r FILE] [-t INT] [-i INT]
+                          [-s FLOAT] [-A FLOAT] [-l INT] [-n INT] [--match-reward INT]
                           [--mismatch-penalty INT] [--gap-open-penalty INT]
-                          [--gap-extension-penalty INT] [--lambda FLOAT] [-k FLOAT] [-o [FILE]]
-                          [-m STR] [-N] [--tmp-dir DIR]
+                          [--gap-extension-penalty INT] [--lambda FLOAT] [-k FLOAT]
+                          [-o [FILE]] [-m STR] [-N] [--tmp-dir DIR] [--disable-sort]
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -132,10 +132,13 @@ Re-assign optional arguments:
   -o [FILE], --out-bam [FILE]
                         Save a BAM file without multimapping reads (default: None)
   -m STR, --sort-memory STR
-                        Set maximum memory per thread for sorting; suffix K/M/G recognized
-                        (default: 1G)
+                        Set maximum memory per thread for sorting; suffix K/M/G
+                        recognized (default: 1G)
   -N, --sort-by-name    Sort by read names (default: False)
   --tmp-dir DIR         Temporary directory (default: None)
+
+miscellaneous arguments:
+  --disable-sort        Disable sorting of the filtered BAM file (default: False)
 ```
 
 
