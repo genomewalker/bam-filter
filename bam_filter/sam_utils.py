@@ -24,6 +24,7 @@ import pyranges as pr
 from pathlib import Path
 import concurrent.futures
 import gc
+import shutil
 
 # import cProfile as profile
 # import pstats
@@ -1340,7 +1341,7 @@ def filter_reference_BAM(
                 os.remove(out_files["bam_filtered_tmp"])
             else:
                 logging.info("Skipping BAM file sorting...")
-                os.rename(out_files["bam_filtered_tmp"], out_files["bam_filtered"])
+                shutil.move(out_files["bam_filtered_tmp"], out_files["bam_filtered"])
         else:
             logging.info("Skipping filtering BAM file creation...")
     else:

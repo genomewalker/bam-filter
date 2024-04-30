@@ -24,6 +24,7 @@ import concurrent.futures
 import math
 import warnings
 from bam_filter.sam_utils import check_bam_file
+import shutil
 
 # import cProfile as prof
 # import pstats
@@ -428,7 +429,7 @@ def write_reassigned_bam(
         os.remove(out_files["bam_reassigned_tmp"])
     else:
         logging.info("Skipping BAM file sorting...")
-        os.rename(out_files["bam_reassigned_tmp"], out_bam)
+        shutil.move(out_files["bam_reassigned_tmp"], out_bam)
 
 
 # def calculate_alignment_score(identity, read_length):
