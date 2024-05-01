@@ -102,6 +102,9 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
     # out_bam_file.set(pg)
     references = [x for x in samfile.references if x in refs_idx.keys()]
 
+    # sort new_header["SQ"] using the references order
+    new_header["SQ"].sort(key=lambda x: references.index(x["SN"]))
+
     logging.info(f"::: ::: Filtering {len(references):,} references sequentially...")
     for reference in tqdm.tqdm(
         references,
@@ -1187,7 +1190,13 @@ def filter_reference_BAM(
             else:
                 write_threads = threads
             new_header = header.to_dict()
-            new_header["SQ"] = [x for x in new_header["SQ"] if x["SN"] in ref_names]
+            new_header["SQ"] = [
+                x for x in new_header["SQ"] if x["SN"] in list(ref_names)
+            ]
+            print(ref_names)
+            print(new_header["SQ"])
+            new_header["SQ"].sort(key=lambda x: list(ref_names).index(x["SN"]))
+            print(new_header["SQ"])
             out_bam_file = pysam.AlignmentFile(
                 out_files["bam_filtered_tmp"],
                 "wb",
