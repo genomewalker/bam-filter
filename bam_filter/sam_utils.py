@@ -156,19 +156,13 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
     samfile.close()
 
     if max_chr_length > 536870912:
-        logging.info("::: ::: A reference is longer than 2^29, indexing with csi")
-        pysam.index(
-            "-c",
-            "-@",
-            str(s_threads),
-            output_files["bam_tmp_sorted"],
-        )
-    else:
-        pysam.index(
-            "-@",
-            str(s_threads),
-            output_files["bam_tmp_sorted"],
-        )
+        logging.info("::: ::: A reference is longer than 2^29")
+    pysam.index(
+        "-c",
+        "-@",
+        str(s_threads),
+        output_files["bam_tmp_sorted"],
+    )
 
     os.remove(output_files["bam_tmp"])
     return output_files["bam_tmp_sorted"]
@@ -832,14 +826,9 @@ def check_bam_file(
             if not samfile.has_index():
                 logging.info("BAM index not found. Indexing...")
                 if max_chr_length > 536870912:
-                    logging.info("A reference is longer than 2^29, indexing with csi")
-                    pysam.index("-c", "-@", str(threads), bam)
-                else:
-                    pysam.index(
-                        "-@",
-                        str(threads),
-                        bam,
-                    )
+                    logging.info("A reference is longer than 2^29")
+                pysam.index("-c", "-@", str(threads), bam)
+
             logging.info("::: BAM file looks good.")
 
         return bam  # No need to reload the samfile after creating index, thanks to the with statement
@@ -1333,21 +1322,13 @@ def filter_reference_BAM(
                     samfile.close()
 
                     if max_chr_length > 536870912:
-                        logging.info(
-                            "A reference is longer than 2^29, indexing with csi"
-                        )
-                        pysam.index(
-                            "-c",
-                            "-@",
-                            str(threads),
-                            out_files["bam_filtered"],
-                        )
-                    else:
-                        pysam.index(
-                            "-@",
-                            str(threads),
-                            out_files["bam_filtered"],
-                        )
+                        logging.info("A reference is longer than 2^29")
+                    pysam.index(
+                        "-c",
+                        "-@",
+                        str(threads),
+                        out_files["bam_filtered"],
+                    )
 
                 os.remove(out_files["bam_filtered_tmp"])
             else:

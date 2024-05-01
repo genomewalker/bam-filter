@@ -415,19 +415,19 @@ def write_reassigned_bam(
         samfile.close()
 
         if max_chr_length > 536870912:
-            logging.info("A reference is longer than 2^29, indexing with csi")
-            pysam.index(
-                "-c",
-                "-@",
-                str(threads),
-                out_bam,
-            )
-        else:
-            pysam.index(
-                "-@",
-                str(threads),
-                out_bam,
-            )
+            logging.info("A reference is longer than 2^29")
+        pysam.index(
+            "-c",
+            "-@",
+            str(threads),
+            out_bam,
+        )
+        # else:
+        #     pysam.index(
+        #         "-@",
+        #         str(threads),
+        #         out_bam,
+        #     )
 
         os.remove(out_files["bam_reassigned_tmp"])
     else:
