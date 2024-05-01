@@ -296,6 +296,8 @@ def write_reassigned_bam(
     new_header = header.to_dict()
     new_header["SQ"] = [x for x in new_header["SQ"] if x["SN"] in list(ref_names)]
     new_header["SQ"].sort(key=lambda x: list(ref_names).index(x["SN"]))
+    new_header["HD"]["SO"] = "unsorted"
+
     out_bam_file = pysam.AlignmentFile(
         out_files["bam_reassigned_tmp"],
         "wb",

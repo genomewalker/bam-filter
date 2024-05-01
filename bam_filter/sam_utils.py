@@ -90,6 +90,8 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
     new_header = header.to_dict()
     new_header["SQ"] = [x for x in new_header["SQ"] if x["SN"] in list(ref_names)]
     new_header["SQ"].sort(key=lambda x: list(ref_names).index(x["SN"]))
+    # change it to unsorted
+    new_header["HD"]["SO"] = "unsorted"
 
     out_bam_file = pysam.AlignmentFile(
         output_files["bam_tmp"],
@@ -1184,6 +1186,8 @@ def filter_reference_BAM(
             ]
 
             new_header["SQ"].sort(key=lambda x: list(ref_names).index(x["SN"]))
+            new_header["HD"]["SO"] = "unsorted"
+
             out_bam_file = pysam.AlignmentFile(
                 out_files["bam_filtered_tmp"],
                 "wb",
