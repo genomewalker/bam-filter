@@ -88,7 +88,10 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
         write_threads = threads
 
     new_header = header.to_dict()
-    new_header["SQ"] = [x for x in new_header["SQ"] if x["SN"] in ref_names]
+    new_header["SQ"] = [x for x in new_header["SQ"] if x["SN"] in list(ref_names)]
+    new_header["SQ"].sort(key=lambda x: list(ref_names).index(x["SN"]))
+    # change it to unsorted
+    new_header["HD"]["SO"] = "unsorted"
 
     out_bam_file = pysam.AlignmentFile(
         output_files["bam_tmp"],
@@ -101,6 +104,8 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
     # out_bam_file.set_tag(read_groups)
     # out_bam_file.set(pg)
     references = [x for x in samfile.references if x in refs_idx.keys()]
+
+    # sort new_header["SQ"] using the references order
 
     logging.info(f"::: ::: Filtering {len(references):,} references sequentially...")
     for reference in tqdm.tqdm(
@@ -153,19 +158,13 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
     samfile.close()
 
     if max_chr_length > 536870912:
-        logging.info("::: ::: A reference is longer than 2^29, indexing with csi")
-        pysam.index(
-            "-c",
-            "-@",
-            str(s_threads),
-            output_files["bam_tmp_sorted"],
-        )
-    else:
-        pysam.index(
-            "-@",
-            str(s_threads),
-            output_files["bam_tmp_sorted"],
-        )
+        logging.info("::: ::: A reference is longer than 2^29")
+    pysam.index(
+        "-c",
+        "-@",
+        str(s_threads),
+        output_files["bam_tmp_sorted"],
+    )
 
     os.remove(output_files["bam_tmp"])
     return output_files["bam_tmp_sorted"]
@@ -829,14 +828,9 @@ def check_bam_file(
             if not samfile.has_index():
                 logging.info("BAM index not found. Indexing...")
                 if max_chr_length > 536870912:
-                    logging.info("A reference is longer than 2^29, indexing with csi")
-                    pysam.index("-c", "-@", str(threads), bam)
-                else:
-                    pysam.index(
-                        "-@",
-                        str(threads),
-                        bam,
-                    )
+                    logging.info("A reference is longer than 2^29")
+                pysam.index("-c", "-@", str(threads), bam)
+
             logging.info("::: BAM file looks good.")
 
         return bam  # No need to reload the samfile after creating index, thanks to the with statement
@@ -1187,7 +1181,13 @@ def filter_reference_BAM(
             else:
                 write_threads = threads
             new_header = header.to_dict()
-            new_header["SQ"] = [x for x in new_header["SQ"] if x["SN"] in ref_names]
+            new_header["SQ"] = [
+                x for x in new_header["SQ"] if x["SN"] in list(ref_names)
+            ]
+
+            new_header["SQ"].sort(key=lambda x: list(ref_names).index(x["SN"]))
+            new_header["HD"]["SO"] = "unsorted"
+
             out_bam_file = pysam.AlignmentFile(
                 out_files["bam_filtered_tmp"],
                 "wb",
@@ -1326,21 +1326,13 @@ def filter_reference_BAM(
                     samfile.close()
 
                     if max_chr_length > 536870912:
-                        logging.info(
-                            "A reference is longer than 2^29, indexing with csi"
-                        )
-                        pysam.index(
-                            "-c",
-                            "-@",
-                            str(threads),
-                            out_files["bam_filtered"],
-                        )
-                    else:
-                        pysam.index(
-                            "-@",
-                            str(threads),
-                            out_files["bam_filtered"],
-                        )
+                        logging.info("A reference is longer than 2^29")
+                    pysam.index(
+                        "-c",
+                        "-@",
+                        str(threads),
+                        out_files["bam_filtered"],
+                    )
 
                 os.remove(out_files["bam_filtered_tmp"])
             else:

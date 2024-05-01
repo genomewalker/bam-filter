@@ -294,7 +294,9 @@ def write_reassigned_bam(
         write_threads = threads
 
     new_header = header.to_dict()
-    new_header["SQ"] = [x for x in new_header["SQ"] if x["SN"] in ref_names]
+    new_header["SQ"] = [x for x in new_header["SQ"] if x["SN"] in list(ref_names)]
+    new_header["SQ"].sort(key=lambda x: list(ref_names).index(x["SN"]))
+    new_header["HD"]["SO"] = "unsorted"
 
     out_bam_file = pysam.AlignmentFile(
         out_files["bam_reassigned_tmp"],
@@ -415,19 +417,19 @@ def write_reassigned_bam(
         samfile.close()
 
         if max_chr_length > 536870912:
-            logging.info("A reference is longer than 2^29, indexing with csi")
-            pysam.index(
-                "-c",
-                "-@",
-                str(threads),
-                out_bam,
-            )
-        else:
-            pysam.index(
-                "-@",
-                str(threads),
-                out_bam,
-            )
+            logging.info("A reference is longer than 2^29")
+        pysam.index(
+            "-c",
+            "-@",
+            str(threads),
+            out_bam,
+        )
+        # else:
+        #     pysam.index(
+        #         "-@",
+        #         str(threads),
+        #         out_bam,
+        #     )
 
         os.remove(out_files["bam_reassigned_tmp"])
     else:
