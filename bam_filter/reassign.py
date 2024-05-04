@@ -25,6 +25,7 @@ import math
 import warnings
 from bam_filter.sam_utils import check_bam_file
 import shutil
+import pandas as pd
 
 # import cProfile as prof
 # import pstats
@@ -51,13 +52,14 @@ def initialize_subject_weights(data):
 
 
 def resolve_multimaps(data, scale=0.9, iters=10):
+
     current_iter = 0
     while True:
         progress_bar = tqdm.tqdm(
             total=9,
             desc=f"Iter {current_iter + 1}",
             unit=" step",
-            disable=False,  # Replace with your logic or a boolean value
+            disable=False,
             leave=False,
             ncols=80,
         )
@@ -122,6 +124,7 @@ def resolve_multimaps(data, scale=0.9, iters=10):
             progress_bar.close()
             log.info("::: ::: No more multimapping reads. Early stopping.")
             return data
+
         data = data[(data["n_aln"] > 1) & (data["prob"] > 0)]
 
         # total_n_unique = np.sum(query_counts_array[data["source"]] <= 1)
@@ -142,6 +145,8 @@ def resolve_multimaps(data, scale=0.9, iters=10):
         )
         progress_bar.update(1)
         to_remove = np.sum(data["prob"] < data["max_prob"])
+
+        # data_to_remove = data[data["prob"] < data["max_prob"]]
 
         data = data[data["prob"] >= data["max_prob"]]
         max_prob = None
@@ -275,27 +280,26 @@ def write_reassigned_bam(
     # else:
     #     out_bam = out_files["bam_reassigned_sorted"]
     out_bam = out_files["bam_reassigned"]
-    if threads > 4:
-        s_threads = 4
-    else:
-        s_threads = threads
-    samfile = pysam.AlignmentFile(bam, "rb", threads=s_threads)
-    references = list(entries.keys())
-    refs_dict = {x: samfile.get_reference_length(x) for x in references}
-    # get group reads
-    header = samfile.header
-    samfile.close()
-    (ref_names, ref_lengths) = zip(*refs_dict.items())
+    s_threads = min(4, threads)
+    with pysam.AlignmentFile(bam, "rb", threads=s_threads) as samfile:
+        references = list(entries.keys())
+        refs_dict = {x: samfile.get_reference_length(x) for x in references}
+        # get group reads
+        header = samfile.header
 
+    log.info("::: Getting reference names and lengths...")
+    (ref_names, ref_lengths) = zip(*refs_dict.items())
     refs_idx = {sys.intern(str(x)): i for i, x in enumerate(ref_names)}
-    if threads > 4:
-        write_threads = 4
-    else:
-        write_threads = threads
+    write_threads = min(4, threads)
 
     new_header = header.to_dict()
-    new_header["SQ"] = [x for x in new_header["SQ"] if x["SN"] in list(ref_names)]
-    new_header["SQ"].sort(key=lambda x: list(ref_names).index(x["SN"]))
+
+    log.info("::: Creating new header...")
+    ref_names_set = set(ref_names)
+    new_header["SQ"] = [x for x in new_header["SQ"] if x["SN"] in ref_names_set]
+
+    name_index = {name: idx for idx, name in enumerate(ref_names)}
+    new_header["SQ"].sort(key=lambda x: name_index[x["SN"]])
     new_header["HD"]["SO"] = "unsorted"
 
     out_bam_file = pysam.AlignmentFile(
@@ -315,8 +319,9 @@ def write_reassigned_bam(
     log.info("::: Creating reference chunks with uniform read amounts...")
 
     ref_chunks = sort_keys_by_approx_weight(
-        input_dict=ref_counts, scale=1, num_cores=num_cores
+        input_dict=ref_counts, scale=1, num_cores=num_cores, verbose=False
     )
+
     num_cores = min(num_cores, len(ref_chunks))
     log.info(f"::: Using {num_cores} processes to write {len(ref_chunks)} chunk(s)")
 
@@ -721,12 +726,19 @@ def reassign_reads(
     log.info(f"::: Found {total_refs:,} reference sequences")
     # logging.info(f"Found {samfile.mapped:,} alignments")
     log.info(f"::: Removing references with less than {min_read_count} reads...")
+    index_statistics = samfile.get_index_statistics()
+
+    # Filter out references with less than min_read_count reads
+    # add a progress bar
+
     references_m = {
         chrom.contig: chrom.mapped
-        for chrom in samfile.get_index_statistics()
+        for chrom in index_statistics
         if chrom.mapped >= min_read_count
     }
-
+    # get number alignments
+    n_alns = sum(references_m.values())
+    log.info(f"::: Kept {n_alns:,} alignments")
     references = list(references_m.keys())
 
     if len(references) == 0:
@@ -739,11 +751,16 @@ def reassign_reads(
     log.info("::: Creating reference chunks with uniform read amounts...")
     # ify the number of chunks
     ref_chunks = sort_keys_by_approx_weight(
-        input_dict=references_m, scale=1, num_cores=threads, verbose=False
+        input_dict=references_m,
+        scale=1,
+        num_cores=threads,
+        refinement_steps=10,
+        verbose=False,
+        max_entries_per_chunk=25_000_000,
     )
+
     log.info(f"::: ::: Created {len(ref_chunks):,} chunks")
     ref_chunks = random.sample(ref_chunks, len(ref_chunks))
-
     dt.options.progress.enabled = False
     dt.options.progress.clear_on_success = True
     dt.options.nthreads = 1
@@ -1056,8 +1073,9 @@ def reassign_reads(
     log.info(
         f"::: References: {n_refs:,} | Reads: {n_reads:,} | Alignments: {n_alns:,}"
     )
+
     log.info(
-        f'::: Unique mapping reads: {no_multimaps[no_multimaps["n_aln"] == 1].shape[0]:,} | Multimapping reads: {no_multimaps[no_multimaps["n_aln"] > 1].shape[0]:,}'
+        f'::: Unique mapping reads: {no_multimaps[no_multimaps["n_aln"] == 1].shape[0]:,} | Multimapping reads: {len(np.unique(no_multimaps[no_multimaps["n_aln"] > 1]["source"])):,}'
     )
 
     # add this to the array

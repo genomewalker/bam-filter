@@ -17,6 +17,7 @@ import numpy as np
 from pathlib import Path
 import pysam
 import tempfile
+import heapq
 
 
 log = logging.getLogger("my_logger")
@@ -60,118 +61,189 @@ def is_debug():
     return logging.getLogger("my_logger").getEffectiveLevel() == logging.DEBUG
 
 
-def refine_chunks(chunks, input_dict, target_weight):
-    # Calculate the current weight of each chunk
-    chunk_weights = [sum(input_dict[key] for key in chunk) for chunk in chunks]
+# def refine_chunks(chunks, input_dict, target_weight):
+#     # Calculate the current weight of each chunk
+#     chunk_weights = [sum(input_dict[key] for key in chunk) for chunk in chunks]
 
+#     while max(chunk_weights) - min(chunk_weights) > target_weight:
+#         # Find the chunk with the maximum weight
+#         src_chunk = chunk_weights.index(max(chunk_weights))
+
+#         # Find the chunk with the minimum weight
+#         dest_chunk = chunk_weights.index(min(chunk_weights))
+
+#         # Find the key in the source chunk with the maximum weight
+#         max_weight_key = max(chunks[src_chunk], key=lambda key: input_dict[key])
+
+#         # Move the key with maximum weight from the source to the destination chunk
+#         chunks[src_chunk].remove(max_weight_key)
+#         chunks[dest_chunk].append(max_weight_key)
+
+#         # Recalculate chunk weights
+#         chunk_weights = [sum(input_dict[key] for key in chunk) for chunk in chunks]
+
+#     # Remove empty chunks
+#     chunks = [chunk for chunk in chunks if chunk]
+
+#     return chunks
+
+
+# def sort_keys_by_approx_weight(
+#     input_dict, scale=1, num_cores=1, refinement_steps=10, verbose=False
+# ):
+#     if scale == 0:
+#         raise ValueError("Scale cannot be zero.")
+
+#     # Calculate the target weight for each chunk
+#     target_weight = scale * int(max(input_dict.values()))
+
+#     # Determine the initial number of chunks based on the number of cores
+#     # num_chunks = num_cores * scale
+#     num_chunks = (((sum(input_dict.values()) // target_weight)) // num_cores) + 1
+#     if num_chunks < num_cores:
+#         num_chunks = num_cores
+#     # Sort keys by their weights in descending order
+#     sorted_keys = sorted(input_dict, key=lambda k: input_dict[k], reverse=True)
+
+#     # Initialize chunks
+#     chunks = [[] for _ in range(num_chunks)]
+#     total_weight = [0] * num_chunks
+
+#     # Create a progress bar
+#     progress_bar = tqdm.tqdm(
+#         total=len(sorted_keys),
+#         desc="Distributing keys",
+#         unit="k",
+#         unit_scale=True,
+#         unit_divisor=1000,
+#         disable=False,
+#         leave=False,
+#         ncols=80,
+#     )
+
+#     # Distribute keys into chunks with weights close to target_weight
+#     for key in sorted_keys:
+#         # Find the chunk with the least total weight
+#         min_chunk_index = min(range(num_chunks), key=lambda i: total_weight[i])
+
+#         # If adding the key doesn't exceed the target weight, add it to the chunk
+#         if total_weight[min_chunk_index] + input_dict[key] <= target_weight:
+#             chunks[min_chunk_index].append(key)
+#             total_weight[min_chunk_index] += input_dict[key]
+#         else:
+#             # Find the chunk with the weight closest to the target_weight
+#             closest_chunk_index = min(
+#                 range(num_chunks),
+#                 key=lambda i: abs(total_weight[i] + input_dict[key] - target_weight),
+#             )
+#             chunks[closest_chunk_index].append(key)
+#             total_weight[closest_chunk_index] += input_dict[key]
+
+#     # Close the progress bar
+#     progress_bar.close()
+
+#     # Initial balance
+#     initial_balance = max(len(chunk) for chunk in chunks) - min(
+#         len(chunk) for chunk in chunks
+#     )
+
+#     # Refinement step
+#     for _ in range(refinement_steps):
+#         chunks = refine_chunks(chunks, input_dict, target_weight)
+
+#         # Check for improvement in balance
+#         current_balance = max(len(chunk) for chunk in chunks) - min(
+#             len(chunk) for chunk in chunks
+#         )
+#         if current_balance >= initial_balance:
+#             break  # No improvement, exit the loop
+
+#         # Update initial balance for the next iteration
+#         initial_balance = current_balance
+
+#     # Print the min, max, and average weight of each chunk
+#     if verbose:
+#         for i, chunk in enumerate(chunks, 1):
+#             chunk_weights = [input_dict[key] for key in chunk]
+#             min_weight = min(chunk_weights)
+#             max_weight = max(chunk_weights)
+#             avg_weight = sum(chunk_weights) / len(chunk_weights)
+#             print(
+#                 f"Chunk {i}: Total = {sum(chunk_weights)}, Min Weight = {min_weight}, Max Weight = {max_weight}, Average Weight = {avg_weight}"
+#             )
+
+#     return chunks
+
+
+def refine_chunks(chunks, input_dict, chunk_weights, target_weight):
     while max(chunk_weights) - min(chunk_weights) > target_weight:
-        # Find the chunk with the maximum weight
-        src_chunk = chunk_weights.index(max(chunk_weights))
+        src_idx = chunk_weights.index(max(chunk_weights))
+        dest_idx = chunk_weights.index(min(chunk_weights))
+        max_weight_key = max(chunks[src_idx], key=lambda key: input_dict[key])
 
-        # Find the chunk with the minimum weight
-        dest_chunk = chunk_weights.index(min(chunk_weights))
+        # Update the weights directly instead of recalculating
+        max_key_weight = input_dict[max_weight_key]
+        chunk_weights[src_idx] -= max_key_weight
+        chunk_weights[dest_idx] += max_key_weight
 
-        # Find the key in the source chunk with the maximum weight
-        max_weight_key = max(chunks[src_chunk], key=lambda key: input_dict[key])
+        # Move the key
+        chunks[src_idx].remove(max_weight_key)
+        chunks[dest_idx].append(max_weight_key)
 
-        # Move the key with maximum weight from the source to the destination chunk
-        chunks[src_chunk].remove(max_weight_key)
-        chunks[dest_chunk].append(max_weight_key)
-
-        # Recalculate chunk weights
-        chunk_weights = [sum(input_dict[key] for key in chunk) for chunk in chunks]
-
-    # Remove empty chunks
-    chunks = [chunk for chunk in chunks if chunk]
-
-    return chunks
+    # Remove empty chunks (if any)
+    return [chunk for chunk in chunks if chunk]
 
 
 def sort_keys_by_approx_weight(
-    input_dict, scale=1, num_cores=1, refinement_steps=10, verbose=False
+    input_dict,
+    scale=1,
+    num_cores=1,
+    refinement_steps=10,
+    max_entries_per_chunk=None,
+    verbose=False,
 ):
     if scale == 0:
         raise ValueError("Scale cannot be zero.")
 
-    # Calculate the target weight for each chunk
-    target_weight = scale * int(max(input_dict.values()))
+    target_weight = scale * max(input_dict.values())
 
-    # Determine the initial number of chunks based on the number of cores
-    # num_chunks = num_cores * scale
-    num_chunks = (((sum(input_dict.values()) // target_weight)) // num_cores) + 1
-    if num_chunks < num_cores:
-        num_chunks = num_cores
-    # Sort keys by their weights in descending order
-    sorted_keys = sorted(input_dict, key=lambda k: input_dict[k], reverse=True)
+    total_weight = sum(input_dict.values())
+    target_weight = max(scale * max(input_dict.values()), max_entries_per_chunk or 0)
+    num_chunks = max(num_cores, (total_weight // target_weight) + 1)
 
-    # Initialize chunks
+    sorted_keys = sorted(input_dict, key=input_dict.get, reverse=True)
     chunks = [[] for _ in range(num_chunks)]
-    total_weight = [0] * num_chunks
+    chunk_weights = [0] * num_chunks
 
-    # Create a progress bar
-    progress_bar = tqdm.tqdm(
-        total=len(sorted_keys),
-        desc="Distributing keys",
-        unit="k",
-        unit_scale=True,
-        unit_divisor=1000,
-        disable=False,
-        leave=False,
-        ncols=80,
-    )
-
-    # Distribute keys into chunks with weights close to target_weight
     for key in sorted_keys:
-        # Find the chunk with the least total weight
-        min_chunk_index = min(range(num_chunks), key=lambda i: total_weight[i])
+        min_chunk_idx = chunk_weights.index(min(chunk_weights))
+        chunks[min_chunk_idx].append(key)
+        chunk_weights[min_chunk_idx] += input_dict[key]
 
-        # If adding the key doesn't exceed the target weight, add it to the chunk
-        if total_weight[min_chunk_index] + input_dict[key] <= target_weight:
-            chunks[min_chunk_index].append(key)
-            total_weight[min_chunk_index] += input_dict[key]
-        else:
-            # Find the chunk with the weight closest to the target_weight
-            closest_chunk_index = min(
-                range(num_chunks),
-                key=lambda i: abs(total_weight[i] + input_dict[key] - target_weight),
-            )
-            chunks[closest_chunk_index].append(key)
-            total_weight[closest_chunk_index] += input_dict[key]
-
-    # Close the progress bar
-    progress_bar.close()
-
-    # Initial balance
-    initial_balance = max(len(chunk) for chunk in chunks) - min(
-        len(chunk) for chunk in chunks
-    )
-
-    # Refinement step
+    # Refine chunks
     for _ in range(refinement_steps):
-        chunks = refine_chunks(chunks, input_dict, target_weight)
-
-        # Check for improvement in balance
+        initial_balance = max(len(chunk) for chunk in chunks) - min(
+            len(chunk) for chunk in chunks
+        )
+        chunks = refine_chunks(chunks, input_dict, chunk_weights, target_weight)
         current_balance = max(len(chunk) for chunk in chunks) - min(
             len(chunk) for chunk in chunks
         )
         if current_balance >= initial_balance:
             break  # No improvement, exit the loop
 
-        # Update initial balance for the next iteration
-        initial_balance = current_balance
-
-    # Print the min, max, and average weight of each chunk
     if verbose:
-        for i, chunk in enumerate(chunks, 1):
-            chunk_weights = [input_dict[key] for key in chunk]
-            min_weight = min(chunk_weights)
-            max_weight = max(chunk_weights)
-            avg_weight = sum(chunk_weights) / len(chunk_weights)
-            print(
-                f"Chunk {i}: Total = {sum(chunk_weights)}, Min Weight = {min_weight}, Max Weight = {max_weight}, Average Weight = {avg_weight}"
-            )
+        print_chunk_stats(chunks, input_dict)
 
     return chunks
+
+
+def print_chunk_stats(chunks, input_dict):
+    for i, chunk in enumerate(chunks, 1):
+        weights = [input_dict[key] for key in chunk]
+        print(
+            f"Chunk {i}: Total = {sum(weights)}, Min = {min(weights)}, Max = {max(weights)}, Avg = {sum(weights) / len(chunk)}"
+        )
 
 
 def create_empty_output_files(out_files):
