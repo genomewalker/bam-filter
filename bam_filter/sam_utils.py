@@ -15,7 +15,6 @@ from bam_filter.utils import (
     create_empty_bam,
     sort_keys_by_approx_weight,
 )
-import random
 from bam_filter.entropy import entropy, norm_entropy, gini_coeff, norm_gini_coeff
 from collections import defaultdict
 import pyranges as pr

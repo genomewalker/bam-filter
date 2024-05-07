@@ -475,7 +475,7 @@ def get_bam_data(
         empty_df = 0
 
         bam_reference_length = {
-            reference: np.int64(samfile.get_reference_length(x))
+            reference: np.int64(samfile.get_reference_length(reference))
             for reference in references
         }
 
