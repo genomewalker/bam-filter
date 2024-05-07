@@ -215,7 +215,13 @@ def sort_keys_by_approx_weight(
     chunks = [[] for _ in range(num_chunks)]
     chunk_weights = [0] * num_chunks
 
-    for key in sorted_keys:
+    for key in tqdm.tqdm(
+        sorted_keys,
+        desc="Distributing keys",
+        unit_scale=True,
+        unit_divisor=1000,
+        leave=False,
+    ):
         min_chunk_idx = chunk_weights.index(min(chunk_weights))
         chunks[min_chunk_idx].append(key)
         chunk_weights[min_chunk_idx] += input_dict[key]

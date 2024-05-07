@@ -39,7 +39,7 @@ def initialize_subject_weights(data):
         data["s_W"] = 1 / data["slen"]
 
         # Calculate the sum of weights for each unique source
-        sum_weights = np.zeros(int(np.max(data["source"])) + 1)
+        sum_weights = np.zeros(np.int64(np.max(data["source"])) + 1)
         np.add.at(sum_weights, data["source"], data["var"])
 
         # Calculate the normalized weights based on the sum for each query
@@ -52,14 +52,13 @@ def initialize_subject_weights(data):
 
 
 def resolve_multimaps(data, scale=0.9, iters=10):
-
     current_iter = 0
     while True:
         progress_bar = tqdm.tqdm(
             total=9,
             desc=f"Iter {current_iter + 1}",
             unit=" step",
-            disable=False,
+            disable=False,  # Replace with your logic or a boolean value
             leave=False,
             ncols=80,
         )
@@ -71,7 +70,7 @@ def resolve_multimaps(data, scale=0.9, iters=10):
         # Calculate the weights for each subject
         log.debug(f"::: Iter: {current_iter + 1} - Calculating weights...")
         progress_bar.update(1)
-        subject_weights = np.zeros(int(np.max(data["subject"])) + 1)
+        subject_weights = np.zeros(np.int64(np.max(data["subject"])) + 1)
         np.add.at(subject_weights, data["subject"], data["prob"])
         data["s_W"] = subject_weights[data["subject"]] / data["slen"]
         subject_weights = None
@@ -83,7 +82,7 @@ def resolve_multimaps(data, scale=0.9, iters=10):
         log.debug("Calculating sum of probabilities")
         progress_bar.update(1)
         prob_sum = data["prob"] * data["s_W"]
-        prob_sum_array = np.zeros(int(np.max(data["source"])) + 1)
+        prob_sum_array = np.zeros(np.int64(np.max(data["source"])) + 1)
         np.add.at(prob_sum_array, data["source"], prob_sum)
         prob_sum = None
 
@@ -94,7 +93,7 @@ def resolve_multimaps(data, scale=0.9, iters=10):
         log.debug("Calculating query counts")
         progress_bar.update(1)
         # Calculate how many alignments are in each query
-        # query_counts = np.zeros(int(np.max(data["source"])) + 1)
+        # query_counts = np.zeros(np.int64(np.max(data["source"])) + 1)
         # np.add.at(query_counts, data["source"], 1)
 
         query_counts = np.bincount(data["source"])
@@ -102,7 +101,7 @@ def resolve_multimaps(data, scale=0.9, iters=10):
         log.debug("Calculating query counts array")
         progress_bar.update(1)
         # Use a separate array for query counts
-        query_counts_array = np.zeros(int(np.max(data["source"])) + 1)
+        query_counts_array = np.zeros(np.int64(np.max(data["source"])) + 1)
         np.add.at(
             query_counts_array,
             data["source"],
@@ -124,7 +123,6 @@ def resolve_multimaps(data, scale=0.9, iters=10):
             progress_bar.close()
             log.info("::: ::: No more multimapping reads. Early stopping.")
             return data
-
         data = data[(data["n_aln"] > 1) & (data["prob"] > 0)]
 
         # total_n_unique = np.sum(query_counts_array[data["source"]] <= 1)
@@ -134,7 +132,7 @@ def resolve_multimaps(data, scale=0.9, iters=10):
 
         log.debug("Calculating max_prob")
         # Keep the ones that have a probability higher than the maximum scaled probability
-        max_prob = np.zeros(int(np.max(data["source"])) + 1)
+        max_prob = np.zeros(np.int64(np.max(data["source"])) + 1)
         np.maximum.at(max_prob, data["source"], data["prob"])
 
         data["max_prob"] = max_prob[data["source"]]
@@ -145,8 +143,6 @@ def resolve_multimaps(data, scale=0.9, iters=10):
         )
         progress_bar.update(1)
         to_remove = np.sum(data["prob"] < data["max_prob"])
-
-        # data_to_remove = data[data["prob"] < data["max_prob"]]
 
         data = data[data["prob"] >= data["max_prob"]]
         max_prob = None
@@ -319,7 +315,11 @@ def write_reassigned_bam(
     log.info("::: Creating reference chunks with uniform read amounts...")
 
     ref_chunks = sort_keys_by_approx_weight(
-        input_dict=ref_counts, scale=1, num_cores=num_cores, verbose=False
+        input_dict=ref_counts,
+        scale=1,
+        num_cores=num_cores,
+        verbose=False,
+        max_entries_per_chunk=1_000_000,
     )
 
     num_cores = min(num_cores, len(ref_chunks))
@@ -415,14 +415,14 @@ def write_reassigned_bam(
             s_threads = threads
         samfile = pysam.AlignmentFile(out_bam, "rb", threads=s_threads)
         chr_lengths = []
-        for chrom in samfile.references:
-            chr_lengths.append(samfile.get_reference_length(chrom))
-        max_chr_length = np.max(chr_lengths)
+        # for chrom in samfile.references:
+        #     chr_lengths.append(samfile.get_reference_length(chrom))
+        # max_chr_length = np.max(chr_lengths)
         pysam.set_verbosity(save)
         samfile.close()
 
-        if max_chr_length > 536870912:
-            logging.info("A reference is longer than 2^29")
+        # if max_chr_length > 536870912:
+        #     logging.info("A reference is longer than 2^29")
         pysam.index(
             "-c",
             "-@",
@@ -500,9 +500,9 @@ def write_reassigned_bam(
 
 #     for reference in references:
 #         if ref_lengths is None:
-#             reference_length = int(samfile.get_reference_length(reference))
+#             reference_length = np.int64(samfile.get_reference_length(reference))
 #         else:
-#             reference_length = int(ref_lengths[reference])
+#             reference_length = np.int64(ref_lengths[reference])
 #         aln_data = []
 #         for aln in samfile.fetch(
 #             contig=reference, multiple_iterators=False, until_eof=True
@@ -608,9 +608,9 @@ def get_bam_data(
 
     for reference in references:
         reference_length = (
-            int(samfile.get_reference_length(reference))
+            np.int64(samfile.get_reference_length(reference))
             if ref_lengths is None
-            else int(ref_lengths[reference])
+            else np.int64(ref_lengths[reference])
         )
         aln_data = []
         for aln in samfile.fetch(
@@ -731,10 +731,21 @@ def reassign_reads(
     # Filter out references with less than min_read_count reads
     # add a progress bar
 
+    # references_m = {
+    #     chrom.contig: chrom.mapped
+    #     for chrom in index_statistics
+    #     if chrom.mapped >= min_read_count
+    # }
     references_m = {
         chrom.contig: chrom.mapped
-        for chrom in index_statistics
-        if chrom.mapped >= min_read_count
+        for chrom in tqdm.tqdm(
+            [chrom for chrom in index_statistics if chrom.mapped >= min_read_count],
+            desc="Filtering Chromosomes",
+            total=len(index_statistics),
+            unit="chrom",
+            leave=False,
+            ncols=80,
+        )
     }
     # get number alignments
     n_alns = sum(references_m.values())
@@ -862,8 +873,8 @@ def reassign_reads(
 
             # Create chunks of 1 billion rows each
             for chunk_idx in range(num_chunks):
-                start = int(chunk_idx * 1e9)
-                end = int(min((chunk_idx + 1) * 1e9, data[i][0].nrows))
+                start = np.int64(chunk_idx * 1e9)
+                end = np.int64(min((chunk_idx + 1) * 1e9, data[i][0].nrows))
                 chunks.append(data[i][0][start:end, :])
 
             # Substitute data[i] with the first chunk
@@ -944,7 +955,7 @@ def reassign_reads(
 
     # Preallocate the NumPy array
     mat = np.empty(
-        (total_rows, num_columns), dtype=np.float32
+        (total_rows, num_columns), dtype=np.float64
     )  # Adjust dtype as necessary
 
     current_index = 0
@@ -1032,18 +1043,18 @@ def reassign_reads(
     # Define the dtype for the structured array
     dtype = np.dtype(
         [
-            ("source", "int"),
-            ("subject", "int"),
-            ("var", "float"),
-            ("slen", "int"),
+            ("source", "int64"),
+            ("subject", "int64"),
+            ("var", "float64"),
+            ("slen", "int64"),
             (
                 "s_W",
                 "float",
             ),  # This and following fields are initialized to 0 or a default value
-            ("prob", "float"),
-            ("iter", "int"),
-            ("n_aln", "int"),
-            ("max_prob", "float"),
+            ("prob", "float64"),
+            ("iter", "int64"),
+            ("n_aln", "int64"),
+            ("max_prob", "float64"),
         ]
     )
 

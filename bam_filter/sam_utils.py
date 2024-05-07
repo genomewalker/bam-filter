@@ -150,15 +150,15 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
     samfile = pysam.AlignmentFile(
         output_files["bam_tmp_sorted"], "rb", threads=s_threads
     )
-    chr_lengths = []
-    for chrom in samfile.references:
-        chr_lengths.append(samfile.get_reference_length(chrom))
-    max_chr_length = np.max(chr_lengths)
+    # chr_lengths = []
+    # for chrom in samfile.references:
+    #     chr_lengths.append(samfile.get_reference_length(chrom))
+    # max_chr_length = np.max(chr_lengths)
     pysam.set_verbosity(save)
     samfile.close()
 
-    if max_chr_length > 536870912:
-        logging.info("::: ::: A reference is longer than 2^29")
+    # if max_chr_length > 536870912:
+    #     logging.info("::: ::: A reference is longer than 2^29")
     pysam.index(
         "-c",
         "-@",
@@ -382,7 +382,7 @@ def get_bam_stats(
 
             max_covered_bases = np.max(ranges)
             mean_covered_bases = np.mean(ranges)
-            bases_covered = int(len(cov_pos))
+            bases_covered = np.int64(len(cov_pos))
             # get SD from covered bases
             cov_sd = np.std(cov_pos, ddof=1)
             cov_var = np.var(cov_pos, ddof=1)
@@ -775,18 +775,15 @@ def check_bam_file(
 
     # Use a with statement to ensure proper closing of the samfile
     try:
-        if threads > 4:
-            s_threads = 4
-        else:
-            s_threads = threads
+        s_threads = min(threads, 4)
 
         with pysam.AlignmentFile(bam, "rb", threads=s_threads) as samfile:
             references = samfile.references
-
-            chr_lengths = []
-            for chrom in samfile.references:
-                chr_lengths.append(samfile.get_reference_length(chrom))
-            max_chr_length = np.max(chr_lengths)
+            log.info(f"Found {samfile.nreferences:,} reference sequences")
+            # log.info("Getting reference lengths...")
+            references = samfile.references
+            # chr_lengths = [samfile.get_reference_length(chrom) for chrom in references]
+            # max_chr_length = np.max(chr_lengths)
 
             pysam.set_verbosity(save)
             ref_lengths = None
@@ -804,31 +801,24 @@ def check_bam_file(
                         "The BAM file contains references not found in the reference lengths file"
                     )
                     sys.exit(1)
-                max_chr_length = np.max(ref_lengths["length"].tolist())
+                # max_chr_length = np.max(ref_lengths["length"].tolist())
 
             # Check if BAM files is not sorted by coordinates, sort it by coordinates
-            if not samfile.header["HD"]["SO"] == "coordinate":
+            if samfile.header["HD"]["SO"] != "coordinate":
                 log.info("BAM file is not sorted by coordinates, sorting it...")
                 sorted_bam = bam.replace(".bam", ".bf-sorted.bam")
-                if threads > 4:
-                    s_threads = 4
-                else:
-                    s_threads = threads
                 pysam.sort(
                     "-@", str(s_threads), "-m", str(sort_memory), "-o", sorted_bam, bam
                 )
                 bam = sorted_bam
                 pysam.index("-c", "-@", str(threads), bam)
-                if threads > 4:
-                    s_threads = 4
-                else:
-                    s_threads = threads
+
                 samfile = pysam.AlignmentFile(bam, "rb", threads=s_threads)
 
             if not samfile.has_index():
                 logging.info("BAM index not found. Indexing...")
-                if max_chr_length > 536870912:
-                    logging.info("A reference is longer than 2^29")
+                # if max_chr_length > 536870912:
+                #     logging.info("A reference is longer than 2^29")
                 pysam.index("-c", "-@", str(threads), bam)
 
             logging.info("::: BAM file looks good.")
@@ -960,7 +950,11 @@ def process_bam(
 
     # ify the number of chunks
     ref_chunks = sort_keys_by_approx_weight(
-        input_dict=references_m, scale=1, num_cores=threads, verbose=False
+        input_dict=references_m,
+        scale=1,
+        num_cores=threads,
+        verbose=False,
+        max_entries_per_chunk=25_000_000,
     )
     log.info(f"::: Created {len(ref_chunks):,} chunks")
     ref_chunks = random.sample(ref_chunks, len(ref_chunks))
@@ -1220,7 +1214,11 @@ def filter_reference_BAM(
             # batch_size = len(references) // num_cores + 1  # Ensure non-zero batch size
             log.info("::: Creating reference chunks with uniform read amounts...")
             ref_chunks = sort_keys_by_approx_weight(
-                input_dict=ref_dict_m, scale=1, num_cores=threads, verbose=False
+                input_dict=ref_dict_m,
+                scale=1,
+                num_cores=threads,
+                verbose=False,
+                max_entries_per_chunk=1_000_000,
             )
             num_cores = min(num_cores, len(ref_chunks))
             log.info(f"::: Using {num_cores} cores to write {len(ref_chunks)} chunk(s)")
@@ -1318,15 +1316,15 @@ def filter_reference_BAM(
                     samfile = pysam.AlignmentFile(
                         out_files["bam_filtered"], "rb", threads=s_threads
                     )
-                    chr_lengths = []
-                    for chrom in samfile.references:
-                        chr_lengths.append(samfile.get_reference_length(chrom))
-                    max_chr_length = np.max(chr_lengths)
+                    # chr_lengths = []
+                    # for chrom in samfile.references:
+                    #     chr_lengths.append(samfile.get_reference_length(chrom))
+                    # max_chr_length = np.max(chr_lengths)
                     pysam.set_verbosity(save)
                     samfile.close()
 
-                    if max_chr_length > 536870912:
-                        logging.info("A reference is longer than 2^29")
+                    # if max_chr_length > 536870912:
+                    #     logging.info("A reference is longer than 2^29")
                     pysam.index(
                         "-c",
                         "-@",
