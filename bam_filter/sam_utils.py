@@ -294,7 +294,7 @@ def get_bam_stats(
             starts = []
             ends = []
             strands = []
-            cov_np = np.zeros(bam_reference_length, dtype=np.int64)
+            cov_np = np.zeros(samfile.get_reference_length(reference), dtype=int)
 
             for aln in samfile.fetch(
                 contig=reference, multiple_iterators=False, until_eof=True
