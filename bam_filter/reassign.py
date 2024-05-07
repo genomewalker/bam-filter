@@ -14,9 +14,8 @@ from bam_filter.utils import (
     handle_warning,
     create_output_files,
 )
-from multiprocessing import Pool, Manager, cpu_count
+from multiprocessing import Pool, Manager
 from functools import partial
-import numpy.lib.recfunctions as rf
 import gc
 from collections import defaultdict
 import os
@@ -25,7 +24,6 @@ import math
 import warnings
 from bam_filter.sam_utils import check_bam_file
 import shutil
-import pandas as pd
 
 # import cProfile as prof
 # import pstats
@@ -414,7 +412,7 @@ def write_reassigned_bam(
         else:
             s_threads = threads
         samfile = pysam.AlignmentFile(out_bam, "rb", threads=s_threads)
-        chr_lengths = []
+        # chr_lengths = []
         # for chrom in samfile.references:
         #     chr_lengths.append(samfile.get_reference_length(chrom))
         # max_chr_length = np.max(chr_lengths)

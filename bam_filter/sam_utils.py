@@ -3,7 +3,7 @@ import numpy as np
 import os
 import sys
 import pandas as pd
-from multiprocessing import Pool, Manager, cpu_count
+from multiprocessing import Pool, cpu_count
 import functools
 from scipy import stats
 import tqdm
@@ -11,8 +11,6 @@ import logging
 import warnings
 from bam_filter.utils import (
     is_debug,
-    calc_chunksize,
-    initializer,
     create_empty_output_files,
     create_empty_bam,
     sort_keys_by_approx_weight,

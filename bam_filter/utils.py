@@ -17,7 +17,6 @@ import numpy as np
 from pathlib import Path
 import pysam
 import tempfile
-import heapq
 
 
 log = logging.getLogger("my_logger")
