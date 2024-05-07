@@ -216,26 +216,50 @@ def calc_gc_content(seq):
     return gc
 
 
+# def create_pyranges(reference, starts, ends, strands):
+#     """[summary]
+
+#     Args:
+#         reference ([type]): [description]
+#         starts ([type]): [description]
+#         ends ([type]): [description]
+#         strands ([type]): [description]
+#     """
+#     chromosomes = [reference] * len(starts)
+#     chromosomes = pd.Series(chromosomes).astype("category")
+#     starts = pd.Series(starts)
+#     ends = pd.Series(ends)
+#     strands = pd.Series(strands).astype("category")
+
+#     return pr.PyRanges(
+#         pd.DataFrame(
+#             {"Chromosome": chromosomes, "Start": starts, "End": ends, "Strand": strands}
+#         )
+#     )
+
+
 def create_pyranges(reference, starts, ends, strands):
-    """[summary]
+    """Create a PyRanges object from provided chromosome data.
 
     Args:
-        reference ([type]): [description]
-        starts ([type]): [description]
-        ends ([type]): [description]
-        strands ([type]): [description]
-    """
-    chromosomes = [reference] * len(starts)
-    chromosomes = pd.Series(chromosomes).astype("category")
-    starts = pd.Series(starts)
-    ends = pd.Series(ends)
-    strands = pd.Series(strands).astype("category")
+        reference (str): Reference chromosome name.
+        starts (list): Start positions of ranges.
+        ends (list): End positions of ranges.
+        strands (list): Strand orientations ('+' or '-').
 
-    return pr.PyRanges(
-        pd.DataFrame(
-            {"Chromosome": chromosomes, "Start": starts, "End": ends, "Strand": strands}
-        )
-    )
+    Returns:
+        PyRanges: A PyRanges object containing the genomic ranges.
+    """
+    # Directly create DataFrame with categories where appropriate
+    data = {
+        "Chromosome": pd.Categorical([reference] * len(starts), categories=[reference]),
+        "Start": starts,
+        "End": ends,
+        "Strand": pd.Categorical(strands, categories=["+", "-"]),
+    }
+    df = pd.DataFrame(data)
+
+    return pr.PyRanges(df)
 
 
 def get_bam_stats(
@@ -278,15 +302,14 @@ def get_bam_stats(
             read_aligned_length = []
             read_mapq = []
             read_aln_score = []
-            read_names = []
+            read_names = set()
             read_gc_content = []
             n_alns = 0
             if ref_lengths is None:
                 reference_length = bam_reference_lengths[reference]
-                bam_reference_length = reference_length
             else:
                 reference_length = np.int64(ref_lengths.loc[reference, "length"])
-                bam_reference_length = bam_reference_lengths[reference]
+            bam_reference_length = bam_reference_lengths[reference]
 
             log.debug(f"Processing reference {reference}")
             log.debug(f"Reference length: {reference_length:,}")
@@ -319,7 +342,7 @@ def get_bam_stats(
                     read_length.append(aln.infer_read_length())
                     read_aligned_length.append(aln.query_alignment_length)
                     read_mapq.append(aln.mapping_quality)
-                    read_names.append(aln.query_name)
+                    read_names.add(aln.query_name)
                     # check if strand is reverse
                     if aln.is_reverse:
                         strand = "-"
@@ -400,9 +423,7 @@ def get_bam_stats(
                 read_mapq = [np.nan if x == 255 else x for x in read_mapq]
 
                 tax_abund_aln = round((n_alns / reference_length) * scale)
-                tax_abund_read = round(
-                    (len(set(read_names)) / reference_length) * scale
-                )
+                tax_abund_read = round((len(read_names) / reference_length) * scale)
 
                 # Using the trimmed mean to estimate number of reads that map to the reference
                 # This is to avoid the issue of having a very high coverage region that
@@ -439,37 +460,37 @@ def get_bam_stats(
                 norm_entr = norm_entropy(counts)  # Normalized positional entropy
                 gini = gini_coeff(counts)  # Gini coefficient
                 norm_gini = norm_gini_coeff(counts)  # Normalized Gini coefficient
-
-                log.debug(f"Number of reads: {len(set(read_names)):,}")
-                log.debug(f"Number of alignments: {n_alns:,}")
-                log.debug(f"Bases covered: {bases_covered:,}")
-                log.debug(f"Mean coverage: {mean_coverage:.2f}")
-                log.debug(f"Mean coverage (truncated): {mean_coverage_trunc:.2f}")
-                log.debug(
-                    f"Reference length (truncated): {mean_coverage_trunc_len:.2f}"
-                )
-                log.debug(f"Mean coverage covered: {mean_coverage_covered:.2f}")
-                log.debug(f"Max covered bases: {max_covered_bases:,}")
-                log.debug(f"Mean covered bases: {mean_covered_bases:.2f}")
-                log.debug(f"SD: {cov_sd:.2f}")
-                log.debug(f"Breadth: {breadth:.2f}")
-                log.debug(f"Exp. breadth: {exp_breadth:.2f}")
-                log.debug(f"Breadth/exp. ratio: {breadth_exp_ratio:.2f}")
-                log.debug(f"Number of bins: {n_bins}")
-                log.debug(f"Site density: {site_density:.2f}")
-                log.debug(f"Entropy (H): {entr:.2f}")
-                log.debug(f"Normalized entropy (H*): {norm_entr:.2f}")
-                log.debug(f"Gini coefficient (G): {gini:.2f}")
-                log.debug(f"Normalized Gini coefficient (G*): {norm_gini:.2f}")
-                log.debug(f"Cov. evenness: {cov_evenness:.2f}")
-                log.debug(f"C_v: {c_v:.2f}")
-                log.debug(f"D_i: {d_i:.2f}")
-                log.debug(f"Mean mapq: {np.mean(read_mapq):.2f}")
-                log.debug(f"GC content: {gc_content:.2f}")
-                log.debug(f"Taxonomic abundance (alns): {tax_abund_aln:.2f}")
-                log.debug(f"Taxonomic abundance (reads): {tax_abund_read:.2f}")
-                log.debug(f"Taxonomic abundance (TAD): {tax_abund_tad:.2f}")
-                log.debug(f"Number of reads (TAD): {n_reads_tad:,}")
+                if is_debug():
+                    log.debug(f"Number of reads: {len(read_names):,}")
+                    log.debug(f"Number of alignments: {n_alns:,}")
+                    log.debug(f"Bases covered: {bases_covered:,}")
+                    log.debug(f"Mean coverage: {mean_coverage:.2f}")
+                    log.debug(f"Mean coverage (truncated): {mean_coverage_trunc:.2f}")
+                    log.debug(
+                        f"Reference length (truncated): {mean_coverage_trunc_len:.2f}"
+                    )
+                    log.debug(f"Mean coverage covered: {mean_coverage_covered:.2f}")
+                    log.debug(f"Max covered bases: {max_covered_bases:,}")
+                    log.debug(f"Mean covered bases: {mean_covered_bases:.2f}")
+                    log.debug(f"SD: {cov_sd:.2f}")
+                    log.debug(f"Breadth: {breadth:.2f}")
+                    log.debug(f"Exp. breadth: {exp_breadth:.2f}")
+                    log.debug(f"Breadth/exp. ratio: {breadth_exp_ratio:.2f}")
+                    log.debug(f"Number of bins: {n_bins}")
+                    log.debug(f"Site density: {site_density:.2f}")
+                    log.debug(f"Entropy (H): {entr:.2f}")
+                    log.debug(f"Normalized entropy (H*): {norm_entr:.2f}")
+                    log.debug(f"Gini coefficient (G): {gini:.2f}")
+                    log.debug(f"Normalized Gini coefficient (G*): {norm_gini:.2f}")
+                    log.debug(f"Cov. evenness: {cov_evenness:.2f}")
+                    log.debug(f"C_v: {c_v:.2f}")
+                    log.debug(f"D_i: {d_i:.2f}")
+                    log.debug(f"Mean mapq: {np.mean(read_mapq):.2f}")
+                    log.debug(f"GC content: {gc_content:.2f}")
+                    log.debug(f"Taxonomic abundance (alns): {tax_abund_aln:.2f}")
+                    log.debug(f"Taxonomic abundance (reads): {tax_abund_read:.2f}")
+                    log.debug(f"Taxonomic abundance (TAD): {tax_abund_tad:.2f}")
+                    log.debug(f"Number of reads (TAD): {n_reads_tad:,}")
                 if plot:
                     fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
                     # infer number of bins using Freedman-Diaconis rule
@@ -530,7 +551,7 @@ def get_bam_stats(
                     read_gc_content=read_gc_content,
                     read_aligned_length=read_aligned_length,
                     mapping_quality=read_mapq,
-                    read_names=set(read_names),
+                    read_names=read_names,
                     read_aln_score=read_aln_score,
                     tax_abund_aln=tax_abund_aln,
                     tax_abund_read=tax_abund_read,
