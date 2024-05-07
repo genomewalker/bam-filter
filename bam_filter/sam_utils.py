@@ -50,15 +50,11 @@ sys.setrecursionlimit(10**6)
 
 def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
     logging.info("::: Writing temporary filtered BAM file... (be patient)")
-    if threads > 4:
-        s_threads = 4
-    else:
-        s_threads = threads
+    s_threads = min(threads, 4)
     samfile = pysam.AlignmentFile(bam, "rb", threads=s_threads)
     header = samfile.header
 
-    if threads > 4:
-        threads = 4
+    threads = min(threads, 4)
 
     # convert the dictionary to an array
     refs_dict = dict(zip(samfile.references, samfile.lengths))
@@ -80,10 +76,7 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
 
     refs_idx = {sys.intern(str(x)): i for i, x in enumerate(ref_names)}
 
-    if threads > 4:
-        write_threads = 4
-    else:
-        write_threads = threads
+    write_threads = min(threads, 4)
 
     new_header = header.to_dict()
     new_header["SQ"] = [x for x in new_header["SQ"] if x["SN"] in list(ref_names)]
@@ -124,10 +117,8 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
     # # print profiling output
     # stats = pstats.Stats(prof).strip_dirs().sort_stats("tottime")
     # stats.print_stats(5)  # top 10 rows
-    if threads > 4:
-        s_threads = 4
-    else:
-        s_threads = threads
+    s_threads = min(threads, 4)
+
     logging.info("::: ::: Sorting BAM file...")
     pysam.sort(
         "-@",
@@ -141,10 +132,9 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
 
     logging.info("::: ::: BAM index not found. Indexing...")
     save = pysam.set_verbosity(0)
-    if threads > 4:
-        s_threads = 4
-    else:
-        s_threads = threads
+
+    s_threads = min(threads, 4)
+
     samfile = pysam.AlignmentFile(
         output_files["bam_tmp_sorted"], "rb", threads=s_threads
     )
@@ -272,274 +262,283 @@ def get_bam_stats(
     bam, references = params
     results = []
 
-    if threads > 4:
-        threads = 4
-    samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
-    read_hits = defaultdict(int)
-    for reference in references:
-        edit_distances = []
-        # edit_distances_md = []
-        ani_nm = []
-        # ani_md = []
-        read_length = []
-        read_aligned_length = []
-        read_mapq = []
-        read_aln_score = []
-        read_names = []
-        read_gc_content = []
-        n_alns = 0
-        if ref_lengths is None:
-            reference_length = int(samfile.get_reference_length(reference))
-            bam_reference_length = reference_length
-        else:
-            reference_length = int(ref_lengths.loc[reference, "length"])
-            bam_reference_length = int(samfile.get_reference_length(reference))
+    threads = min(threads, 4)
 
-        log.debug(f"Processing reference {reference}")
-        log.debug(f"Reference length: {reference_length:,}")
-        log.debug(f"BAM reference length: {bam_reference_length:,}")
-        starts = []
-        ends = []
-        strands = []
-        cov_np = np.zeros(samfile.get_reference_length(reference), dtype=int)
-
-        for aln in samfile.fetch(
-            contig=reference, multiple_iterators=False, until_eof=True
-        ):
-            ani_read = (1 - ((aln.get_tag("NM") / aln.infer_query_length()))) * 100
-            if ani_read >= min_read_ani:
-                n_alns += 1
-                read_hits[aln.query_name] += 1
-                if aln.has_tag("AS"):
-                    read_aln_score.append(aln.get_tag("AS"))
-                else:
-                    read_aln_score.append(np.nan)
-
-                if aln.has_tag("AS"):
-                    edit_distances.append(aln.get_tag("NM"))
-                    ani_nm.append(ani_read)
-                else:
-                    edit_distances.append(np.nan)
-                    ani_nm.append(np.nan)
-
-                read_gc_content.append(calc_gc_content(aln.query_sequence))
-                read_length.append(aln.infer_read_length())
-                read_aligned_length.append(aln.query_alignment_length)
-                read_mapq.append(aln.mapping_quality)
-                read_names.append(aln.query_name)
-                # check if strand is reverse
-                if aln.is_reverse:
-                    strand = "-"
-                else:
-                    strand = "+"
-                starts.append(aln.reference_start)
-                ends.append(aln.reference_end)
-                strands.append(strand)
-
-                cov_np[aln.reference_start : aln.reference_end] += 1
-        if n_alns > 0:
-            # get bases covered by reads pileup
-
-            # cov_pos_raw = [
-            #     (pileupcolumn.pos, pileupcolumn.n)
-            #     for pileupcolumn in samfile.pileup(
-            #         reference,
-            #         start=None,
-            #         stop=None,
-            #         region=None,
-            #         stepper="nofilter",
-            #         min_mapping_quality=0,
-            #         max_depth=100000000,
-            #     )
-            # ]
-            if trim_ends > len(cov_np) or trim_ends * 2 > len(cov_np):
-                log.warning(
-                    f"Trimming ends ({trim_ends}) is larger than reference length ({len(cov_np)}). Disabling trimming."
-                )
-                trim_ends = 0
-
-            if trim_ends > 0:
-                cov_np = cov_np[trim_ends:-trim_ends]
-
-            mean_coverage_trunc, mean_coverage_trunc_len = get_tad(
-                cov_np,
-                trim_min=trim_min,
-                trim_max=trim_max,
-            )
-
-            cov_pos = cov_np[cov_np > 0]
-            cov_positions = np.where(cov_np > 0)[0]
-            # convert datafrane to pyranges
-            ranges = create_pyranges(reference, starts, ends, strands)
-            if ranges.df.shape[0] == 0:
-                log.debug(f"No alignments found for {reference}")
-                results.append(None)
-                continue
-            ranges_raw = ranges.merge(strand=False)
-            ranges = ranges_raw.lengths().to_list()
-
-            max_covered_bases = np.max(ranges)
-            mean_covered_bases = np.mean(ranges)
-            bases_covered = np.int64(len(cov_pos))
-            # get SD from covered bases
-            cov_sd = np.std(cov_pos, ddof=1)
-            cov_var = np.var(cov_pos, ddof=1)
-            # get average coverage
-            mean_coverage = np.sum(cov_pos) / (reference_length - (2 * trim_ends))
-            mean_coverage_covered = np.sum(cov_pos) / bases_covered
-
-            breadth = bases_covered / (reference_length - (2 * trim_ends))
-            exp_breadth = 1 - np.exp(-mean_coverage)
-            breadth_exp_ratio = breadth / exp_breadth
-
-            if breadth_exp_ratio > 1:
-                breadth_exp_ratio = 1.0
-
-            # fill vector with zeros to match reference length
-            # cov_pos_zeroes = np.pad(
-            #     cov_pos, (0, reference_length - len(cov_pos)), "constant"
-            # )
-            cov_evenness = coverage_evenness(cov_np)
-            gc_content = (np.sum(read_gc_content) / np.sum(read_length)) * 100
-            c_v = cov_sd / mean_coverage
-            d_i = cov_var / mean_coverage
-
-            read_mapq = [np.nan if x == 255 else x for x in read_mapq]
-
-            tax_abund_aln = round((n_alns / reference_length) * scale)
-            tax_abund_read = round((len(set(read_names)) / reference_length) * scale)
-
-            # Using the trimmed mean to estimate number of reads that map to the reference
-            # This is to avoid the issue of having a very high coverage region that
-            # skews the mean coverage
-            # C = LN / G
-            # • C stands for coverage
-            # • G is the haploid genome length
-            # • L is the read length
-            # • N is the number of reads
-            #
-            if mean_coverage_trunc_len > 0 and mean_coverage_trunc > 0:
-                n_reads_tad = round(
-                    (reference_length * mean_coverage_trunc) / np.mean(read_length)
-                )
-                tax_abund_tad = round((n_reads_tad / mean_coverage_trunc_len) * scale)
+    with pysam.AlignmentFile(bam, "rb", threads=threads) as samfile:
+        bam_reference_lengths = {
+            reference: np.int64(samfile.get_reference_length(reference))
+            for reference in references
+        }
+        read_hits = defaultdict(int)
+        for reference in references:
+            edit_distances = []
+            # edit_distances_md = []
+            ani_nm = []
+            # ani_md = []
+            read_length = []
+            read_aligned_length = []
+            read_mapq = []
+            read_aln_score = []
+            read_names = []
+            read_gc_content = []
+            n_alns = 0
+            if ref_lengths is None:
+                reference_length = bam_reference_lengths[reference]
+                bam_reference_length = reference_length
             else:
-                n_reads_tad = 0
-                tax_abund_tad = 0
-            # Analyse site distribution
-            n_sites = len(cov_pos)
-            genome_length = bam_reference_length
-            # Site density (sites per thousand bp)
-            site_density = 1000 * n_sites / genome_length
+                reference_length = np.int64(ref_lengths.loc[reference, "length"])
+                bam_reference_length = bam_reference_lengths[reference]
 
-            counts, bins = np.histogram(
-                cov_positions, bins="auto", range=(0, genome_length)
-            )
+            log.debug(f"Processing reference {reference}")
+            log.debug(f"Reference length: {reference_length:,}")
+            log.debug(f"BAM reference length: {bam_reference_length:,}")
+            starts = []
+            ends = []
+            strands = []
+            cov_np = np.zeros(samfile.get_reference_length(reference), dtype=int)
 
-            n_bins = len(bins)
+            for aln in samfile.fetch(
+                contig=reference, multiple_iterators=False, until_eof=True
+            ):
+                ani_read = (1 - ((aln.get_tag("NM") / aln.infer_query_length()))) * 100
+                if ani_read >= min_read_ani:
+                    n_alns += 1
+                    read_hits[aln.query_name] += 1
+                    if aln.has_tag("AS"):
+                        read_aln_score.append(aln.get_tag("AS"))
+                    else:
+                        read_aln_score.append(np.nan)
 
-            entr = entropy(counts)  # Positional entropy
-            norm_entr = norm_entropy(counts)  # Normalized positional entropy
-            gini = gini_coeff(counts)  # Gini coefficient
-            norm_gini = norm_gini_coeff(counts)  # Normalized Gini coefficient
+                    if aln.has_tag("AS"):
+                        edit_distances.append(aln.get_tag("NM"))
+                        ani_nm.append(ani_read)
+                    else:
+                        edit_distances.append(np.nan)
+                        ani_nm.append(np.nan)
 
-            log.debug(f"Number of reads: {len(set(read_names)):,}")
-            log.debug(f"Number of alignments: {n_alns:,}")
-            log.debug(f"Bases covered: {bases_covered:,}")
-            log.debug(f"Mean coverage: {mean_coverage:.2f}")
-            log.debug(f"Mean coverage (truncated): {mean_coverage_trunc:.2f}")
-            log.debug(f"Reference length (truncated): {mean_coverage_trunc_len:.2f}")
-            log.debug(f"Mean coverage covered: {mean_coverage_covered:.2f}")
-            log.debug(f"Max covered bases: {max_covered_bases:,}")
-            log.debug(f"Mean covered bases: {mean_covered_bases:.2f}")
-            log.debug(f"SD: {cov_sd:.2f}")
-            log.debug(f"Breadth: {breadth:.2f}")
-            log.debug(f"Exp. breadth: {exp_breadth:.2f}")
-            log.debug(f"Breadth/exp. ratio: {breadth_exp_ratio:.2f}")
-            log.debug(f"Number of bins: {n_bins}")
-            log.debug(f"Site density: {site_density:.2f}")
-            log.debug(f"Entropy (H): {entr:.2f}")
-            log.debug(f"Normalized entropy (H*): {norm_entr:.2f}")
-            log.debug(f"Gini coefficient (G): {gini:.2f}")
-            log.debug(f"Normalized Gini coefficient (G*): {norm_gini:.2f}")
-            log.debug(f"Cov. evenness: {cov_evenness:.2f}")
-            log.debug(f"C_v: {c_v:.2f}")
-            log.debug(f"D_i: {d_i:.2f}")
-            log.debug(f"Mean mapq: {np.mean(read_mapq):.2f}")
-            log.debug(f"GC content: {gc_content:.2f}")
-            log.debug(f"Taxonomic abundance (alns): {tax_abund_aln:.2f}")
-            log.debug(f"Taxonomic abundance (reads): {tax_abund_read:.2f}")
-            log.debug(f"Taxonomic abundance (TAD): {tax_abund_tad:.2f}")
-            log.debug(f"Number of reads (TAD): {n_reads_tad:,}")
-            if plot:
-                fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
-                # infer number of bins using Freedman-Diaconis rule
-                positions_cov_zeros = pd.DataFrame(
-                    {"pos": range(1, bam_reference_length + 1)}
-                )
-                positions_cov = pd.DataFrame({"pos": cov_positions, "cov": cov_pos})
-                positions_cov = positions_cov_zeros.merge(
-                    positions_cov, on="pos", how="left"
-                )
-                positions_cov["cov"] = positions_cov["cov"].fillna(0)
-                positions_cov["cov"] = positions_cov["cov"].astype(int)
-                positions_cov["cov_binary"] = positions_cov["cov"].apply(
-                    lambda x: 1 if x > 0 else 0
-                )
-                plt.plot(
-                    positions_cov["pos"],
-                    positions_cov["cov"],
-                    color="c",
-                    ms=0.5,
-                )
-                plt.suptitle(f"{reference}")
-                plt.title(
-                    f"cov:{mean_coverage:.4f} b/e:{breadth_exp_ratio:.2f} cov_e:{cov_evenness:.2f} entropy:{norm_entr:.2f} gini:{norm_gini:.2f}"
-                )
-                fig.savefig(f"{plots_dir}/{reference}_coverage.png", dpi=300)
-                plt.close(fig)
+                    read_gc_content.append(calc_gc_content(aln.query_sequence))
+                    read_length.append(aln.infer_read_length())
+                    read_aligned_length.append(aln.query_alignment_length)
+                    read_mapq.append(aln.mapping_quality)
+                    read_names.append(aln.query_name)
+                    # check if strand is reverse
+                    if aln.is_reverse:
+                        strand = "-"
+                    else:
+                        strand = "+"
+                    starts.append(aln.reference_start)
+                    ends.append(aln.reference_end)
+                    strands.append(strand)
 
-            data = BamAlignment(
-                reference=reference,
-                n_alns=n_alns,
-                reference_length=reference_length,
-                bam_reference_length=bam_reference_length,
-                mean_coverage=mean_coverage,
-                mean_coverage_trunc=mean_coverage_trunc,
-                mean_coverage_trunc_len=mean_coverage_trunc_len,
-                mean_coverage_covered=mean_coverage_covered,
-                bases_covered=bases_covered,
-                max_covered_bases=max_covered_bases,
-                mean_covered_bases=mean_covered_bases,
-                cov_evenness=cov_evenness,
-                breadth=breadth,
-                exp_breadth=exp_breadth,
-                breadth_exp_ratio=breadth_exp_ratio,
-                n_bins=n_bins,
-                site_density=site_density,
-                entropy=entr,
-                norm_entropy=norm_entr,
-                gini=gini,
-                norm_gini=norm_gini,
-                c_v=c_v,
-                d_i=d_i,
-                edit_distances=edit_distances,
-                # edit_distances_md=edit_distances_md,
-                ani_nm=ani_nm,
-                # ani_md=ani_md,
-                read_length=read_length,
-                read_gc_content=read_gc_content,
-                read_aligned_length=read_aligned_length,
-                mapping_quality=read_mapq,
-                read_names=set(read_names),
-                read_aln_score=read_aln_score,
-                tax_abund_aln=tax_abund_aln,
-                tax_abund_read=tax_abund_read,
-                tax_abund_tad=tax_abund_tad,
-                n_reads_tad=n_reads_tad,
-            )
-            results.append(data)
-    samfile.close()
+                    cov_np[aln.reference_start : aln.reference_end] += 1
+            if n_alns > 0:
+                # get bases covered by reads pileup
+
+                # cov_pos_raw = [
+                #     (pileupcolumn.pos, pileupcolumn.n)
+                #     for pileupcolumn in samfile.pileup(
+                #         reference,
+                #         start=None,
+                #         stop=None,
+                #         region=None,
+                #         stepper="nofilter",
+                #         min_mapping_quality=0,
+                #         max_depth=100000000,
+                #     )
+                # ]
+                if trim_ends > len(cov_np) or trim_ends * 2 > len(cov_np):
+                    log.warning(
+                        f"Trimming ends ({trim_ends}) is larger than reference length ({len(cov_np)}). Disabling trimming."
+                    )
+                    trim_ends = 0
+
+                if trim_ends > 0:
+                    cov_np = cov_np[trim_ends:-trim_ends]
+
+                mean_coverage_trunc, mean_coverage_trunc_len = get_tad(
+                    cov_np,
+                    trim_min=trim_min,
+                    trim_max=trim_max,
+                )
+
+                cov_pos = cov_np[cov_np > 0]
+                cov_positions = np.where(cov_np > 0)[0]
+                # convert datafrane to pyranges
+                ranges = create_pyranges(reference, starts, ends, strands)
+                if ranges.df.shape[0] == 0:
+                    log.debug(f"No alignments found for {reference}")
+                    results.append(None)
+                    continue
+                ranges_raw = ranges.merge(strand=False)
+                ranges = ranges_raw.lengths().to_list()
+
+                max_covered_bases = np.max(ranges)
+                mean_covered_bases = np.mean(ranges)
+                bases_covered = np.int64(len(cov_pos))
+                # get SD from covered bases
+                cov_sd = np.std(cov_pos, ddof=1)
+                cov_var = np.var(cov_pos, ddof=1)
+                # get average coverage
+                mean_coverage = np.sum(cov_pos) / (reference_length - (2 * trim_ends))
+                mean_coverage_covered = np.sum(cov_pos) / bases_covered
+
+                breadth = bases_covered / (reference_length - (2 * trim_ends))
+                exp_breadth = 1 - np.exp(-mean_coverage)
+                breadth_exp_ratio = breadth / exp_breadth
+
+                if breadth_exp_ratio > 1:
+                    breadth_exp_ratio = 1.0
+
+                # fill vector with zeros to match reference length
+                # cov_pos_zeroes = np.pad(
+                #     cov_pos, (0, reference_length - len(cov_pos)), "constant"
+                # )
+                cov_evenness = coverage_evenness(cov_np)
+                gc_content = (np.sum(read_gc_content) / np.sum(read_length)) * 100
+                c_v = cov_sd / mean_coverage
+                d_i = cov_var / mean_coverage
+
+                read_mapq = [np.nan if x == 255 else x for x in read_mapq]
+
+                tax_abund_aln = round((n_alns / reference_length) * scale)
+                tax_abund_read = round(
+                    (len(set(read_names)) / reference_length) * scale
+                )
+
+                # Using the trimmed mean to estimate number of reads that map to the reference
+                # This is to avoid the issue of having a very high coverage region that
+                # skews the mean coverage
+                # C = LN / G
+                # • C stands for coverage
+                # • G is the haploid genome length
+                # • L is the read length
+                # • N is the number of reads
+                #
+                if mean_coverage_trunc_len > 0 and mean_coverage_trunc > 0:
+                    n_reads_tad = round(
+                        (reference_length * mean_coverage_trunc) / np.mean(read_length)
+                    )
+                    tax_abund_tad = round(
+                        (n_reads_tad / mean_coverage_trunc_len) * scale
+                    )
+                else:
+                    n_reads_tad = 0
+                    tax_abund_tad = 0
+                # Analyse site distribution
+                n_sites = len(cov_pos)
+                genome_length = bam_reference_length
+                # Site density (sites per thousand bp)
+                site_density = 1000 * n_sites / genome_length
+
+                counts, bins = np.histogram(
+                    cov_positions, bins="auto", range=(0, genome_length)
+                )
+
+                n_bins = len(bins)
+
+                entr = entropy(counts)  # Positional entropy
+                norm_entr = norm_entropy(counts)  # Normalized positional entropy
+                gini = gini_coeff(counts)  # Gini coefficient
+                norm_gini = norm_gini_coeff(counts)  # Normalized Gini coefficient
+
+                log.debug(f"Number of reads: {len(set(read_names)):,}")
+                log.debug(f"Number of alignments: {n_alns:,}")
+                log.debug(f"Bases covered: {bases_covered:,}")
+                log.debug(f"Mean coverage: {mean_coverage:.2f}")
+                log.debug(f"Mean coverage (truncated): {mean_coverage_trunc:.2f}")
+                log.debug(
+                    f"Reference length (truncated): {mean_coverage_trunc_len:.2f}"
+                )
+                log.debug(f"Mean coverage covered: {mean_coverage_covered:.2f}")
+                log.debug(f"Max covered bases: {max_covered_bases:,}")
+                log.debug(f"Mean covered bases: {mean_covered_bases:.2f}")
+                log.debug(f"SD: {cov_sd:.2f}")
+                log.debug(f"Breadth: {breadth:.2f}")
+                log.debug(f"Exp. breadth: {exp_breadth:.2f}")
+                log.debug(f"Breadth/exp. ratio: {breadth_exp_ratio:.2f}")
+                log.debug(f"Number of bins: {n_bins}")
+                log.debug(f"Site density: {site_density:.2f}")
+                log.debug(f"Entropy (H): {entr:.2f}")
+                log.debug(f"Normalized entropy (H*): {norm_entr:.2f}")
+                log.debug(f"Gini coefficient (G): {gini:.2f}")
+                log.debug(f"Normalized Gini coefficient (G*): {norm_gini:.2f}")
+                log.debug(f"Cov. evenness: {cov_evenness:.2f}")
+                log.debug(f"C_v: {c_v:.2f}")
+                log.debug(f"D_i: {d_i:.2f}")
+                log.debug(f"Mean mapq: {np.mean(read_mapq):.2f}")
+                log.debug(f"GC content: {gc_content:.2f}")
+                log.debug(f"Taxonomic abundance (alns): {tax_abund_aln:.2f}")
+                log.debug(f"Taxonomic abundance (reads): {tax_abund_read:.2f}")
+                log.debug(f"Taxonomic abundance (TAD): {tax_abund_tad:.2f}")
+                log.debug(f"Number of reads (TAD): {n_reads_tad:,}")
+                if plot:
+                    fig, ax = plt.subplots(nrows=1, ncols=1)  # create figure & 1 axis
+                    # infer number of bins using Freedman-Diaconis rule
+                    positions_cov_zeros = pd.DataFrame(
+                        {"pos": range(1, bam_reference_length + 1)}
+                    )
+                    positions_cov = pd.DataFrame({"pos": cov_positions, "cov": cov_pos})
+                    positions_cov = positions_cov_zeros.merge(
+                        positions_cov, on="pos", how="left"
+                    )
+                    positions_cov["cov"] = positions_cov["cov"].fillna(0)
+                    positions_cov["cov"] = positions_cov["cov"].astype(int)
+                    positions_cov["cov_binary"] = positions_cov["cov"].apply(
+                        lambda x: 1 if x > 0 else 0
+                    )
+                    plt.plot(
+                        positions_cov["pos"],
+                        positions_cov["cov"],
+                        color="c",
+                        ms=0.5,
+                    )
+                    plt.suptitle(f"{reference}")
+                    plt.title(
+                        f"cov:{mean_coverage:.4f} b/e:{breadth_exp_ratio:.2f} cov_e:{cov_evenness:.2f} entropy:{norm_entr:.2f} gini:{norm_gini:.2f}"
+                    )
+                    fig.savefig(f"{plots_dir}/{reference}_coverage.png", dpi=300)
+                    plt.close(fig)
+
+                data = BamAlignment(
+                    reference=reference,
+                    n_alns=n_alns,
+                    reference_length=reference_length,
+                    bam_reference_length=bam_reference_length,
+                    mean_coverage=mean_coverage,
+                    mean_coverage_trunc=mean_coverage_trunc,
+                    mean_coverage_trunc_len=mean_coverage_trunc_len,
+                    mean_coverage_covered=mean_coverage_covered,
+                    bases_covered=bases_covered,
+                    max_covered_bases=max_covered_bases,
+                    mean_covered_bases=mean_covered_bases,
+                    cov_evenness=cov_evenness,
+                    breadth=breadth,
+                    exp_breadth=exp_breadth,
+                    breadth_exp_ratio=breadth_exp_ratio,
+                    n_bins=n_bins,
+                    site_density=site_density,
+                    entropy=entr,
+                    norm_entropy=norm_entr,
+                    gini=gini,
+                    norm_gini=norm_gini,
+                    c_v=c_v,
+                    d_i=d_i,
+                    edit_distances=edit_distances,
+                    # edit_distances_md=edit_distances_md,
+                    ani_nm=ani_nm,
+                    # ani_md=ani_md,
+                    read_length=read_length,
+                    read_gc_content=read_gc_content,
+                    read_aligned_length=read_aligned_length,
+                    mapping_quality=read_mapq,
+                    read_names=set(read_names),
+                    read_aln_score=read_aln_score,
+                    tax_abund_aln=tax_abund_aln,
+                    tax_abund_read=tax_abund_read,
+                    tax_abund_tad=tax_abund_tad,
+                    n_reads_tad=n_reads_tad,
+                )
+                results.append(data)
     # prof.disable()
     # # print profiling output
     # stats = pstats.Stats(prof).strip_dirs().sort_stats("tottime")
@@ -768,7 +767,7 @@ def check_bam_file(
     reference_lengths=None,
     sort_memory="1G",
 ):
-    logging.info("Loading BAM file")
+    logging.info("Checking BAM file status")
     save = pysam.set_verbosity(0)
 
     # Use a with statement to ensure proper closing of the samfile
@@ -777,12 +776,8 @@ def check_bam_file(
 
         with pysam.AlignmentFile(bam, "rb", threads=s_threads) as samfile:
             references = samfile.references
-            log.info(f"Found {samfile.nreferences:,} reference sequences")
-            # log.info("Getting reference lengths...")
+            log.info(f"::: Found {samfile.nreferences:,} reference sequences")
             references = samfile.references
-            # chr_lengths = [samfile.get_reference_length(chrom) for chrom in references]
-            # max_chr_length = np.max(chr_lengths)
-
             pysam.set_verbosity(save)
             ref_lengths = None
 
@@ -796,14 +791,14 @@ def check_bam_file(
                 # check if the dataframe contains all the References in the BAM file
                 if not set(references).issubset(set(ref_lengths.index)):
                     logging.error(
-                        "The BAM file contains references not found in the reference lengths file"
+                        "::: The BAM file contains references not found in the reference lengths file"
                     )
                     sys.exit(1)
                 # max_chr_length = np.max(ref_lengths["length"].tolist())
 
             # Check if BAM files is not sorted by coordinates, sort it by coordinates
             if samfile.header["HD"]["SO"] != "coordinate":
-                log.info("BAM file is not sorted by coordinates, sorting it...")
+                log.info("::: BAM file is not sorted by coordinates, sorting it...")
                 sorted_bam = bam.replace(".bam", ".bf-sorted.bam")
                 pysam.sort(
                     "-@", str(s_threads), "-m", str(sort_memory), "-o", sorted_bam, bam
@@ -814,7 +809,7 @@ def check_bam_file(
                 samfile = pysam.AlignmentFile(bam, "rb", threads=s_threads)
 
             if not samfile.has_index():
-                logging.info("BAM index not found. Indexing...")
+                logging.info("::: BAM index not found. Indexing...")
                 # if max_chr_length > 536870912:
                 #     logging.info("A reference is longer than 2^29")
                 pysam.index("-c", "-@", str(threads), bam)
@@ -855,94 +850,83 @@ def process_bam(
     """
     logging.info("Loading BAM file")
     save = pysam.set_verbosity(0)
-    if threads > 4:
-        s_threads = 4
-    else:
-        s_threads = threads
-    samfile = pysam.AlignmentFile(bam, "rb", threads=s_threads)
 
-    references = samfile.references
+    s_threads = min(threads, 4)
 
-    # chr_lengths = []
-    # for chrom in samfile.references:
-    #     chr_lengths.append(samfile.get_reference_length(chrom))
-    pysam.set_verbosity(save)
+    with pysam.AlignmentFile(bam, "rb", threads=s_threads) as samfile:
 
-    ref_lengths = None
-    if reference_lengths is not None:
-        ref_lengths = pd.read_csv(
-            reference_lengths, sep="\t", index_col=0, names=["reference", "length"]
-        )
-        # check if the dataframe contains all the References in the BAM file
-        if not set(references).issubset(set(ref_lengths.index)):
-            logging.error(
-                "The BAM file contains references not found in the reference lengths file"
+        references = samfile.references
+
+        # chr_lengths = []
+        # for chrom in samfile.references:
+        #     chr_lengths.append(samfile.get_reference_length(chrom))
+        pysam.set_verbosity(save)
+
+        ref_lengths = None
+        if reference_lengths is not None:
+            ref_lengths = pd.read_csv(
+                reference_lengths, sep="\t", index_col=0, names=["reference", "length"]
             )
-            sys.exit(1)
+            # check if the dataframe contains all the References in the BAM file
+            if not set(references).issubset(set(ref_lengths.index)):
+                logging.error(
+                    "The BAM file contains references not found in the reference lengths file"
+                )
+                sys.exit(1)
 
-    total_refs = samfile.nreferences
-    logging.info(f"Found {total_refs:,} reference sequences")
-    # logging.info(f"Found {samfile.mapped:,} alignments")
-    # Remove references without mapped reads
-    # alns_in_ref = defaultdict(int)
-    # for aln in tqdm.tqdm(
-    #     samfile.fetch(until_eof=True),
-    #     total=samfile.mapped,
-    #     leave=False,
-    #     ncols=80,
-    #     desc=f"Alignments processed",
-    # ):
-    #     alns_in_ref[aln.reference_name] += 1
-    if plot:
-        # Check if image folder exists
-        if not os.path.exists(plots_dir):
-            os.makedirs(plots_dir)
+        total_refs = samfile.nreferences
+        logging.info(f"Found {total_refs:,} reference sequences")
 
-        # references = [
-        #     chrom.contig
-        #     for chrom in samfile.get_index_statistics()
-        #     if chrom.mapped >= min_read_count
-        # ]
+        if plot:
+            # Check if image folder exists
+            if not os.path.exists(plots_dir):
+                os.makedirs(plots_dir)
 
-        logging.info(f"Removing references with less than {min_read_count} reads...")
+            logging.info(
+                f"Removing references with less than {min_read_count} reads..."
+            )
 
-        references_m = {
-            chrom.contig: chrom.mapped
-            for chrom in samfile.get_index_statistics()
-            if chrom.mapped >= min_read_count
-        }
-    else:
-        logging.info(f"Removing references with less than {min_read_count} reads...")
-
-        references_m = {
-            chrom.contig: chrom.mapped
-            for chrom in samfile.get_index_statistics()
-            if chrom.mapped >= min_read_count
-        }
-        references = list(references_m.keys())
-
-    if len(references) == 0:
-        logging.warning("No reference sequences with alignments found in the BAM file")
-        create_empty_output_files(output_files)
-        sys.exit(0)
-
-    logging.info(f"Keeping {len(references):,} references")
-
-    if low_memory:
-        logging.info("Low memory mode enabled, writing filtered BAM file to disk")
-        samfile.close()
-        bam = write_bam(
-            bam=bam,
-            references=references,
-            output_files=output_files,
-            sort_memory=sort_memory,
-            threads=threads,
-        )
-        if threads > 4:
-            s_threads = 4
+            references_m = {
+                chrom.contig: chrom.mapped
+                for chrom in samfile.get_index_statistics()
+                if chrom.mapped >= min_read_count
+            }
         else:
-            s_threads = threads
-        samfile = pysam.AlignmentFile(bam, "rb", threads=s_threads)
+            logging.info(
+                f"Removing references with less than {min_read_count} reads..."
+            )
+
+            index_statistics = samfile.get_index_statistics()
+
+            references_m = {
+                chrom.contig: chrom.mapped
+                for chrom in index_statistics
+                if chrom.mapped >= min_read_count
+            }
+            references = list(references_m.keys())
+
+        if len(references) == 0:
+            logging.warning(
+                "No reference sequences with alignments found in the BAM file"
+            )
+            create_empty_output_files(output_files)
+            sys.exit(0)
+
+        logging.info(f"Keeping {len(references):,} references")
+
+        if low_memory:
+            logging.info("Low memory mode enabled, writing filtered BAM file to disk")
+            samfile.close()
+            bam = write_bam(
+                bam=bam,
+                references=references,
+                output_files=output_files,
+                sort_memory=sort_memory,
+                threads=threads,
+            )
+            s_threads = min(threads, 4)
+
+            # samfile = pysam.AlignmentFile(bam, "rb", threads=s_threads)
 
     log.info("::: Creating reference chunks with uniform read amounts...")
 
@@ -952,10 +936,10 @@ def process_bam(
         scale=1,
         num_cores=threads,
         verbose=False,
-        max_entries_per_chunk=25_000_000,
+        max_entries_per_chunk=100_000,
     )
     log.info(f"::: Created {len(ref_chunks):,} chunks")
-    ref_chunks = random.sample(ref_chunks, len(ref_chunks))
+    # ref_chunks = random.sample(ref_chunks, len(ref_chunks))
     params = zip([bam] * len(ref_chunks), ref_chunks)
     try:
         logging.info(f"Processing {len(ref_chunks):,} chunks")

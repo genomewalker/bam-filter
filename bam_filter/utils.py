@@ -199,43 +199,55 @@ def sort_keys_by_approx_weight(
     num_cores=1,
     refinement_steps=10,
     max_entries_per_chunk=None,
+    mode="weight",
+    num_entries=1000,
     verbose=False,
 ):
     if scale == 0:
         raise ValueError("Scale cannot be zero.")
-
-    target_weight = scale * max(input_dict.values())
-
-    total_weight = sum(input_dict.values())
-    target_weight = max(scale * max(input_dict.values()), max_entries_per_chunk or 0)
-    num_chunks = max(num_cores, (total_weight // target_weight) + 1)
-
-    sorted_keys = sorted(input_dict, key=input_dict.get, reverse=True)
-    chunks = [[] for _ in range(num_chunks)]
-    chunk_weights = [0] * num_chunks
-
-    for key in tqdm.tqdm(
-        sorted_keys,
-        desc="Distributing keys",
-        unit_scale=True,
-        unit_divisor=1000,
-        leave=False,
-    ):
-        min_chunk_idx = chunk_weights.index(min(chunk_weights))
-        chunks[min_chunk_idx].append(key)
-        chunk_weights[min_chunk_idx] += input_dict[key]
+    if mode == "weight":
+        target_weight = scale * max(input_dict.values())
+        total_weight = sum(input_dict.values())
+        target_weight = max(
+            scale * max(input_dict.values()), max_entries_per_chunk or 0
+        )
+        num_chunks = max(num_cores, (total_weight // target_weight) + 1)
+    elif mode == "entries":
+        # split that it has at least 1000 entries per chunk
+        total_entries = len(input_dict)
+        entries = list(input_dict.keys())
+        num_chunks = max(num_cores, (total_entries // num_entries) + 1)
+        num_chunks = 100
+        # split entries into num_chunks
+        chunks = [entries[i::num_chunks] for i in range(num_chunks)]
 
     # Refine chunks
-    for _ in range(refinement_steps):
-        initial_balance = max(len(chunk) for chunk in chunks) - min(
-            len(chunk) for chunk in chunks
-        )
-        chunks = refine_chunks(chunks, input_dict, chunk_weights, target_weight)
-        current_balance = max(len(chunk) for chunk in chunks) - min(
-            len(chunk) for chunk in chunks
-        )
-        if current_balance >= initial_balance:
-            break  # No improvement, exit the loop
+    if mode == "weight":
+        sorted_keys = sorted(input_dict, key=input_dict.get, reverse=True)
+        chunks = [[] for _ in range(num_chunks)]
+        chunk_weights = [0] * num_chunks
+
+        for key in tqdm.tqdm(
+            sorted_keys,
+            desc="Distributing keys",
+            unit_scale=True,
+            unit_divisor=500,
+            leave=False,
+        ):
+            min_chunk_idx = chunk_weights.index(min(chunk_weights))
+            chunks[min_chunk_idx].append(key)
+            chunk_weights[min_chunk_idx] += input_dict[key]
+
+        for _ in range(refinement_steps):
+            initial_balance = max(len(chunk) for chunk in chunks) - min(
+                len(chunk) for chunk in chunks
+            )
+            chunks = refine_chunks(chunks, input_dict, chunk_weights, target_weight)
+            current_balance = max(len(chunk) for chunk in chunks) - min(
+                len(chunk) for chunk in chunks
+            )
+            if current_balance >= initial_balance:
+                break  # No improvement, exit the loop
 
     if verbose:
         print_chunk_stats(chunks, input_dict)

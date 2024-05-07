@@ -240,10 +240,7 @@ def write_to_file(alns, out_bam_file, header=None):
 
 def process_references_batch(references, entries, bam, refs_idx, threads=4):
     alns = []
-    if threads > 4:
-        s_threads = 4
-    else:
-        s_threads = threads
+    s_threads = min(4, threads)
     with pysam.AlignmentFile(bam, "rb", threads=s_threads) as samfile:
         for reference in references:
             r_ids = entries[reference]
@@ -378,10 +375,7 @@ def write_reassigned_bam(
     # stats.print_stats(5)  # top 10 rows
     if not disable_sort:
         log.info("::: ::: Sorting BAM file...")
-        if threads > 4:
-            s_threads = 4
-        else:
-            s_threads = threads
+        s_threads = min(4, threads)
         if sort_by_name:
             log.info("::: ::: Sorting by name...")
             pysam.sort(
@@ -480,9 +474,14 @@ def get_bam_data(
         refs = set()
         empty_df = 0
 
+        bam_reference_length = {
+            reference: np.int64(samfile.get_reference_length(x))
+            for reference in references
+        }
+
         for reference in references:
             reference_length = (
-                np.int64(samfile.get_reference_length(reference))
+                bam_reference_length[reference]
                 if ref_lengths is None
                 else np.int64(ref_lengths[reference])
             )
@@ -559,7 +558,6 @@ def reassign_reads(
     reassign_iters=25,
     reassign_scale=0.9,
     sort_memory="4G",
-    sort_by_name=False,
     disable_sort=False,
 ):
     dt.options.progress.enabled = True
@@ -574,10 +572,13 @@ def reassign_reads(
     s_threads = min(4, threads)
 
     with pysam.AlignmentFile(bam, "rb", threads=s_threads) as samfile:
-
         references = samfile.references
         pysam.set_verbosity(save)
 
+        total_refs = samfile.nreferences
+        log.info(f"::: Found {total_refs:,} reference sequences")
+
+        log.info(f"::: Removing references with less than {min_read_count} reads...")
         if reference_lengths is not None:
             ref_len_dt = dt.fread(reference_lengths)
             ref_len_dt.names = ["subjectId", "slen"]
@@ -597,20 +598,9 @@ def reassign_reads(
         else:
             ref_len_dict = None
 
-        total_refs = samfile.nreferences
-        log.info(f"::: Found {total_refs:,} reference sequences")
         # logging.info(f"Found {samfile.mapped:,} alignments")
-        log.info(f"::: Removing references with less than {min_read_count} reads...")
         index_statistics = samfile.get_index_statistics()
 
-    # Filter out references with less than min_read_count reads
-    # add a progress bar
-
-    # references_m = {
-    #     chrom.contig: chrom.mapped
-    #     for chrom in index_statistics
-    #     if chrom.mapped >= min_read_count
-    # }
     references_m = {
         chrom.contig: chrom.mapped
         for chrom in tqdm.tqdm(
@@ -1078,7 +1068,6 @@ def reassign(args):
         reassign_iters=args.reassign_iters,
         reassign_scale=args.reassign_scale,
         sort_memory=args.sort_memory,
-        sort_by_name=args.sort_by_name,
         out_files=out_files,
         match_reward=args.match_reward,
         mismatch_penalty=args.mismatch_penalty,
