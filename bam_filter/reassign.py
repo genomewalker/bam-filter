@@ -406,33 +406,14 @@ def write_reassigned_bam(
             )
 
         logging.info("BAM index not found. Indexing...")
-        save = pysam.set_verbosity(0)
-        if threads > 4:
-            s_threads = 4
-        else:
-            s_threads = threads
-        samfile = pysam.AlignmentFile(out_bam, "rb", threads=s_threads)
-        # chr_lengths = []
-        # for chrom in samfile.references:
-        #     chr_lengths.append(samfile.get_reference_length(chrom))
-        # max_chr_length = np.max(chr_lengths)
-        pysam.set_verbosity(save)
-        samfile.close()
 
-        # if max_chr_length > 536870912:
-        #     logging.info("A reference is longer than 2^29")
+        s_threads = min(4, threads)
         pysam.index(
             "-c",
             "-@",
             str(threads),
             out_bam,
         )
-        # else:
-        #     pysam.index(
-        #         "-@",
-        #         str(threads),
-        #         out_bam,
-        #     )
 
         os.remove(out_files["bam_reassigned_tmp"])
     else:
@@ -440,113 +421,8 @@ def write_reassigned_bam(
         shutil.move(out_files["bam_reassigned_tmp"], out_bam)
 
 
-# def calculate_alignment_score(identity, read_length):
-#     return (identity / math.log(read_length)) * math.sqrt(read_length)
-
 # Values from:
 # https://www.ncbi.nlm.nih.gov/IEB/ToolBox/CPP_DOC/lxr/source/src/algo/blast/core/blast_stat.c
-# def calculate_alignment_score(
-#         num_matches,
-#         num_mismatches,
-#         num_gaps,
-#         gap_extensions,
-#         match_reward,
-#         mismatch_penalty,
-#         gap_open_penalty,
-#         gap_extension_penalty,
-#         lambda_value,
-#         K_value
-#     ):
-#     # Calculate the raw alignment score
-#     S = (num_matches * match_reward) - (num_mismatches * mismatch_penalty) - (num_gaps * gap_open_penalty) - (gap_extensions * gap_extension_penalty)
-
-#     # Calculate the approximate bit score
-#     bit_score = (lambda_value * S - math.log(K_value)) / math.log(2)
-
-#     return bit_score
-
-# def get_bam_data(
-#         parms,
-#         ref_lengths=None,
-#         percid=90,
-#         min_read_length=30,
-#         threads=1,
-#         match_reward=1,
-#         mismatch_penalty=-1,
-#         gap_open_penalty=1,
-#         gap_extension_penalty=2,
-#         lambda_value=1.02,
-#         K_value=0.21
-#     ):
-#     bam, references = parms
-#     dt.options.progress.enabled = False
-#     dt.options.progress.clear_on_success = True
-#     if threads > 1:
-#         dt.options.nthreads = threads - 1
-#     else:
-#         dt.options.nthreads = 1
-#     if threads > 4:
-#         s_threads = 4
-#     else:
-#         s_threads = threads
-#     samfile = pysam.AlignmentFile(bam, "rb", threads=s_threads)
-
-#     results = []
-#     reads = set()
-#     refs = set()
-#     empty_df = 0
-
-#     for reference in references:
-#         if ref_lengths is None:
-#             reference_length = np.int64(samfile.get_reference_length(reference))
-#         else:
-#             reference_length = np.int64(ref_lengths[reference])
-#         aln_data = []
-#         for aln in samfile.fetch(
-#             contig=reference, multiple_iterators=False, until_eof=True
-#         ):
-#             # AS_value = aln.get_tag("AS") if aln.has_tag("AS") else None
-#             # XS_value = aln.get_tag("XS") if aln.has_tag("XS") else None
-#             query_length = (
-#                 aln.query_length if aln.query_length != 0 else aln.infer_query_length()
-#             )
-
-#             if query_length < min_read_length:
-#                 continue
-
-#             pident = (1 - ((aln.get_tag("NM") / query_length))) * 100
-#             num_mismatches = aln.get_tag("NM")
-#             num_matches = query_length - num_mismatches
-#             num_gaps = aln.get_tag("XO") if aln.has_tag("XO") else 0
-#             gap_extensions = aln.get_tag("XG") if aln.has_tag("XG") else 0
-#             if pident >= percid:
-#                 var = calculate_alignment_score(num_matches=num_matches, num_mismatches=num_mismatches, num_gaps=num_gaps, gap_extensions=gap_extensions, match_reward=match_reward, mismatch_penalty=mismatch_penalty, gap_open_penalty=gap_open_penalty, gap_extension_penalty=gap_extension_penalty, lambda_value=lambda_value, K_value=K_value)
-#                 aln_data.append(
-#                     (
-#                         aln.query_name,
-#                         aln.reference_name,
-#                         var,
-#                         reference_length,
-#                     )
-#                 )
-#                 reads.add(aln.query_name)
-#                 refs.add(aln.reference_name)
-#         # remove duplicates
-#         # check if aln_data is not empty
-#         if len(aln_data) > 0:
-#             aln_data_dt = dt.Frame(aln_data)
-#             # "queryId", "subjectId", "bitScore", "slen"
-#             aln_data_dt.names = ["queryId", "subjectId", "var", "slen"]
-#             # remove duplicates and keep the ones with the largest score
-#             aln_data_dt = aln_data_dt[
-#                 :1, :, dt.by(dt.f.queryId, dt.f.subjectId), dt.sort(-dt.f.var)
-#             ]
-#             results.append(aln_data_dt)
-#         else:
-#             results.append(dt.Frame())
-#             empty_df += 1
-#     samfile.close()
-#     return (dt.rbind(results), reads, refs, empty_df)
 
 
 def calculate_alignment_score(
@@ -597,70 +473,71 @@ def get_bam_data(
     dt.options.progress.clear_on_success = True
     dt.options.nthreads = max(1, threads - 1)
     s_threads = min(4, threads)
-    samfile = pysam.AlignmentFile(bam, "rb", threads=s_threads)
 
-    results = []
-    reads = set()
-    refs = set()
-    empty_df = 0
+    with pysam.AlignmentFile(bam, "rb", threads=s_threads) as samfile:
+        results = []
+        reads = set()
+        refs = set()
+        empty_df = 0
 
-    for reference in references:
-        reference_length = (
-            np.int64(samfile.get_reference_length(reference))
-            if ref_lengths is None
-            else np.int64(ref_lengths[reference])
-        )
-        aln_data = []
-        for aln in samfile.fetch(
-            contig=reference, multiple_iterators=False, until_eof=True
-        ):
-            query_length = (
-                aln.query_length if aln.query_length != 0 else aln.infer_query_length()
+        for reference in references:
+            reference_length = (
+                np.int64(samfile.get_reference_length(reference))
+                if ref_lengths is None
+                else np.int64(ref_lengths[reference])
             )
+            aln_data = []
+            for aln in samfile.fetch(
+                contig=reference, multiple_iterators=False, until_eof=True
+            ):
+                query_length = (
+                    aln.query_length
+                    if aln.query_length != 0
+                    else aln.infer_query_length()
+                )
 
-            if query_length >= min_read_length:
-                num_mismatches = aln.get_tag("NM")
-                pident = (1 - (num_mismatches / query_length)) * 100
-                if pident >= percid:
-                    num_matches = query_length - num_mismatches
-                    num_gaps = aln.get_tag("XO") if aln.has_tag("XO") else 0
-                    gap_extensions = aln.get_tag("XG") if aln.has_tag("XG") else 0
+                if query_length >= min_read_length:
+                    num_mismatches = aln.get_tag("NM")
+                    pident = (1 - (num_mismatches / query_length)) * 100
+                    if pident >= percid:
+                        num_matches = query_length - num_mismatches
+                        num_gaps = aln.get_tag("XO") if aln.has_tag("XO") else 0
+                        gap_extensions = aln.get_tag("XG") if aln.has_tag("XG") else 0
 
-                    bit_score = calculate_alignment_score(
-                        num_matches,
-                        num_mismatches,
-                        num_gaps,
-                        gap_extensions,
-                        match_reward,
-                        mismatch_penalty,
-                        gap_open_penalty,
-                        gap_extension_penalty,
-                        precomputed_factor,
-                        precomputed_log_K,
-                    )
-                    aln_data.append(
-                        (
-                            aln.query_name,
-                            aln.reference_name,
-                            bit_score,
-                            reference_length,
+                        bit_score = calculate_alignment_score(
+                            num_matches,
+                            num_mismatches,
+                            num_gaps,
+                            gap_extensions,
+                            match_reward,
+                            mismatch_penalty,
+                            gap_open_penalty,
+                            gap_extension_penalty,
+                            precomputed_factor,
+                            precomputed_log_K,
                         )
-                    )
-                    reads.add(aln.query_name)
-                    refs.add(aln.reference_name)
+                        aln_data.append(
+                            (
+                                aln.query_name,
+                                aln.reference_name,
+                                bit_score,
+                                reference_length,
+                            )
+                        )
+                        reads.add(aln.query_name)
+                        refs.add(aln.reference_name)
 
-        if aln_data:
-            aln_data_dt = dt.Frame(
-                aln_data, names=["queryId", "subjectId", "bitScore", "slen"]
-            )
-            aln_data_dt = aln_data_dt[
-                :1, :, dt.by(dt.f.queryId, dt.f.subjectId), dt.sort(-dt.f.bitScore)
-            ]
-            results.append(aln_data_dt)
-        else:
-            empty_df += 1
+            if aln_data:
+                aln_data_dt = dt.Frame(
+                    aln_data, names=["queryId", "subjectId", "bitScore", "slen"]
+                )
+                aln_data_dt = aln_data_dt[
+                    :1, :, dt.by(dt.f.queryId, dt.f.subjectId), dt.sort(-dt.f.bitScore)
+                ]
+                results.append(aln_data_dt)
+            else:
+                empty_df += 1
 
-    samfile.close()
     combined_results = dt.rbind(results)
     return (combined_results, reads, refs, empty_df)
 
@@ -694,37 +571,37 @@ def reassign_reads(
 
     log.info("::: Loading BAM file")
     save = pysam.set_verbosity(0)
-    if threads > 4:
-        s_threads = 4
-    else:
-        s_threads = threads
-    samfile = pysam.AlignmentFile(bam, "rb", threads=s_threads)
+    s_threads = min(4, threads)
 
-    references = samfile.references
+    with pysam.AlignmentFile(bam, "rb", threads=s_threads) as samfile:
 
-    pysam.set_verbosity(save)
+        references = samfile.references
+        pysam.set_verbosity(save)
 
-    if reference_lengths is not None:
-        ref_len_dt = dt.fread(reference_lengths)
-        ref_len_dt.names = ["subjectId", "slen"]
-        # convert to dict
-        ref_len_dict = dict(
-            zip(ref_len_dt["subjectId"].to_list()[0], ref_len_dt["slen"].to_list()[0])
-        )
-        # check if the dataframe contains all the References in the BAM file
-        if not set(references).issubset(set(ref_len_dict.keys())):
-            logging.error(
-                "The BAM file contains references not found in the reference lengths file"
+        if reference_lengths is not None:
+            ref_len_dt = dt.fread(reference_lengths)
+            ref_len_dt.names = ["subjectId", "slen"]
+            # convert to dict
+            ref_len_dict = dict(
+                zip(
+                    ref_len_dt["subjectId"].to_list()[0],
+                    ref_len_dt["slen"].to_list()[0],
+                )
             )
-            sys.exit(1)
-    else:
-        ref_len_dict = None
+            # check if the dataframe contains all the References in the BAM file
+            if not set(references).issubset(set(ref_len_dict.keys())):
+                logging.error(
+                    "The BAM file contains references not found in the reference lengths file"
+                )
+                sys.exit(1)
+        else:
+            ref_len_dict = None
 
-    total_refs = samfile.nreferences
-    log.info(f"::: Found {total_refs:,} reference sequences")
-    # logging.info(f"Found {samfile.mapped:,} alignments")
-    log.info(f"::: Removing references with less than {min_read_count} reads...")
-    index_statistics = samfile.get_index_statistics()
+        total_refs = samfile.nreferences
+        log.info(f"::: Found {total_refs:,} reference sequences")
+        # logging.info(f"Found {samfile.mapped:,} alignments")
+        log.info(f"::: Removing references with less than {min_read_count} reads...")
+        index_statistics = samfile.get_index_statistics()
 
     # Filter out references with less than min_read_count reads
     # add a progress bar
