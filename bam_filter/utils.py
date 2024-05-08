@@ -18,7 +18,6 @@ from pathlib import Path
 import pysam
 import tempfile
 
-
 log = logging.getLogger("my_logger")
 log.setLevel(logging.INFO)
 timestr = time.strftime("%Y%m%d-%H%M%S")
@@ -1470,3 +1469,43 @@ def create_output_files(
     #     "coverage_plot_dir": coverage_plots,
     #     "lca_summary": lca_summary,
     # }
+
+
+def allocate_threads(total_threads, min_io_processes, max_io_processes):
+    """
+    Allocates threads between CPU-bound workers and I/O-bound processes based on total threads and
+    desired range of I/O processes. Selects the best compromise to maximize CPU-bound workers.
+
+    Parameters:
+        total_threads (int): Total number of available threads.
+        min_io_processes (int): Minimum desired I/O-bound processes.
+        max_io_processes (int): Maximum desired I/O-bound processes.
+
+    Returns:
+        tuple: (Number of workers, Number of I/O processes)
+    """
+    if min_io_processes > max_io_processes:
+        raise ValueError(
+            "Minimum I/O processes cannot be greater than maximum I/O processes."
+        )
+    if min_io_processes <= 0 or max_io_processes <= 0:
+        raise ValueError("I/O processes must be positive integers.")
+
+    best_allocation = (
+        1,
+        total_threads,
+    )  # Start with all threads assigned to 1 worker if no better found
+    max_workers = 0
+
+    for io_processes in range(min_io_processes, max_io_processes + 1):
+        if (
+            total_threads >= io_processes
+        ):  # Ensure there are enough threads to allocate at least these many I/O processes
+            workers = total_threads // io_processes
+            if (
+                workers > max_workers
+            ):  # Find the configuration with the maximum number of CPU workers
+                max_workers = workers
+                best_allocation = (workers, io_processes)
+
+    return best_allocation

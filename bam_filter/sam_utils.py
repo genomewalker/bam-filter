@@ -14,6 +14,7 @@ from bam_filter.utils import (
     create_empty_output_files,
     create_empty_bam,
     sort_keys_by_approx_weight,
+    allocate_threads,
 )
 from bam_filter.entropy import entropy, norm_entropy, gini_coeff, norm_gini_coeff
 from collections import defaultdict
@@ -49,11 +50,12 @@ sys.setrecursionlimit(10**6)
 
 def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
     logging.info("::: Writing temporary filtered BAM file... (be patient)")
-    s_threads = min(threads, 4)
+    p_threads, s_threads = allocate_threads(threads, 2, 4)
+    # s_threads = min(threads, 4)
     samfile = pysam.AlignmentFile(bam, "rb", threads=s_threads)
     header = samfile.header
 
-    threads = min(threads, 4)
+    # threads = min(threads, 4)
 
     # convert the dictionary to an array
     refs_dict = dict(zip(samfile.references, samfile.lengths))
@@ -75,7 +77,7 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
 
     refs_idx = {sys.intern(str(x)): i for i, x in enumerate(ref_names)}
 
-    write_threads = min(threads, 4)
+    write_threads = min(s_threads, 4)
 
     new_header = header.to_dict()
     new_header["SQ"] = [x for x in new_header["SQ"] if x["SN"] in list(ref_names)]
@@ -116,7 +118,7 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
     # # print profiling output
     # stats = pstats.Stats(prof).strip_dirs().sort_stats("tottime")
     # stats.print_stats(5)  # top 10 rows
-    s_threads = min(threads, 4)
+    # s_threads = min(threads, 4)
 
     logging.info("::: ::: Sorting BAM file...")
     pysam.sort(
@@ -132,7 +134,7 @@ def write_bam(bam, references, output_files, threads=1, sort_memory="1G"):
     logging.info("::: ::: BAM index not found. Indexing...")
     save = pysam.set_verbosity(0)
 
-    s_threads = min(threads, 4)
+    # s_threads = min(threads, 4)
 
     samfile = pysam.AlignmentFile(
         output_files["bam_tmp_sorted"], "rb", threads=s_threads
@@ -285,7 +287,7 @@ def get_bam_stats(
     bam, references = params
     results = []
 
-    threads = min(threads, 4)
+    # threads = min(threads, 4)
 
     with pysam.AlignmentFile(bam, "rb", threads=threads) as samfile:
         bam_reference_lengths = {
@@ -792,8 +794,8 @@ def check_bam_file(
 
     # Use a with statement to ensure proper closing of the samfile
     try:
+        # p_threads, s_threads = allocate_threads(threads, 2, 4)
         s_threads = min(threads, 4)
-
         with pysam.AlignmentFile(bam, "rb", threads=s_threads) as samfile:
             references = samfile.references
             log.info(f"::: Found {samfile.nreferences:,} reference sequences")
@@ -871,7 +873,9 @@ def process_bam(
     logging.info("Loading BAM file")
     save = pysam.set_verbosity(0)
 
-    s_threads = min(threads, 4)
+    # s_threads = min(threads, 4)
+    p_threads, s_threads = allocate_threads(threads, 2, 4)
+    log.info(f"::: IO Threads: {s_threads} | Processing Threads: {p_threads}")
 
     with pysam.AlignmentFile(bam, "rb", threads=s_threads) as samfile:
 
@@ -944,7 +948,7 @@ def process_bam(
                 sort_memory=sort_memory,
                 threads=threads,
             )
-            s_threads = min(threads, 4)
+            # s_threads = min(threads, 4)
 
             # samfile = pysam.AlignmentFile(bam, "rb", threads=s_threads)
 
@@ -954,7 +958,7 @@ def process_bam(
     ref_chunks = sort_keys_by_approx_weight(
         input_dict=references_m,
         scale=1,
-        num_cores=threads,
+        num_cores=p_threads,
         verbose=False,
         max_entries_per_chunk=100_000,
     )
@@ -977,7 +981,7 @@ def process_bam(
                         plot=plot,
                         plots_dir=plots_dir,
                         read_length_freqs=read_length_freqs,
-                        threads=threads,
+                        threads=s_threads,
                     ),
                     params,
                 )
@@ -1032,10 +1036,8 @@ def write_to_file(alns, out_bam_file, header=None):
 
 def process_references_batch(references, bam, refs_idx, min_read_ani, threads=1):
     alns = []
-    if threads > 4:
-        s_threads = 4
-    else:
-        s_threads = threads
+    p_threads, s_threads = allocate_threads(threads, 2, 4)
+
     with pysam.AlignmentFile(bam, "rb", threads=s_threads) as samfile:
         for reference in references:
             for aln in samfile.fetch(
@@ -1157,10 +1159,11 @@ def filter_reference_BAM(
             #     zip(df_filtered["reference"], df_filtered["bam_reference_length"])
             # )
             references = df_filtered["reference"].tolist()
-            if threads > 4:
-                s_threads = 4
-            else:
-                s_threads = threads
+            # if threads > 4:
+            #     s_threads = 4
+            # else:
+            #     s_threads = threads
+            p_threads, s_threads = allocate_threads(threads, 2, 4)
             samfile = pysam.AlignmentFile(bam, "rb", threads=s_threads)
             refs_dict = {x: samfile.get_reference_length(x) for x in references}
             header = samfile.header
@@ -1212,7 +1215,7 @@ def filter_reference_BAM(
             #         if ani_read >= min_read_ani:
             #             aln.reference_id = refs_idx[aln.reference_name]
             #             out_bam_file.write(aln)
-            num_cores = min(threads, cpu_count())
+            num_cores = p_threads
             # batch_size = len(references) // num_cores + 1  # Ensure non-zero batch size
             log.info("::: Creating reference chunks with uniform read amounts...")
             ref_chunks = sort_keys_by_approx_weight(
@@ -1222,7 +1225,7 @@ def filter_reference_BAM(
                 verbose=False,
                 max_entries_per_chunk=1_000_000,
             )
-            num_cores = min(num_cores, len(ref_chunks))
+            # num_cores = min(num_cores, len(ref_chunks))
             log.info(f"::: Using {num_cores} cores to write {len(ref_chunks)} chunk(s)")
 
             # with Manager() as manager:
@@ -1249,6 +1252,7 @@ def filter_reference_BAM(
                         bam,
                         refs_idx,
                         min_read_ani=min_read_ani,
+                        threads=s_threads,
                     )
                     futures.append(future)  # Store the future
 
@@ -1280,13 +1284,15 @@ def filter_reference_BAM(
             # # print profiling output
             # stats = pstats.Stats(prof).strip_dirs().sort_stats("tottime")
             # stats.print_stats(5)  # top 10 rows
+
             if not disable_sort:
+                s_threads = min(threads, 4)
                 if sort_by_name:
                     logging.info("Sorting BAM file by read name...")
-                    if threads > 4:
-                        s_threads = 4
-                    else:
-                        s_threads = threads
+                    # if threads > 4:
+                    #     s_threads = 4
+                    # else:
+                    #     s_threads = threads
                     pysam.sort(
                         "-n",
                         "-@",
@@ -1311,10 +1317,10 @@ def filter_reference_BAM(
 
                     logging.info("BAM index not found. Indexing...")
                     save = pysam.set_verbosity(0)
-                    if threads > 4:
-                        s_threads = 4
-                    else:
-                        s_threads = threads
+                    # if threads > 4:
+                    #     s_threads = 4
+                    # else:
+                    #     s_threads = threads
                     samfile = pysam.AlignmentFile(
                         out_files["bam_filtered"], "rb", threads=s_threads
                     )
