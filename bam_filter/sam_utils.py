@@ -3,7 +3,7 @@ import numpy as np
 import os
 import sys
 import pandas as pd
-from multiprocessing import Pool, cpu_count
+from multiprocessing import Pool
 import functools
 from scipy import stats
 import tqdm
