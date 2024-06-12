@@ -16,6 +16,7 @@ requirements = [
     "taxopy>=0.12.0",
     "python-datatable>=1.1.3",
     "networkx>=3.2.1",
+    "psutil>=5.9.8",
 ]
 
 setup(
