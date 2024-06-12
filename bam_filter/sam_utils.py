@@ -963,7 +963,7 @@ def process_bam(
         scale=1,
         num_cores=p_threads,
         verbose=False,
-        max_entries_per_chunk=100_000,
+        max_entries_per_chunk=100_000_000,
     )
     log.info(f"::: Created {len(ref_chunks):,} chunks")
     # ref_chunks = random.sample(ref_chunks, len(ref_chunks))
@@ -1230,7 +1230,7 @@ def filter_reference_BAM(
                 scale=1,
                 num_cores=threads,
                 verbose=False,
-                max_entries_per_chunk=1_000_000,
+                max_entries_per_chunk=10_000_000,
             )
             # num_cores = min(num_cores, len(ref_chunks))
             log.info(f"::: Using {num_cores} cores to write {len(ref_chunks)} chunk(s)")
