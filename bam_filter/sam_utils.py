@@ -792,15 +792,10 @@ def check_bam_file(
     logging.info("Checking BAM file status")
     save = pysam.set_verbosity(0)
 
-    # Use a with statement to ensure proper closing of the samfile
-    try:
-        # p_threads, s_threads = allocate_threads(threads, 2, 4)
-        s_threads = min(threads, 4)
+    def process_bam(bam, s_threads):
         with pysam.AlignmentFile(bam, "rb", threads=s_threads) as samfile:
             references = samfile.references
             log.info(f"::: Found {samfile.nreferences:,} reference sequences")
-            references = samfile.references
-            pysam.set_verbosity(save)
             ref_lengths = None
 
             if reference_lengths is not None:
@@ -810,15 +805,15 @@ def check_bam_file(
                     index_col=0,
                     names=["reference", "length"],
                 )
-                # check if the dataframe contains all the References in the BAM file
                 if not set(references).issubset(set(ref_lengths.index)):
                     logging.error(
                         "::: The BAM file contains references not found in the reference lengths file"
                     )
                     sys.exit(1)
-                # max_chr_length = np.max(ref_lengths["length"].tolist())
 
-            # Check if BAM files is not sorted by coordinates, sort it by coordinates
+            del references
+            gc.collect()
+
             if samfile.header["HD"]["SO"] != "coordinate":
                 log.info("::: BAM file is not sorted by coordinates, sorting it...")
                 sorted_bam = bam.replace(".bam", ".bf-sorted.bam")
@@ -827,18 +822,26 @@ def check_bam_file(
                 )
                 bam = sorted_bam
                 pysam.index("-c", "-@", str(threads), bam)
-
-                samfile = pysam.AlignmentFile(bam, "rb", threads=s_threads)
+                return bam, True  # Indicate that the BAM file was sorted and reopened
 
             if not samfile.has_index():
                 logging.info("::: BAM index not found. Indexing...")
-                # if max_chr_length > 536870912:
-                #     logging.info("A reference is longer than 2^29")
                 pysam.index("-c", "-@", str(threads), bam)
 
             logging.info("::: BAM file looks good.")
+            return bam, False  # Indicate that the BAM file was not sorted and reopened
 
-        return bam  # No need to reload the samfile after creating index, thanks to the with statement
+    try:
+        s_threads = min(threads, 4)
+        bam, reopened = process_bam(bam, s_threads)
+
+        # If the BAM file was sorted and reopened, check it again
+        if reopened:
+            bam, _ = process_bam(bam, s_threads)
+
+        pysam.set_verbosity(save)
+        return bam
+
     except ValueError as ve:
         if "file has no sequences defined (mode='rb')" in str(ve):
             return None
@@ -1076,6 +1079,7 @@ def filter_reference_BAM(
         logging.info(
             f"::: min_read_count >= {filter_conditions['min_read_count']} "
             f"& min_read_length >= {filter_conditions['min_read_length']} "
+            f"& max_read_length <= {filter_conditions['max_read_length']}"
             f"& min_avg_read_ani >= {filter_conditions['min_avg_read_ani']} "
             f"& min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} "
             f"& min_breadth >= {filter_conditions['min_breadth']} "
@@ -1096,6 +1100,7 @@ def filter_reference_BAM(
         df_filtered = df.loc[
             (df["n_reads"] >= filter_conditions["min_read_count"])
             & (df["read_length_mean"] >= filter_conditions["min_read_length"])
+            & (df["read_length_mean"] <= filter_conditions["max_read_length"])
             & (df["read_ani_mean"] >= filter_conditions["min_avg_read_ani"])
             & (
                 df["breadth_exp_ratio"]
@@ -1112,6 +1117,7 @@ def filter_reference_BAM(
         logging.info(
             f"::: min_read_count >= {filter_conditions['min_read_count']} "
             f"& min_read_length >= {filter_conditions['min_read_length']} "
+            f"& max_read_length <= {filter_conditions['max_read_length']}"
             f"& min_avg_read_ani >= {filter_conditions['min_avg_read_ani']} "
             f"& min_expected_breadth_ratio >= {filter_conditions['min_expected_breadth_ratio']} "
             f"& min_breadth >= {filter_conditions['min_breadth']} "
@@ -1130,6 +1136,7 @@ def filter_reference_BAM(
         df_filtered = df.loc[
             (df["n_reads"] >= filter_conditions["min_read_count"])
             & (df["read_length_mean"] >= filter_conditions["min_read_length"])
+            & (df["read_length_mean"] <= filter_conditions["max_read_length"])
             & (df["read_ani_mean"] >= filter_conditions["min_avg_read_ani"])
             & (
                 df["breadth_exp_ratio"]

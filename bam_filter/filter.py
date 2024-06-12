@@ -166,6 +166,7 @@ def filter_references(args):
     if args.min_norm_entropy is None or args.min_norm_gini is None:
         filter_conditions = {
             "min_read_length": args.min_read_length,
+            "max_read_length": args.max_read_length,
             "min_read_count": args.min_read_count,
             "min_expected_breadth_ratio": args.min_expected_breadth_ratio,
             "min_breadth": args.min_breadth,
@@ -186,6 +187,7 @@ def filter_references(args):
                 )
                 filter_conditions = {
                     "min_read_length": args.min_read_length,
+                    "max_read_length": args.max_read_length,
                     "min_read_count": args.min_read_count,
                     "min_expected_breadth_ratio": args.min_expected_breadth_ratio,
                     "min_breadth": args.min_breadth,
@@ -197,6 +199,7 @@ def filter_references(args):
             else:
                 filter_conditions = {
                     "min_read_length": args.min_read_length,
+                    "max_read_length": args.max_read_length,
                     "min_read_count": args.min_read_count,
                     "min_expected_breadth_ratio": args.min_expected_breadth_ratio,
                     "min_breadth": args.min_breadth,
@@ -215,6 +218,7 @@ def filter_references(args):
             )
             filter_conditions = {
                 "min_read_length": args.min_read_length,
+                "max_read_length": args.max_read_length,
                 "min_read_count": args.min_read_count,
                 "min_expected_breadth_ratio": args.min_expected_breadth_ratio,
                 "min_breadth": args.min_breadth,
@@ -229,6 +233,7 @@ def filter_references(args):
         min_norm_gini, min_norm_entropy = args.min_norm_gini, args.min_norm_entropy
         filter_conditions = {
             "min_read_length": args.min_read_length,
+            "max_read_length": args.max_read_length,
             "min_read_count": args.min_read_count,
             "min_expected_breadth_ratio": args.min_expected_breadth_ratio,
             "min_breadth": args.min_breadth,
