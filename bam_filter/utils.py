@@ -232,6 +232,8 @@ def sort_keys_by_approx_weight(
             unit_scale=True,
             unit_divisor=500,
             leave=False,
+            ncols=80,
+            unit=" keys",
         ):
             min_chunk_idx = chunk_weights.index(min(chunk_weights))
             chunks[min_chunk_idx].append(key)
@@ -343,30 +345,58 @@ def is_integer(n):
 
 
 # function to check if the input value has K, M or G suffix in it
+
+
 def check_suffix(val, parser, var):
     if var == "--scale":
         units = ["K", "M"]
     else:
         units = ["K", "M", "G"]
-    unit = val[-1]
-    value = int(val[:-1])
 
-    if is_integer(value) & (unit in units) & (value > 0):
+    unit = val[-1]
+    value = val[:-1]
+
+    if is_integer(value) and (unit in units) and (int(value) > 0):
+        value = int(value)
         if var == "--scale":
             if unit == "K":
                 val = value * 1000
             elif unit == "M":
                 val = value * 1000000
-            elif unit == "G":
-                val = value * 1000000000
-            return val
+            return str(val)
         else:
+            if unit == "K":
+                val = value * 1024
+            elif unit == "M":
+                val = value * 1024 * 1024
+            elif unit == "G":
+                val = value * 1024 * 1024 * 1024
             return val
     else:
         parser.error(
             "argument %s: Invalid value %s. Has to be an integer larger than 0 with the following suffix K, M or G"
             % (var, val)
         )
+
+
+# Example usage with argparse
+if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser(description="Process some integers.")
+    parser.add_argument(
+        "--scale",
+        type=lambda x: check_suffix(x, parser, "--scale"),
+        help="Scale value with K or M suffix",
+    )
+    parser.add_argument(
+        "--memory",
+        type=lambda x: check_suffix(x, parser, "--memory"),
+        help="Memory value with K, M, or G suffix",
+    )
+
+    args = parser.parse_args()
+    print("Scale:", args.scale)
+    print("Memory:", args.memory)
 
 
 def get_compression_type(filename):
@@ -483,6 +513,7 @@ def check_lca_ranks(val, parser, var):
 
 defaults = {
     "min_read_length": 30,
+    "max_read_length": np.Inf,
     "min_read_count": 3,
     "min_expected_breadth_ratio": 0,
     "min_norm_entropy": 0,
@@ -524,6 +555,7 @@ help_msg = {
     "threads": "Number of threads to use",
     "prefix": "Prefix used for the output files",
     "min_read_length": "Minimum read length",
+    "max_read_length": "Maximum read length",
     "min_read_count": "Minimum read count",
     "trim_ends": "Exclude n bases at the ends of the reference sequences",
     "trim_min": "Remove coverage that are below this percentile. Used for the Truncated Average Depth (TAD) calculation",
@@ -576,6 +608,7 @@ help_msg = {
     "lca_stats": "A TSV file from the filter subcommand",
     "custom": "Use custom taxdump files",
     "version": "Print program version",
+    "max_memory": "Maximum memory to use for the EM algorithm",
 }
 
 
@@ -751,6 +784,19 @@ def get_arguments(argv=None):
         help=help_msg["min_read_length"],
     )
     reassign_optional_args.add_argument(
+        "-L",
+        "--max-read-length",
+        type=lambda x: int(
+            check_values(
+                x, minval=1, maxval=np.Inf, parser=parser, var="--max-read-length"
+            )
+        ),
+        default=defaults["max_read_length"],
+        metavar="INT",
+        dest="max_read_length",
+        help=help_msg["max_read_length"],
+    )
+    reassign_optional_args.add_argument(
         "-n",
         "--min-read-count",
         type=lambda x: int(
@@ -852,6 +898,15 @@ def get_arguments(argv=None):
         help=help_msg["sort_memory"],
     )
     reassign_optional_args.add_argument(
+        "-M",
+        "--max-memory",
+        type=lambda x: check_suffix(x, parser=parser, var="--max-memory"),
+        default=None,
+        metavar="INT",
+        dest="max_memory",
+        help=help_msg["max_memory"],
+    )
+    reassign_optional_args.add_argument(
         "-N",
         "--sort-by-name",
         dest="sort_by_name",
@@ -927,6 +982,19 @@ def get_arguments(argv=None):
         metavar="INT",
         dest="min_read_length",
         help=help_msg["min_read_length"],
+    )
+    filtering_filt_args.add_argument(
+        "-L",
+        "--max-read-length",
+        type=lambda x: int(
+            check_values(
+                x, minval=1, maxval=np.Inf, parser=parser, var="--max-read-length"
+            )
+        ),
+        default=defaults["max_read_length"],
+        metavar="INT",
+        dest="max_read_length",
+        help=help_msg["max_read_length"],
     )
     filtering_filt_args.add_argument(
         "-n",
@@ -1451,6 +1519,7 @@ def create_output_files(
     else:
         log.error("Mode not recognized")
         exit(1)
+    out_files["tmp_dir"] = tmp_dir
     return out_files
 
     # out_files = {
