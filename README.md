@@ -93,11 +93,8 @@ Full list of options:
 
 ```bash
 $ filterBAM reassign --help
-usage: filterBAM reassign [-h] --bam BAM [-p STR] [-r FILE] [-t INT] [-i INT]
-                          [-s FLOAT] [-A FLOAT] [-l INT] [-n INT] [--match-reward INT]
-                          [--mismatch-penalty INT] [--gap-open-penalty INT]
-                          [--gap-extension-penalty INT] [--lambda FLOAT] [-k FLOAT]
-                          [-o [FILE]] [-m STR] [-N] [--tmp-dir DIR] [--disable-sort]
+usage: filterBAM reassign [-h] --bam BAM [-p STR] [-r FILE] [-t INT] [-i INT] [-s FLOAT] [-A FLOAT] [-l INT] [-L INT] [-n INT] [--match-reward INT] [--mismatch-penalty INT]
+                          [--gap-open-penalty INT] [--gap-extension-penalty INT] [--lambda FLOAT] [-k FLOAT] [-o [FILE]] [-m STR] [-M INT] [-N] [--tmp-dir DIR] [--disable-sort]
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -118,6 +115,8 @@ Re-assign optional arguments:
                         Minimum read ANI to keep a read (default: 90.0)
   -l INT, --min-read-length INT
                         Minimum read length (default: 30)
+  -L INT, --max-read-length INT
+                        Maximum read length (default: inf)
   -n INT, --min-read-count INT
                         Minimum read count (default: 3)
   --match-reward INT    Match reward for the alignment score (default: 1)
@@ -132,8 +131,9 @@ Re-assign optional arguments:
   -o [FILE], --out-bam [FILE]
                         Save a BAM file without multimapping reads (default: None)
   -m STR, --sort-memory STR
-                        Set maximum memory per thread for sorting; suffix K/M/G
-                        recognized (default: 1G)
+                        Set maximum memory per thread for sorting; suffix K/M/G recognized (default: 1G)
+  -M INT, --max-memory INT
+                        Maximum memory to use for the EM algorithm (default: None)
   -N, --sort-by-name    Sort by read names (default: False)
   --tmp-dir DIR         Temporary directory (default: None)
 
@@ -155,20 +155,17 @@ filterBAM reassign --bam c55d4e2df1.dedup.bam  --threads 10 --iters 0 --min-read
 **--reference-lengths**: File with the lengths of the references in the BAM file. This is used when multiple contigs have been concatenad with Ns.
 **--out-bam**: Save a BAM file without multimapping reads
 
+
 ## BAM filtering
 
 Full list of options:
 
 ```bash
 $ filterBAM filter --help
-usage: filterBAM filter [-h] --bam BAM [-p STR] [-r FILE] [-t INT] [--reference-trim-length INT]
-                        [--trim-min INT] [--trim-max INT] [-A FLOAT] [-l INT] [-n INT]
-                        [-b FLOAT] [-e FLOAT] [-g FLOAT] [-B FLOAT] [-a FLOAT] [-c FLOAT]
-                        [-V FLOAT] [-C FLOAT] [--include-low-detection] [-m STR] [-N]
-                        [--disable-sort] [--scale STR] --stats [FILE] [--stats-filtered [FILE]]
-                        [--bam-filtered [FILE]] [--read-length-freqs [FILE]]
-                        [--read-hits-count [FILE]] [--knee-plot [FILE]]
-                        [--coverage-plots [FILE]] [--tmp-dir DIR] [--low-memory]
+usage: filterBAM filter [-h] --bam BAM [-p STR] [-r FILE] [-t INT] [--reference-trim-length INT] [--trim-min INT] [--trim-max INT] [-A FLOAT] [-l INT] [-L INT] [-n INT] [-b FLOAT] [-e FLOAT]
+                        [-g FLOAT] [-B FLOAT] [-a FLOAT] [-c FLOAT] [-V FLOAT] [-C FLOAT] [--include-low-detection] [-m STR] [-N] [--disable-sort] [--scale STR] --stats [FILE]
+                        [--stats-filtered [FILE]] [--bam-filtered [FILE]] [--read-length-freqs [FILE]] [--read-hits-count [FILE]] [--knee-plot [FILE]] [--coverage-plots [FILE]] [--tmp-dir DIR]
+                        [--low-memory]
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -189,6 +186,8 @@ filtering arguments:
                         Minimum read ANI to keep a read (default: 90.0)
   -l INT, --min-read-length INT
                         Minimum read length (default: 30)
+  -L INT, --max-read-length INT
+                        Maximum read length (default: inf)
   -n INT, --min-read-count INT
                         Minimum read count (default: 3)
   -b FLOAT, --min-expected-breadth-ratio FLOAT
@@ -208,39 +207,30 @@ filtering arguments:
   -C FLOAT, --min-coverage-mean FLOAT
                         Minimum coverage mean (default: 0)
   --include-low-detection
-                        Include those references that fulfill all filtering criteria but the
-                        coverage evenness is 0 (default: False)
+                        Include those references that fulfill all filtering criteria but the coverage evenness is 0 (default: False)
 
 miscellaneous arguments:
   --reference-trim-length INT
                         Exclude n bases at the ends of the reference sequences (default: 0)
-  --trim-min INT        Remove coverage that are below this percentile. Used for the Truncated
-                        Average Depth (TAD) calculation (default: 10)
-  --trim-max INT        Remove coverage that are above this percentile. Used for the Truncated
-                        Average Depth (TAD) calculation (default: 90)
+  --trim-min INT        Remove coverage that are below this percentile. Used for the Truncated Average Depth (TAD) calculation (default: 10)
+  --trim-max INT        Remove coverage that are above this percentile. Used for the Truncated Average Depth (TAD) calculation (default: 90)
   -m STR, --sort-memory STR
-                        Set maximum memory per thread for sorting; suffix K/M/G recognized
-                        (default: 1G)
+                        Set maximum memory per thread for sorting; suffix K/M/G recognized (default: 1G)
   -N, --sort-by-name    Sort by read names (default: False)
   --disable-sort        Disable sorting of the filtered BAM file (default: False)
-  --scale STR           Scale taxonomic abundance by this factor; suffix K/M recognized
-                        (default: 1000000.0)
+  --scale STR           Scale taxonomic abundance by this factor; suffix K/M recognized (default: 1000000.0)
   --tmp-dir DIR         Temporary directory (default: None)
   --low-memory          Activate the low memory mode (default: False)
 
 output arguments:
   --stats-filtered [FILE]
-                        Save a TSV file with the statistics for each reference after filtering
-                        (default: None)
+                        Save a TSV file with the statistics for each reference after filtering (default: None)
   --bam-filtered [FILE]
-                        Save a BAM file with the references that passed the filtering criteria
-                        (default: None)
+                        Save a BAM file with the references that passed the filtering criteria (default: None)
   --read-length-freqs [FILE]
-                        Save a JSON file with the read length frequencies mapped to each
-                        reference (default: None)
+                        Save a JSON file with the read length frequencies mapped to each reference (default: None)
   --read-hits-count [FILE]
-                        Save a TSV file with the read hits frequencies mapped to each reference
-                        (default: None)
+                        Save a TSV file with the read hits frequencies mapped to each reference (default: None)
   --knee-plot [FILE]    Plot knee plot (default: None)
   --coverage-plots [FILE]
                         Folder where to save genome coverage plots (default: None)
@@ -333,8 +323,8 @@ Full list of options:
   
 ```bash
 $ filterBAM lca --help
-usage: filterBAM lca [-h] --bam BAM [-p STR] [-r FILE] [-t INT] [--names FILE] [--nodes FILE] [--acc2taxid FILE] [--lca-rank STR] [--lca-summary [FILE]] [--scale STR]
-                     [-m STR] [--custom] [--stats [FILE]]
+usage: filterBAM lca [-h] --bam BAM [-p STR] [-r FILE] [-t INT] [--names FILE] [--nodes FILE] [--acc2taxid FILE] [--lca-rank STR] [--lca-summary [FILE]] [--scale STR] [-m STR] [--custom]
+                     [--stats [FILE]]
 
 optional arguments:
   -h, --help            show this help message and exit
