@@ -262,7 +262,6 @@ def process_references_batch(references, entries, bam, refs_idx, threads=1):
                 if (aln.query_name, reference) in r_ids:
                     aln.reference_id = refs_idx[aln.reference_name]
                     alns.append(aln.to_string())
-
     return alns
 
 
@@ -324,6 +323,10 @@ def write_reassigned_bam(
 
         log.info(f"::: Using {num_cores} processes to write {len(ref_chunks)} chunk(s)")
 
+        # get total entris in all chunks
+        total_entries = sum(len(chunk) for chunk in ref_chunks)
+        log.info(f"::: Total entries in all chunks: {total_entries:,}")
+
         with Manager() as manager:
             entries = manager.dict(dict(entries))
 
@@ -331,6 +334,7 @@ def write_reassigned_bam(
                 max_workers=num_cores
             ) as executor:
                 futures = []
+                total_alignments = 0
                 for batch_references in tqdm.tqdm(
                     ref_chunks,
                     total=len(ref_chunks),
@@ -362,16 +366,38 @@ def write_reassigned_bam(
                 )
                 completed_count = 0
 
+                processed_futures = set()
+
                 for completed_future in concurrent.futures.as_completed(futures):
-                    alns = completed_future.result()
-                    write_to_file(alns=alns, out_bam_file=out_bam_file, header=header)
+                    try:
+                        alns = completed_future.result()
+                        total_alignments += len(alns)
+                        write_to_file(
+                            alns=alns, out_bam_file=out_bam_file, header=header
+                        )
+                        processed_futures.add(completed_future)
+                    except Exception as e:
+                        log.error(f"Error processing batch: {e}")
 
                     completion_progress_bar.update(1)
                     completed_count += 1
                     completed_future.cancel()
-                    gc.collect()
 
                 completion_progress_bar.close()
+
+                # Verify that all futures have been processed
+                unprocessed_futures = set(futures) - processed_futures
+                if unprocessed_futures:
+                    log.error(f"{len(unprocessed_futures)} futures were not processed:")
+                    for future in unprocessed_futures:
+                        log.error(f"Unprocessed future: {future}")
+                else:
+                    log.info("All futures processed successfully.")
+
+                log.info(f"Completed {completed_count} out of {len(futures)} futures.")
+
+                log.info(f"Total alignments processed: {total_alignments:,}")
+
     entries = None
     gc.collect()
 
@@ -735,13 +761,15 @@ def reassign_reads(
     log.info("::: Indexing references...")
     refs = dt.Frame(list(set(refs)))
     refs.names = ["subjectId"]
-    refs["sidx"] = dt.Frame(list(range(refs.shape[0])))
+    refs["sidx"] = dt.Frame(list(range(refs.shape[0])), type=dt.int64)
     refs.key = "subjectId"
 
     log.info("::: Indexing reads...")
     reads = dt.Frame(list(set(reads)))
     reads.names = ["queryId"]
-    reads["qidx"] = dt.Frame([(i + refs.shape[0]) for i in range(reads.shape[0])])
+    reads["qidx"] = dt.Frame(
+        [(i + refs.shape[0]) for i in range(reads.shape[0])], type=dt.int64
+    )
     reads.key = "queryId"
 
     log.info("::: Allocating data...")
@@ -849,12 +877,13 @@ def reassign_reads(
     else:
         dt.options.nthreads = 1
 
-    g = dt.Frame(no_multimaps["source"])
+    g = dt.Frame(no_multimaps["source"].tolist(), type=dt.int64)
+
     g.names = ["qidx"]
     reads.key = "qidx"
     q = g[:, :, dt.join(reads)]
 
-    g = dt.Frame(no_multimaps["subject"])
+    g = dt.Frame(no_multimaps["subject"].tolist(), type=dt.int64)
     g.names = ["sidx"]
     refs.key = "sidx"
     s = g[:, :, dt.join(refs)]
@@ -862,17 +891,26 @@ def reassign_reads(
     log.info("::: Calculating reads per subject...")
     s_c = s[:, dt.count(dt.f.subjectId), dt.by(dt.f.subjectId)]
     s_c.names = ["subjectId", "counts"]
+
     references_m = dict()
     log.info(f"::: Removing references with less than {min_read_count:,}...")
     for i, k in zip(s_c[:, "subjectId"].to_list()[0], s_c[:, "counts"].to_list()[0]):
         if k >= min_read_count:
             references_m[i] = k
-    log.info(f"::: ::: Keeping {len(references_m):,} references")
+    # remove NA
     s_c = None
     if len(references_m) == 0:
         log.warning("::: No reference sequences with alignments found in the BAM file")
         create_empty_output_files(out_files)
         sys.exit(0)
+
+    # count how many reads are assigned in total after filtering in references_m
+    total_reads_refs = 0
+    for k in references_m:
+        total_reads_refs += references_m[k]
+
+    log.info(f"::: Total refs/reads combination: {total_reads_refs:,}")
+    log.info(f"::: Total references: {len(references_m):,}")
 
     log.info("::: Creating filtered set...")
     entries = defaultdict(set)
@@ -882,6 +920,8 @@ def reassign_reads(
     for query_id, subject_id in zip(q_query_ids, s_subject_ids):
         if subject_id in references_m:
             entries[subject_id].add((query_id, subject_id))
+
+    log.info(f"::: ::: Keeping {len(entries):,} references")
 
     del m
     del init_data

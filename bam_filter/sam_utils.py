@@ -877,7 +877,7 @@ def process_bam(
     save = pysam.set_verbosity(0)
 
     # s_threads = min(threads, 4)
-    p_threads, s_threads = allocate_threads(threads, 2, 4)
+    p_threads, s_threads = allocate_threads(threads, 1, 4)
     log.info(f"::: IO Threads: {s_threads} | Processing Threads: {p_threads}")
 
     with pysam.AlignmentFile(bam, "rb", threads=s_threads) as samfile:
