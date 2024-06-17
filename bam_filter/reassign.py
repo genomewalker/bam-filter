@@ -275,7 +275,7 @@ def write_reassigned_bam(
     sort_by_name=False,
     min_read_ani=90,
     min_read_length=30,
-    max_read_length=np.Inf,
+    max_read_length=np.inf,
     disable_sort=False,
 ):
     out_bam = out_files["bam_reassigned"]
@@ -471,7 +471,7 @@ def get_bam_data(
     ref_lengths=None,
     percid=90,
     min_read_length=30,
-    max_read_length=np.Inf,
+    max_read_length=np.inf,
     threads=1,
     match_reward=1,
     mismatch_penalty=-1,
@@ -573,7 +573,7 @@ def reassign_reads(
     min_read_count=1,
     min_read_ani=90,
     min_read_length=30,
-    max_read_length=np.Inf,
+    max_read_length=np.inf,
     reassign_iters=25,
     reassign_scale=0.9,
     sort_memory="4G",

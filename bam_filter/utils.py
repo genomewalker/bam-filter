@@ -513,7 +513,7 @@ def check_lca_ranks(val, parser, var):
 
 defaults = {
     "min_read_length": 30,
-    "max_read_length": np.Inf,
+    "max_read_length": np.inf,
     "min_read_count": 3,
     "min_expected_breadth_ratio": 0,
     "min_norm_entropy": 0,
@@ -522,7 +522,7 @@ defaults = {
     "min_read_ani": 90.0,
     "min_breadth": 0,
     "min_coverage_evenness": 0,
-    "min_coeff_var": np.Inf,
+    "min_coeff_var": np.inf,
     "min_coverage_mean": 0,
     "prefix": None,
     "sort_memory": "1G",
@@ -788,7 +788,7 @@ def get_arguments(argv=None):
         "--max-read-length",
         type=lambda x: int(
             check_values(
-                x, minval=1, maxval=np.Inf, parser=parser, var="--max-read-length"
+                x, minval=1, maxval=np.inf, parser=parser, var="--max-read-length"
             )
         ),
         default=defaults["max_read_length"],
@@ -801,7 +801,7 @@ def get_arguments(argv=None):
         "--min-read-count",
         type=lambda x: int(
             check_values(
-                x, minval=1, maxval=np.Inf, parser=parser, var="--min-read-count"
+                x, minval=1, maxval=np.inf, parser=parser, var="--min-read-count"
             )
         ),
         default=defaults["min_read_count"],
@@ -813,7 +813,7 @@ def get_arguments(argv=None):
         "--match-reward",
         type=lambda x: int(
             check_values(
-                x, minval=0, maxval=np.Inf, parser=parser, var="--match-reward"
+                x, minval=0, maxval=np.inf, parser=parser, var="--match-reward"
             )
         ),
         default=defaults["reassign_match_reward"],
@@ -825,7 +825,7 @@ def get_arguments(argv=None):
         "--mismatch-penalty",
         type=lambda x: int(
             check_values(
-                x, minval=-np.Inf, maxval=0, parser=parser, var="--mismatch-penalty"
+                x, minval=-np.inf, maxval=0, parser=parser, var="--mismatch-penalty"
             )
         ),
         default=defaults["reassign_mismatch_penalty"],
@@ -837,7 +837,7 @@ def get_arguments(argv=None):
         "--gap-open-penalty",
         type=lambda x: int(
             check_values(
-                x, minval=0, maxval=np.Inf, parser=parser, var="--gap-open-penalty"
+                x, minval=0, maxval=np.inf, parser=parser, var="--gap-open-penalty"
             )
         ),
         default=defaults["reassign_gap_open_penalty"],
@@ -849,7 +849,7 @@ def get_arguments(argv=None):
         "--gap-extension-penalty",
         type=lambda x: int(
             check_values(
-                x, minval=0, maxval=np.Inf, parser=parser, var="--gap-extension-penalty"
+                x, minval=0, maxval=np.inf, parser=parser, var="--gap-extension-penalty"
             )
         ),
         default=defaults["reassign_gap_extension_penalty"],
@@ -860,7 +860,7 @@ def get_arguments(argv=None):
     reassign_optional_args.add_argument(
         "--lambda",
         type=lambda x: float(
-            check_values(x, minval=0, maxval=np.Inf, parser=parser, var="--lambda")
+            check_values(x, minval=0, maxval=np.inf, parser=parser, var="--lambda")
         ),
         default=defaults["reassign_lambda"],
         metavar="FLOAT",
@@ -870,7 +870,7 @@ def get_arguments(argv=None):
     reassign_optional_args.add_argument(
         "-k",
         type=lambda x: float(
-            check_values(x, minval=0, maxval=np.Inf, parser=parser, var="-K")
+            check_values(x, minval=0, maxval=np.inf, parser=parser, var="-K")
         ),
         default=defaults["reassign_k"],
         metavar="FLOAT",
@@ -988,7 +988,7 @@ def get_arguments(argv=None):
         "--max-read-length",
         type=lambda x: int(
             check_values(
-                x, minval=1, maxval=np.Inf, parser=parser, var="--max-read-length"
+                x, minval=1, maxval=np.inf, parser=parser, var="--max-read-length"
             )
         ),
         default=defaults["max_read_length"],
@@ -1001,7 +1001,7 @@ def get_arguments(argv=None):
         "--min-read-count",
         type=lambda x: int(
             check_values(
-                x, minval=1, maxval=np.Inf, parser=parser, var="--min-read-count"
+                x, minval=1, maxval=np.inf, parser=parser, var="--min-read-count"
             )
         ),
         default=defaults["min_read_count"],
@@ -1086,7 +1086,7 @@ def get_arguments(argv=None):
         "--min-coeff-var",
         type=lambda x: float(
             check_values(
-                x, minval=0, maxval=np.Inf, parser=parser, var="--min-evenness"
+                x, minval=0, maxval=np.inf, parser=parser, var="--min-evenness"
             )
         ),
         default=defaults["min_coeff_var"],
