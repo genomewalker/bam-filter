@@ -788,11 +788,12 @@ def check_bam_file(
     threads=1,
     reference_lengths=None,
     sort_memory="1G",
+    sorted_bam=None,
 ):
     logging.info("Checking BAM file status")
     save = pysam.set_verbosity(0)
 
-    def process_bam(bam, s_threads):
+    def evaluate_bam(bam, s_threads, sorted_bam=None):
         with pysam.AlignmentFile(bam, "rb", threads=s_threads) as samfile:
             references = samfile.references
             log.info(f"::: Found {samfile.nreferences:,} reference sequences")
@@ -816,7 +817,8 @@ def check_bam_file(
 
             if samfile.header["HD"]["SO"] != "coordinate":
                 log.info("::: BAM file is not sorted by coordinates, sorting it...")
-                sorted_bam = bam.replace(".bam", ".bf-sorted.bam")
+                if sorted_bam is None:
+                    sorted_bam = bam.replace(".bam", ".bf-sorted.bam")
                 pysam.sort(
                     "-@", str(s_threads), "-m", str(sort_memory), "-o", sorted_bam, bam
                 )
@@ -833,11 +835,11 @@ def check_bam_file(
 
     try:
         s_threads = min(threads, 4)
-        bam, reopened = process_bam(bam, s_threads)
+        bam, reopened = evaluate_bam(bam, s_threads, sorted_bam)
 
         # If the BAM file was sorted and reopened, check it again
         if reopened:
-            bam, _ = process_bam(bam, s_threads)
+            bam, _ = evaluate_bam(bam, s_threads, sorted_bam)
 
         pysam.set_verbosity(save)
         return bam

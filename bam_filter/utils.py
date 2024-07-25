@@ -1520,6 +1520,7 @@ def create_output_files(
         log.error("Mode not recognized")
         exit(1)
     out_files["tmp_dir"] = tmp_dir
+    out_files["sorted_bam"] = f"{tmp_dir}/{prefix}.bf-sorted.bam"
     return out_files
 
     # out_files = {
