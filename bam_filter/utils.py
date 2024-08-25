@@ -544,8 +544,6 @@ defaults = {
     "reassign_mismatch_penalty": -2,
     "reassign_gap_open_penalty": 5,
     "reassign_gap_extension_penalty": 2,
-    "reassign_lambda": 1.33,
-    "reassign_k": 0.621,
     "rank_lca": "species",
     "lca_summary": None,
 }
@@ -596,8 +594,6 @@ help_msg = {
     "reassign_mismatch_penalty": "Mismatch penalty for the alignment score ",
     "reassign_gap_open_penalty": "Gap open penalty for alignment score computation",
     "reassign_gap_extension_penalty": "Gap extension penalty for the alignment score",
-    "reassign_lambda": "Lambda parameter for the alignment score",
-    "reassign_k": "K parameter for the alignment score algorithm",
     "lca": "Calculate LCA for each read and estimate abundances",
     "names": "Names dmp file from taxonomy",
     "nodes": "Nodes dmp file from taxonomy",
@@ -856,26 +852,6 @@ def get_arguments(argv=None):
         metavar="INT",
         dest="gap_extension_penalty",
         help=help_msg["reassign_gap_extension_penalty"],
-    )
-    reassign_optional_args.add_argument(
-        "--lambda",
-        type=lambda x: float(
-            check_values(x, minval=0, maxval=np.inf, parser=parser, var="--lambda")
-        ),
-        default=defaults["reassign_lambda"],
-        metavar="FLOAT",
-        dest="lambda_value",
-        help=help_msg["reassign_lambda"],
-    )
-    reassign_optional_args.add_argument(
-        "-k",
-        type=lambda x: float(
-            check_values(x, minval=0, maxval=np.inf, parser=parser, var="-K")
-        ),
-        default=defaults["reassign_k"],
-        metavar="FLOAT",
-        dest="K_value",
-        help=help_msg["reassign_k"],
     )
     reassign_optional_args.add_argument(
         "-o",

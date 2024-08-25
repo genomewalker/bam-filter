@@ -6,21 +6,20 @@
 
 
 A simple tool to process a BAM file and filter references with uneven coverages and estimate taxonomic abundances. FilterBAM has three main goals:
-1. Reassign reads to the reference they belong using an E-M algorithm that takes into account the alignment score. The alignment score is calculated using a variation of the [BLAST bit score](https://www.ncbi.nlm.nih.gov/books/NBK62051/) using the information available in the BAM file. The alignment score is calculated as follows:
-
-   $$
-   \begin{align*}
-   &\hspace{15pt}\text{Alignment Score} = \log_2(S+C) \\
-   &\hspace{15pt}\text{where:} \\
-   &\hspace{15pt}S = (\text{Number of matches} \times \text{Match reward}) - (\text{Number of mismatches} \times \text{Mismatch penalty}) \\
-   &\hspace{38pt} - (\text{Number of gaps} \times \text{Gap open penalty}) - (\text{Gap extensions} \times \text{Gap extension penalty}) \\
-   &\hspace{15pt}\text{and:} \\
-   &\hspace{38pt} C = |S_{\text{min}}| + \text{margin} 
-   \end{align*}
-   $$
+1. Reassign reads to the reference they belong using an E-M algorithm that takes into account the alignment score. The alignment score is derived from the BAM file and is computed as follows:
+$$
+\begin{align*}
+&\text{Alignment Score} = \log_2(S - S_{\text{min}} + 1) \\
+&\text{where:} \\
+&S = (\text{Number of matches} \times \text{Match reward}) \\
+&\hspace{30pt} - (\text{Number of mismatches} \times \text{Mismatch penalty}) \\
+&\hspace{30pt} - (\text{Number of gaps} \times \text{Gap open penalty}) \\
+&\hspace{30pt} - (\text{Gap extensions} \times \text{Gap extension penalty})
+\end{align*}
+$$
 
     * Number of gaps and gap extensions are obtained from the BAM tags **XG** and **XO** if present.
-    * **Margin** is set to a small positive integer, such as 1, 5, or 10. The exact value can be chosen based on how close the minimum possible score   
+    * The formula ensures that the alignment scores are positive by shifting all scores upward by subtracting the minimum score (S<sub>min</sub>) and adding 1 before applying the logarithm. 
 2. Estimate several metrics for each reference in the BAM file and filter those references that do not meet the defined criteria.
 3. Perform an LCA analysis using the reads that passed the filtering criteria and estimate the taxonomic abundances of each rank by normalizing the number of reads by the length of the reference. We resolve to the most likely reference using a likelihood-based approach. The likelihood is calculated for potential taxonomic paths from the partial taxonomic assignment of each read to its descendants in the taxonomy tree. The paths are ranked based on their likelihood, and the most probable reference is selected for each partial rank. It also can use the TAD (Truncated Average Depth) estimated reads for the LCA analysis, so it can minimize the effect of uneven coverages across the reference.
 

@@ -442,7 +442,7 @@ def write_reassigned_bam(
         shutil.move(out_files["bam_reassigned_tmp"], out_bam)
 
 
-def calculate_alignment_score(
+def calculate_global_alignment_score(
     num_matches,
     num_mismatches,
     num_gaps,
@@ -451,19 +451,30 @@ def calculate_alignment_score(
     mismatch_penalty,
     gap_open_penalty,
     gap_extension_penalty,
-    precomputed_factor,  # This is lambda_value * match_reward / math.log(2)
-    precomputed_log_K,  # This is math.log(K_value) / math.log(2)
 ):
+    # Calculate the raw alignment score for global alignment
     S = (
         (num_matches * match_reward)
         - (num_mismatches * mismatch_penalty)
         - (num_gaps * gap_open_penalty)
         - (gap_extensions * gap_extension_penalty)
     )
+    return S
 
-    bit_score = precomputed_factor * S - precomputed_log_K
 
-    return bit_score
+def normalize_scores(scores):
+    # Step 1: Ensure all scores are positive by shifting if necessary
+    min_score = min(scores)
+    if min_score < 0:
+        scores = [
+            score - min_score + 1 for score in scores
+        ]  # Shift to make all scores positive
+
+    # Step 2: Apply softmax to convert scores to probabilities
+    exp_scores = np.exp(scores)
+    probabilities = exp_scores / np.sum(exp_scores)
+
+    return probabilities
 
 
 def get_bam_data(
@@ -477,12 +488,8 @@ def get_bam_data(
     mismatch_penalty=-1,
     gap_open_penalty=1,
     gap_extension_penalty=2,
-    lambda_value=1.02,
-    K_value=0.21,
     tmpdir=None,
 ):
-    precomputed_factor = lambda_value * match_reward / math.log(2)
-    precomputed_log_K = math.log(K_value) / math.log(2)
 
     bam, references = parms
     dt.options.progress.enabled = False
@@ -506,7 +513,10 @@ def get_bam_data(
             reference_length = reference_lengths[reference]
             aln_data = []
             fetch = samfile.fetch(reference, multiple_iterators=False, until_eof=True)
+            # Initialize a list to store alignment information along with raw scores
+            alignment_info = []
 
+            # Step 1: Calculate the Global Alignment Scores and store them along with other alignment information
             for aln in fetch:
                 query_length = aln.query_length or aln.infer_query_length()
                 if query_length >= min_read_length and query_length <= max_read_length:
@@ -516,23 +526,48 @@ def get_bam_data(
                         num_matches = query_length - num_mismatches
                         num_gaps = aln.get_tag("XO") if aln.has_tag("XO") else 0
                         gap_extensions = aln.get_tag("XG") if aln.has_tag("XG") else 0
-
+                        # Calculate the global alignment score S
                         S = (
                             (num_matches * match_reward)
                             - (num_mismatches * mismatch_penalty)
                             - (num_gaps * gap_open_penalty)
                             - (gap_extensions * gap_extension_penalty)
                         )
-                        bit_score = precomputed_factor * S - precomputed_log_K
-
-                        aln_data.append(
+                        # Store the alignment information including the raw score
+                        alignment_info.append(
                             (
                                 aln.query_name,
                                 aln.reference_name,
-                                bit_score,
                                 reference_length,
+                                S,  # Store the raw alignment score here
                             )
                         )
+
+            # Step 2: Extract scores for normalization
+            if alignment_info:
+                # Extract raw scores from alignment_info
+                raw_scores = np.array([info[3] for info in alignment_info])
+
+                # Shift Scores to Ensure All Positive Values
+                min_score = np.min(raw_scores)
+                shifted_scores = (
+                    raw_scores - min_score + 1
+                )  # Shift scores to make all positive
+
+                # Step 3: Update alignment_info with the normalized probabilities
+                aln_data = []
+                for i, info in enumerate(alignment_info):
+                    aln_data.append(
+                        (
+                            info[0],  # query_name
+                            info[1],  # reference_name
+                            shifted_scores[i],  # normalized probability
+                            info[2],  # reference_length
+                        )
+                    )
+            else:
+                # Handle the case where no alignments passed the filter
+                aln_data = []
 
             if aln_data:
                 aln_data_dt = dt.Frame(
@@ -566,8 +601,6 @@ def reassign_reads(
     mismatch_penalty,
     gap_open_penalty,
     gap_extension_penalty,
-    lambda_value,
-    K_value,
     reference_lengths=None,
     threads=1,
     min_read_count=1,
@@ -682,8 +715,6 @@ def reassign_reads(
                         mismatch_penalty=mismatch_penalty,
                         gap_open_penalty=gap_open_penalty,
                         gap_extension_penalty=gap_extension_penalty,
-                        lambda_value=lambda_value,
-                        K_value=K_value,
                         threads=s_threads,
                         tmpdir=out_files["tmp_dir"],
                     ),
@@ -711,8 +742,6 @@ def reassign_reads(
                         mismatch_penalty=mismatch_penalty,
                         gap_open_penalty=gap_open_penalty,
                         gap_extension_penalty=gap_extension_penalty,
-                        lambda_value=lambda_value,
-                        K_value=K_value,
                         threads=s_threads,
                         tmpdir=out_files["tmp_dir"],
                     ),
@@ -1004,8 +1033,6 @@ def reassign(args):
         mismatch_penalty=args.mismatch_penalty,
         gap_open_penalty=args.gap_open_penalty,
         gap_extension_penalty=args.gap_extension_penalty,
-        lambda_value=args.lambda_value,
-        K_value=args.K_value,
         disable_sort=args.disable_sort,
         tmp_dir=tmp_dir,
     )
