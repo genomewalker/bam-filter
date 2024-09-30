@@ -301,7 +301,7 @@ The program will produce two main outputs:
 
 The first step in the reassignment process is calculating an `Alignment Score` for each read-genome pair using data from the BAM file. For each alignment, we calculate a raw score $S'_{ij}$:
 
-$$S'_{ij} = r_m M_{ij} - p_m X_{ij} - p_o G_{ij} - p_e E_{ij}$$
+$$S^\prime_{ij} = r_m M_{ij} - p_m X_{ij} - p_o G_{ij} - p_e E_{ij}$$
 
 where:
 - $M_{ij}$ is the number of matching bases
@@ -312,13 +312,13 @@ where:
 
 We then normalize the raw scores in two steps. First, we shift scores to ensure non-negativity:
 
-$$S''_{ij} = S'_{ij} - \min_{i,j}(S'_{ij}) + 1$$
+$$S^{\prime\prime}_{ij} = r_m M_{ij} - p_m X_{ij} - p_o G_{ij} - p_e E_{ij}$$
 
 Then, we normalize by alignment length:
 
-$$S_{ij} = \frac{S''_{ij}}{l(a_{ij})}$$
+$$S_{ij} = \frac{S^{\prime\prime}_{ij}}{L(a_{ij})}$$
 
-where $l(a_{ij})$ is the length of the alignment. These normalized scores $S_{ij}$ serve as the initial alignment scores in the subsequent E-M algorithm.
+where $L(a_{ij})$ is the length of the alignment. These normalized scores $S_{ij}$ serve as the initial alignment scores in the subsequent E-M algorithm.
 
 Let $R = \{r_1, \ldots, r_n\}$ represent the set of reads, and $G = \{g_1, \ldots, g_m\}$ represent the set of reference genomes. The goal is to estimate the probability $P(r_i|g_j)$ of read $r_i$ originating from genome $g_j$.
 
