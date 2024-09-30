@@ -315,16 +315,18 @@ $$S'' = \frac{S'}{L}$$
 
 Using these normalized scores, we initialize the probability $P(r_i|g_j)$ of read $r_i$ originating from reference sequence $g_j$:
 
-$$P(r_i|g_j) = \frac{S''_{ij}}{\sum_{k} S''_{ik}}$$
+$$P(r_i|g_j) = \frac{S''\_{ij}}{\sum_{k} S''\_{ik}}$$
 
 The algorithm then enters an iterative refinement phase. In each iteration, it first calculates subject weights:
 
 $$W_j = \sum_i P(r_i|g_j)$$
+
 $$W'_j = \frac{W_j}{L_j}$$
 
 where $L_j$ is the length of reference sequence $g_j$. These weights are used to update the probabilities:
 
 $$P'(r_i|g_j) = P(r_i|g_j) \cdot W'_j$$
+
 $$P''(r_i|g_j) = \frac{P'(r_i|g_j)}{\sum_k P'(r_i|g_k)}$$
 
 Following this update, the algorithm filters alignments. For each read $r_i$, it calculates the maximum probability across all references:
