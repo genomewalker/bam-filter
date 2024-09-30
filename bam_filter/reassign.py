@@ -540,6 +540,7 @@ def get_bam_data(
                                 aln.reference_name,
                                 reference_length,
                                 S,  # Store the raw alignment score here
+                                aln.query_alignment_length,
                             )
                         )
 
@@ -547,13 +548,13 @@ def get_bam_data(
             if alignment_info:
                 # Extract raw scores from alignment_info
                 raw_scores = np.array([info[3] for info in alignment_info])
-
+                aln_lengths = np.array([info[4] for info in alignment_info])
                 # Shift Scores to Ensure All Positive Values
                 min_score = np.min(raw_scores)
                 shifted_scores = (
                     raw_scores - min_score + 1
                 )  # Shift scores to make all positive
-
+                shifted_scores = shifted_scores / aln_lengths
                 # Step 3: Update alignment_info with the normalized probabilities
                 aln_data = []
                 for i, info in enumerate(alignment_info):

@@ -5,23 +5,14 @@
 [![GitHub release (latest by date including pre-releases)](https://img.shields.io/github/v/release/genomewalker/bam-filter?include_prereleases&label=version)](https://github.com/genomewalker/bam-filter/releases) [![bam-filter](https://github.com/genomewalker/bam-filter/workflows/filterBAM_ci/badge.svg)](https://github.com/genomewalker/bam-filter/actions) [![PyPI](https://img.shields.io/pypi/v/bam-filter)](https://pypi.org/project/bam-filter/) [![Conda](https://img.shields.io/conda/v/genomewalker/bam-filter)](https://anaconda.org/genomewalker/bam-filter)
 
 
-A simple tool to process a BAM file and filter references with uneven coverages and estimate taxonomic abundances. FilterBAM has three main goals:
-1. Reassign reads to the reference they belong using an E-M algorithm that takes into account the alignment score. The alignment score is derived from the BAM file and is computed as follows:
-$$
-\begin{align*}
-&\text{Alignment Score} = \log_2(S - S_{\text{min}} + 1) \\
-&\text{where:} \\
-&S = (\text{Number of matches} \times \text{Match reward}) \\
-&\hspace{30pt} - (\text{Number of mismatches} \times \text{Mismatch penalty}) \\
-&\hspace{30pt} - (\text{Number of gaps} \times \text{Gap open penalty}) \\
-&\hspace{30pt} - (\text{Gap extensions} \times \text{Gap extension penalty})
-\end{align*}
-$$
+A simple tool to process a BAM file, filter references with uneven coverages, and estimate taxonomic abundances. FilterBAM has three main goals:
 
-    * Number of gaps and gap extensions are obtained from the BAM tags **XG** and **XO** if present.
-    * The formula ensures that the alignment scores are positive by shifting all scores upward by subtracting the minimum score (S<sub>min</sub>) and adding 1 before applying the logarithm. 
-2. Estimate several metrics for each reference in the BAM file and filter those references that do not meet the defined criteria.
-3. Perform an LCA analysis using the reads that passed the filtering criteria and estimate the taxonomic abundances of each rank by normalizing the number of reads by the length of the reference. We resolve to the most likely reference using a likelihood-based approach. The likelihood is calculated for potential taxonomic paths from the partial taxonomic assignment of each read to its descendants in the taxonomy tree. The paths are ranked based on their likelihood, and the most probable reference is selected for each partial rank. It also can use the TAD (Truncated Average Depth) estimated reads for the LCA analysis, so it can minimize the effect of uneven coverages across the reference.
+1. **Reassign reads** to the reference they belong using an E-M algorithm that takes into account the alignment score. 
+
+2. **Estimate several metrics** for each reference in the BAM file and filter those references that do not meet the defined criteria.
+
+3. **Perform an LCA (Last Common Ancestor) analysis** using the reads that pass the filtering criteria. The taxonomic abundances for each rank are estimated by normalizing the number of reads by the length of the reference. The LCA approach ranks taxonomic paths based on likelihood, selecting the most probable reference. The program also uses the TAD (Truncated Average Depth) estimated reads for the LCA analysis, which helps mitigate the effect of uneven coverages across references.
+
 
 
 # Installation
@@ -305,7 +296,56 @@ The program will produce two main outputs:
     - **tax_abund_tad**: Counts estimated using the estimated number of reads in the TAD region and normalized by the length of the TAD region
     - **n_reads_tad**: Number of reads estimated in the TAD region using the equation *C = LN / G*, where C stands for the TAD coverage, N for the length of the TAD region and L for the average read length mapped to the reference.
 
-> 
+
+## How the reassignment process works
+
+The first step in the reassignment process is calculating an `Alignment Score` for each read-genome pair using data from the BAM file. For each alignment, we calculate a raw score $S'_{ij}$:
+
+$$S'_{ij} = r_m M_{ij} - p_m X_{ij} - p_o G_{ij} - p_e E_{ij}$$
+
+where:
+- $M_{ij}$ is the number of matching bases
+- $X_{ij}$ is the number of mismatching bases
+- $G_{ij}$ is the number of gap openings
+- $E_{ij}$ is the number of gap extensions
+- $r_m$, $p_m$, $p_o$, and $p_e$ are the match reward, mismatch penalty, gap opening penalty, and gap extension penalty, respectively
+
+We then normalize the raw scores in two steps. First, we shift scores to ensure non-negativity:
+
+$$S''_{ij} = S'_{ij} - \min_{i,j}(S'_{ij}) + 1$$
+
+Then, we normalize by alignment length:
+
+$$S_{ij} = \frac{S''_{ij}}{l(a_{ij})}$$
+
+where $l(a_{ij})$ is the length of the alignment. These normalized scores $S_{ij}$ serve as the initial alignment scores in the subsequent E-M algorithm.
+
+Let $R = \{r_1, \ldots, r_n\}$ represent the set of reads, and $G = \{g_1, \ldots, g_m\}$ represent the set of reference genomes. The goal is to estimate the probability $P(r_i|g_j)$ of read $r_i$ originating from genome $g_j$.
+
+The reassignment algorithm begins by initializing the probability $P(r_i|g_j)$ for each read-genome pair:
+
+$$P(r_i|g_j) = \frac{S_{ij}}{\sum_{k} S_{ik}}$$
+
+The algorithm then iterates through Expectation and Maximization steps. In the Expectation step, we compute the expected weight $W_{ij}$ for each read-genome pair:
+
+$$W_{ij} = S_{ij} \cdot \frac{\sum_{k} W_{kj}}{L_j}$$
+
+where $L_j$ is the length of genome $g_j$.
+
+In the Maximization step, we update the probability estimates based on the calculated weights:
+
+$$P^{\text{new}}(r_i|g_j) = \frac{W_{ij}}{\sum_{k} W_{ik}}$$
+
+To improve convergence, we apply a damping factor $\alpha$:
+
+$$P^{\text{final}}(r_i|g_j) = \alpha \cdot P^{\text{new}}(r_i|g_j) + (1-\alpha) \cdot P^{\text{old}}(r_i|g_j)$$
+
+These Expectation and Maximization steps are repeated until the probabilities converge or a predefined number of iterations is reached.
+
+After convergence, we assign each read to the genome with the highest probability:
+
+$$g^*(r_i) = \arg\max_{j} P(r_i|g_j)$$
+
 
 ### Applications and recommendations
 
