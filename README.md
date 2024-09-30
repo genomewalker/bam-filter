@@ -5,24 +5,14 @@
 [![GitHub release (latest by date including pre-releases)](https://img.shields.io/github/v/release/genomewalker/bam-filter?include_prereleases&label=version)](https://github.com/genomewalker/bam-filter/releases) [![bam-filter](https://github.com/genomewalker/bam-filter/workflows/filterBAM_ci/badge.svg)](https://github.com/genomewalker/bam-filter/actions) [![PyPI](https://img.shields.io/pypi/v/bam-filter)](https://pypi.org/project/bam-filter/) [![Conda](https://img.shields.io/conda/v/genomewalker/bam-filter)](https://anaconda.org/genomewalker/bam-filter)
 
 
-A simple tool to process a BAM file and filter references with uneven coverages and estimate taxonomic abundances. FilterBAM has three main goals:
-1. Reassign reads to the reference they belong using an E-M algorithm that takes into account the alignment score. The alignment score is calculated using a variation of the [BLAST bit score](https://www.ncbi.nlm.nih.gov/books/NBK62051/) using the information available in the BAM file. The alignment score is calculated as follows:
+A simple tool to process a BAM file, filter references with uneven coverages, and estimate taxonomic abundances. FilterBAM has three main goals:
 
-   $$
-   \begin{align*}
-   &\hspace{15pt}\text{Alignment Score} = \log_2(S+C) \\
-   &\hspace{15pt}\text{where:} \\
-   &\hspace{15pt}S = (\text{Number of matches} \times \text{Match reward}) - (\text{Number of mismatches} \times \text{Mismatch penalty}) \\
-   &\hspace{38pt} - (\text{Number of gaps} \times \text{Gap open penalty}) - (\text{Gap extensions} \times \text{Gap extension penalty}) \\
-   &\hspace{15pt}\text{and:} \\
-   &\hspace{38pt} C = |S_{\text{min}}| + \text{margin} 
-   \end{align*}
-   $$
+1. **Reassign reads** to the reference they belong using an E-M algorithm that takes into account the alignment score. 
 
-    * Number of gaps and gap extensions are obtained from the BAM tags **XG** and **XO** if present.
-    * **Margin** is set to a small positive integer, such as 1, 5, or 10. The exact value can be chosen based on how close the minimum possible score   
-2. Estimate several metrics for each reference in the BAM file and filter those references that do not meet the defined criteria.
-3. Perform an LCA analysis using the reads that passed the filtering criteria and estimate the taxonomic abundances of each rank by normalizing the number of reads by the length of the reference. We resolve to the most likely reference using a likelihood-based approach. The likelihood is calculated for potential taxonomic paths from the partial taxonomic assignment of each read to its descendants in the taxonomy tree. The paths are ranked based on their likelihood, and the most probable reference is selected for each partial rank. It also can use the TAD (Truncated Average Depth) estimated reads for the LCA analysis, so it can minimize the effect of uneven coverages across the reference.
+2. **Estimate several metrics** for each reference in the BAM file and filter those references that do not meet the defined criteria.
+
+3. **Perform an LCA (Last Common Ancestor) analysis** using the reads that pass the filtering criteria. The taxonomic abundances for each rank are estimated by normalizing the number of reads by the length of the reference. The LCA approach ranks taxonomic paths based on likelihood, selecting the most probable reference. The program also uses the TAD (Truncated Average Depth) estimated reads for the LCA analysis, which helps mitigate the effect of uneven coverages across references.
+
 
 
 # Installation
@@ -306,7 +296,48 @@ The program will produce two main outputs:
     - **tax_abund_tad**: Counts estimated using the estimated number of reads in the TAD region and normalized by the length of the TAD region
     - **n_reads_tad**: Number of reads estimated in the TAD region using the equation *C = LN / G*, where C stands for the TAD coverage, N for the length of the TAD region and L for the average read length mapped to the reference.
 
-> 
+
+## How the reassignment process works
+
+The read reassignment algorithm aims to resolve multi-mapping reads by iteratively refining alignment probabilities between reads and reference sequences. It begins by calculating an initial score $S$ for each alignment:
+
+$$S = r_m M - p_m X - p_o G - p_e E$$
+
+where $M$, $X$, $G$, and $E$ represent the number of matches, mismatches, gap openings, and gap extensions respectively. The terms $r_m$, $p_m$, $p_o$, and $p_e$ are the corresponding rewards or penalties.
+
+These raw scores are then normalized in two steps. First, they are shifted to ensure they are positive:
+
+$$S' = S - \min(S) + 1$$
+
+Then, they are divided by the alignment length $L$:
+
+$$S'' = \frac{S'}{L}$$
+
+Using these normalized scores, we initialize the probability $P(r_i|g_j)$ of read $r_i$ originating from reference sequence $g_j$:
+
+$$P(r_i|g_j) = \frac{S''\_{ij}}{\sum_{k} S''\_{ik}}$$
+
+The algorithm then enters an iterative refinement phase. In each iteration, it first calculates subject weights:
+
+$$W_j = \sum_i P(r_i|g_j)$$
+
+$$W'_j = \frac{W_j}{L_j}$$
+
+where $L_j$ is the length of reference sequence $g_j$. These weights are used to update the probabilities:
+
+$$P'(r_i|g_j) = P(r_i|g_j) \cdot W'_j$$
+
+$$P''(r_i|g_j) = \frac{P'(r_i|g_j)}{\sum_k P'(r_i|g_k)}$$
+
+Following this update, the algorithm filters alignments. For each read $r_i$, it calculates the maximum probability across all references:
+
+$$P_{max}(r_i) = \max_j P''(r_i|g_j)$$
+
+It then applies a scaling factor $\alpha$ (typically < 1) and retains only alignments satisfying:
+
+$$P''(r_i|g_j) \geq \alpha \cdot P_{max}(r_i)$$
+
+This iterative process continues until no more alignments are removed or a maximum number of iterations is reached. The final read-to-reference assignments are implicit in the filtering process, with only the highest probability alignments retained.
 
 ### Applications and recommendations
 
