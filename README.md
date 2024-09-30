@@ -299,53 +299,43 @@ The program will produce two main outputs:
 
 ## How the reassignment process works
 
-The first step in the reassignment process is calculating an `Alignment Score` for each read-genome pair using data from the BAM file. For each alignment, we calculate a raw score $S'_{ij}$:
+The read reassignment algorithm aims to resolve multi-mapping reads by iteratively refining alignment probabilities between reads and reference sequences. It begins by calculating an initial score $S$ for each alignment:
 
-$$S^\prime_{ij} = r_m M_{ij} - p_m X_{ij} - p_o G_{ij} - p_e E_{ij}$$
+$$S = r_m M - p_m X - p_o G - p_e E$$
 
-where:
-- $M_{ij}$ is the number of matching bases
-- $X_{ij}$ is the number of mismatching bases
-- $G_{ij}$ is the number of gap openings
-- $E_{ij}$ is the number of gap extensions
-- $r_m$, $p_m$, $p_o$, and $p_e$ are the match reward, mismatch penalty, gap opening penalty, and gap extension penalty, respectively
+where $M$, $X$, $G$, and $E$ represent the number of matches, mismatches, gap openings, and gap extensions respectively. The terms $r_m$, $p_m$, $p_o$, and $p_e$ are the corresponding rewards or penalties.
 
-We then normalize the raw scores in two steps. First, we shift scores to ensure non-negativity:
+These raw scores are then normalized in two steps. First, they are shifted to ensure they are positive:
 
-$$S^{\prime\prime}_{ij} = r_m M_{ij} - p_m X_{ij} - p_o G_{ij} - p_e E_{ij}$$
+$$S' = S - \min(S) + 1$$
 
-Then, we normalize by alignment length:
+Then, they are divided by the alignment length $L$:
 
-$$S_{ij} = \frac{S^{\prime\prime}_{ij}}{L(a_{ij})}$$
+$$S'' = \frac{S'}{L}$$
 
-where $L(a_{ij})$ is the length of the alignment. These normalized scores $S_{ij}$ serve as the initial alignment scores in the subsequent E-M algorithm.
+Using these normalized scores, we initialize the probability $P(r_i|g_j)$ of read $r_i$ originating from reference sequence $g_j$:
 
-Let $R = \{r_1, \ldots, r_n\}$ represent the set of reads, and $G = \{g_1, \ldots, g_m\}$ represent the set of reference genomes. The goal is to estimate the probability $P(r_i|g_j)$ of read $r_i$ originating from genome $g_j$.
+$$P(r_i|g_j) = \frac{S''_{ij}}{\sum_{k} S''_{ik}}$$
 
-The reassignment algorithm begins by initializing the probability $P(r_i|g_j)$ for each read-genome pair:
+The algorithm then enters an iterative refinement phase. In each iteration, it first calculates subject weights:
 
-$$P(r_i|g_j) = \frac{S_{ij}}{\sum_{k} S_{ik}}$$
+$$W_j = \sum_i P(r_i|g_j)$$
+$$W'_j = \frac{W_j}{L_j}$$
 
-The algorithm then iterates through Expectation and Maximization steps. In the Expectation step, we compute the expected weight $W_{ij}$ for each read-genome pair:
+where $L_j$ is the length of reference sequence $g_j$. These weights are used to update the probabilities:
 
-$$W_{ij} = S_{ij} \cdot \frac{\sum_{k} W_{kj}}{L_j}$$
+$$P'(r_i|g_j) = P(r_i|g_j) \cdot W'_j$$
+$$P''(r_i|g_j) = \frac{P'(r_i|g_j)}{\sum_k P'(r_i|g_k)}$$
 
-where $L_j$ is the length of genome $g_j$.
+Following this update, the algorithm filters alignments. For each read $r_i$, it calculates the maximum probability across all references:
 
-In the Maximization step, we update the probability estimates based on the calculated weights:
+$$P_{max}(r_i) = \max_j P''(r_i|g_j)$$
 
-$$P^{\text{new}}(r_i|g_j) = \frac{W_{ij}}{\sum_{k} W_{ik}}$$
+It then applies a scaling factor $\alpha$ (typically < 1) and retains only alignments satisfying:
 
-To improve convergence, we apply a damping factor $\alpha$:
+$$P''(r_i|g_j) \geq \alpha \cdot P_{max}(r_i)$$
 
-$$P^{\text{final}}(r_i|g_j) = \alpha \cdot P^{\text{new}}(r_i|g_j) + (1-\alpha) \cdot P^{\text{old}}(r_i|g_j)$$
-
-These Expectation and Maximization steps are repeated until the probabilities converge or a predefined number of iterations is reached.
-
-After convergence, we assign each read to the genome with the highest probability:
-
-$$g^*(r_i) = \arg\max_{j} P(r_i|g_j)$$
-
+This iterative process continues until no more alignments are removed or a maximum number of iterations is reached. The final read-to-reference assignments are implicit in the filtering process, with only the highest probability alignments retained.
 
 ### Applications and recommendations
 
