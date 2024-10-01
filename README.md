@@ -11,7 +11,7 @@ A simple tool to process a BAM file, filter references with uneven coverages, an
 
 2. **Estimate several metrics** for each reference in the BAM file and filter those references that do not meet the defined criteria.
 
-3. **Perform an LCA (Last Common Ancestor) analysis** using the reads that pass the filtering criteria. The taxonomic abundances for each rank are estimated by normalizing the number of reads by the length of the reference. The LCA approach ranks taxonomic paths based on likelihood, selecting the most probable reference. The program also uses the TAD (Truncated Average Depth) estimated reads for the LCA analysis, which helps mitigate the effect of uneven coverages across references.
+3. **Perform an LCA (Last Common Ancestor) analysis** using the reads that pass the filtering criteria and estimate genome normalized abundances at the rank specified.
 
 
 
@@ -296,58 +296,6 @@ The program will produce two main outputs:
     - **tax_abund_tad**: Counts estimated using the estimated number of reads in the TAD region and normalized by the length of the TAD region
     - **n_reads_tad**: Number of reads estimated in the TAD region using the equation *C = LN / G*, where C stands for the TAD coverage, N for the length of the TAD region and L for the average read length mapped to the reference.
 
-
-## How the reassignment process works
-
-The read reassignment algorithm aims to resolve multi-mapping reads by iteratively refining alignment probabilities between reads and reference sequences. It begins by calculating an initial score $S$ for each alignment:
-
-$$S = r_m M - p_m X - p_o G - p_e E$$
-
-where $M$, $X$, $G$, and $E$ represent the number of matches, mismatches, gap openings, and gap extensions respectively. The terms $r_m$, $p_m$, $p_o$, and $p_e$ are the corresponding rewards or penalties.
-
-These raw scores are then normalized in two steps. First, they are shifted to ensure they are positive:
-
-$$S' = S - \min(S) + 1$$
-
-Then, they are divided by the alignment length $L$:
-
-$$S'' = \frac{S'}{L}$$
-
-Using these normalized scores, we initialize the probability $P(r_i|g_j)$ of read $r_i$ originating from reference sequence $g_j$:
-
-$$P(r_i|g_j) = \frac{S''\_{ij}}{\sum_{k} S''\_{ik}}$$
-
-The algorithm then enters an iterative refinement phase. In each iteration, it first calculates subject weights:
-
-$$W_j = \sum_i P(r_i|g_j)$$
-
-$$W'_j = \frac{W_j}{L_j}$$
-
-where $L_j$ is the length of reference sequence $g_j$. These weights are used to update the probabilities:
-
-$$P'(r_i|g_j) = P(r_i|g_j) \cdot W'_j$$
-
-$$P''(r_i|g_j) = \frac{P'(r_i|g_j)}{\sum_k P'(r_i|g_k)}$$
-
-Following this update, the algorithm filters alignments. For each read $r_i$, it calculates the maximum probability across all references:
-
-$$P_{max}(r_i) = \max_j P''(r_i|g_j)$$
-
-It then applies a scaling factor $\alpha$ (typically < 1) and retains only alignments satisfying:
-
-$$P''(r_i|g_j) \geq \alpha \cdot P_{max}(r_i)$$
-
-This iterative process continues until no more alignments are removed or a maximum number of iterations is reached. The final read-to-reference assignments are implicit in the filtering process, with only the highest probability alignments retained.
-
-### Applications and recommendations
-
-One of the main applications of **bam-filter** is to reliably identify which potential organisms are present in a metagenomic ancient sample, and get relatively accurate taxonomic abundances, even when they are present in very low abundances. The resulting BAM file then can be used as input for [metaDMG](https://github.com/metaDMG-dev/metaDMG-cpp). We rely on several measures to discriminate between noise and a potential signal, analyzing the mapping results at two different levels:
-
-- Is the observed breadth aligned with the expected one?
-- Are the reads spread evenly across the reference or they are clumped in a few regions?
-
-To assess the first question we use the concepts defined [here](https://doi.org/10.1016/0888-7543(88)90007-9). We estimate the ratio between the observed and expected breadth as a function of the coverage. If we get a **breadth_exp_ratio** close to 1, it means that the coverage we observed is close to the one we expect based on the calculated coverage. While this measure is already a strong indicator of a potential signal, we complement it with the metrics that measure the **normalized positional entropy** and the **normalized distribution inequality** (Gini coefficient) of the positions in the coverage. For details on how are calculated check [here](https://www.frontiersin.org/articles/10.3389/fmicb.2022.918015/full). These two metrics will help to identify those cases where we get a high **breadth_exp_ratio** but the coverage is not evenly distributed across the reference but instead is clumped in a few regions. One thing to be aware of is that we need to bin the reference to calculate those metrics. In our case, we use the ability of [numpy.histogram](https://numpy.org/doc/stable/reference/generated/numpy.histogram.html) to identify the [numbers of bins](https://numpy.org/doc/stable/reference/generated/numpy.histogram_bin_edges.html#numpy.histogram_bin_edges), either using the Sturges or the Freedman-Diaconis rule. Finally, we use the [knee point detection algorithm](https://github.com/arvkevi/kneed) to identify the optimal values where to filter the Gini coefficient as a function of the positional entropy.
-
 ## LCA
 
 Full list of options:
@@ -400,3 +348,57 @@ filterBAM lca --bam c55d4e2df1.dedup.filtered.bam --names ./taxonomy/names.dmp -
 
 **--scale**: Scale taxonomic abundance by this factor; suffix K/M recognized 
 
+## How the reassignment process works
+
+The read reassignment algorithm aims to resolve multi-mapping reads by iteratively refining alignment probabilities between reads and reference sequences. It begins by calculating an initial score $S$ for each alignment:
+
+$$S = r_m M - p_m X - p_o G - p_e E$$
+
+where $M$, $X$, $G$, and $E$ represent the number of matches, mismatches, gap openings, and gap extensions respectively. The terms $r_m$, $p_m$, $p_o$, and $p_e$ are the corresponding rewards or penalties.
+
+These raw scores are then normalized in two steps. First, they are shifted to ensure they are positive:
+
+$$S' = S - \min(S) + 1$$
+
+Then, they are divided by the alignment length $L$:
+
+$$S'' = \frac{S'}{L}$$
+
+Using these normalized scores, we initialize the probability $P(r_i|g_j)$ of read $r_i$ originating from reference sequence $g_j$:
+
+$$P(r_i|g_j) = \frac{S''\_{ij}}{\sum_{k} S''\_{ik}}$$
+
+The algorithm then enters an iterative refinement phase. In each iteration, it first calculates subject weights:
+
+$$W_j = \sum_i P(r_i|g_j)$$
+
+$$W'_j = \frac{W_j}{L_j}$$
+
+where $L_j$ is the length of reference sequence $g_j$. These weights are used to update the probabilities:
+
+$$P'(r_i|g_j) = P(r_i|g_j) \cdot W'_j$$
+
+$$P''(r_i|g_j) = \frac{P'(r_i|g_j)}{\sum_k P'(r_i|g_k)}$$
+
+Following this update, the algorithm filters alignments. For each read $r_i$, it calculates the maximum probability across all references:
+
+$$P_{max}(r_i) = \max_j P''(r_i|g_j)$$
+
+It then applies a scaling factor $\alpha$ (typically < 1) and retains only alignments satisfying:
+
+$$P''(r_i|g_j) \geq \alpha \cdot P_{max}(r_i)$$
+
+This iterative process continues until no more alignments are removed or a maximum number of iterations is reached. The final read-to-reference assignments are implicit in the filtering process, with only the highest probability alignments retained.
+
+### Applications and recommendations
+
+One of the main applications of **bam-filter** is to reliably identify which potential organisms are present in a metagenomic ancient sample, and get relatively accurate taxonomic abundances, even when they are present in very low abundances. The resulting BAM file then can be used as input for [metaDMG](https://github.com/metaDMG-dev/metaDMG-cpp). We rely on several measures to discriminate between noise and a potential signal, analyzing the mapping results at two different levels:
+
+- Is the observed breadth aligned with the expected one?
+- Are the reads spread evenly across the reference or they are clumped in a few regions?
+
+To assess the first question we use the concepts defined [here](https://doi.org/10.1016/0888-7543(88)90007-9). We estimate the ratio between the observed and expected breadth as a function of the coverage. If we get a **breadth_exp_ratio** close to 1, it means that the coverage we observed is close to the one we expect based on the calculated coverage. While this measure is already a strong indicator of a potential signal, we complement it with the metrics that measure the **normalized positional entropy** and the **normalized distribution inequality** (Gini coefficient) of the positions in the coverage. For details on how are calculated check [here](https://www.frontiersin.org/articles/10.3389/fmicb.2022.918015/full). These two metrics will help to identify those cases where we get a high **breadth_exp_ratio** but the coverage is not evenly distributed across the reference but instead is clumped in a few regions. One thing to be aware of is that we need to bin the reference to calculate those metrics. In our case, we use the ability of [numpy.histogram](https://numpy.org/doc/stable/reference/generated/numpy.histogram.html) to identify the [numbers of bins](https://numpy.org/doc/stable/reference/generated/numpy.histogram_bin_edges.html#numpy.histogram_bin_edges), either using the Sturges or the Freedman-Diaconis rule. Finally, we use the [knee point detection algorithm](https://github.com/arvkevi/kneed) to identify the optimal values where to filter the Gini coefficient as a function of the positional entropy.
+
+## LCA genome normalized abundances
+
+The taxonomic abundances for each rank are estimated by normalizing the number of reads by the length of the reference. The LCA approach ranks taxonomic paths based on likelihood, selecting the most probable reference. The program also uses the TAD (Truncated Average Depth) estimated reads for the LCA analysis, which helps mitigate the effect of uneven coverages across references.

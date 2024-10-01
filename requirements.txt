@@ -1,9 +1,0 @@
-tqdm==4.50.0
-community==1.0.0b1
-simple_slurm==0.1.5
-pandas<1.2.0
-scipy==1.5.2
-networkx==2.5
-cx_Freeze==6.2
-py2exe==0.9.2.2
-PyYAML>=5.4
