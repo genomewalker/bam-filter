@@ -1067,6 +1067,7 @@ def filter_reference_BAM(
     transform_cov_evenness=False,
     sort_by_name=False,
     disable_sort=False,
+    write_bam=False,
 ):
     """Filter BAM based on certain conditions
 
@@ -1162,7 +1163,7 @@ def filter_reference_BAM(
             sep="\t",
             index=False,
         )
-        if out_files["bam_filtered"] is not None:
+        if write_bam:
             logging.info("Writing filtered BAM file... (be patient)")
             # refs_dict = dict(
             #     zip(df_filtered["reference"], df_filtered["bam_reference_length"])

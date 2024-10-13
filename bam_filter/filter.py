@@ -257,6 +257,7 @@ def filter_references(args):
             sort_by_name=args.sort_by_name,
             min_read_ani=args.min_read_ani,
             disable_sort=args.disable_sort,
+            write_bam=args.bam_filtered is not None,
         )
     else:
         logging.info("Skipping filtering of reference BAM file.")
