@@ -384,7 +384,7 @@ Following this update, the algorithm filters alignments. For each read $r_i$, it
 
 $$P_{max}(r_i) = \max_j P''(r_i|g_j)$$
 
-It then applies a scaling factor $\alpha$ (typically < 1) and retains only alignments satisfying:
+It then applies a scaling factor $\alpha$ (a value < 1) and retains only alignments satisfying:
 
 $$P''(r_i|g_j) \geq \alpha \cdot P_{max}(r_i)$$
 
