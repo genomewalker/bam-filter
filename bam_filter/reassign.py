@@ -27,6 +27,7 @@ from bam_filter.sam_utils import check_bam_file
 import shutil
 import uuid
 import psutil
+from memory_profiler import profile
 
 log = logging.getLogger("my_logger")
 
@@ -477,6 +478,7 @@ def normalize_scores(scores):
     return probabilities
 
 
+@profile
 def get_bam_data(
     parms,
     ref_lengths=None,
