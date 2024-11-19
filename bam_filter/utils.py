@@ -17,6 +17,7 @@ import numpy as np
 from pathlib import Path
 import pysam
 import tempfile
+from difflib import get_close_matches
 
 log = logging.getLogger("my_logger")
 log.setLevel(logging.INFO)
@@ -379,24 +380,24 @@ def check_suffix(val, parser, var):
         )
 
 
-# Example usage with argparse
-if __name__ == "__main__":
+# # Example usage with argparse
+# if __name__ == "__main__":
 
-    parser = argparse.ArgumentParser(description="Process some integers.")
-    parser.add_argument(
-        "--scale",
-        type=lambda x: check_suffix(x, parser, "--scale"),
-        help="Scale value with K or M suffix",
-    )
-    parser.add_argument(
-        "--memory",
-        type=lambda x: check_suffix(x, parser, "--memory"),
-        help="Memory value with K, M, or G suffix",
-    )
+#     parser = argparse.ArgumentParser(description="Process some integers.")
+#     parser.add_argument(
+#         "--scale",
+#         type=lambda x: check_suffix(x, parser, "--scale"),
+#         help="Scale value with K or M suffix",
+#     )
+#     parser.add_argument(
+#         "--memory",
+#         type=lambda x: check_suffix(x, parser, "--memory"),
+#         help="Memory value with K, M, or G suffix",
+#     )
 
-    args = parser.parse_args()
-    print("Scale:", args.scale)
-    print("Memory:", args.memory)
+#     args = parser.parse_args()
+#     print("Scale:", args.scale)
+#     print("Memory:", args.memory)
 
 
 def get_compression_type(filename):
@@ -607,12 +608,119 @@ help_msg = {
     "max_memory": "Maximum memory to use for the EM algorithm",
 }
 
+from difflib import get_close_matches, SequenceMatcher
+
+
+class SubcommandHelpFormatter(argparse.ArgumentParser):
+    def _similarity_score(self, a, b):
+        # Remove leading dashes for comparison
+        a = a.lstrip("-")
+        b = b.lstrip("-")
+        return SequenceMatcher(None, a, b).ratio()
+
+    def _get_close_matches(self, arg, possibilities, n=3, cutoff=0.65):
+        # Remove leading dashes from the argument for comparison
+        clean_arg = arg.lstrip("-")
+
+        # Calculate similarity scores for all possibilities
+        matches = []
+        for p in possibilities:
+            score = self._similarity_score(arg, p)
+            if score > cutoff:
+                matches.append((p, score))
+
+        # Sort by similarity score and take top N
+        matches.sort(key=lambda x: x[1], reverse=True)
+        best_matches = [m[0] for m in matches[:n]]
+
+        if best_matches:
+            if len(best_matches) == 1:
+                return f"\nDid you mean: {best_matches[0]}?"
+            else:
+                return f"\nDid you mean one of these: {', '.join(best_matches)}?"
+        return ""
+
+    def _get_available_commands(self):
+        commands = []
+        for action in self._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                commands.extend(action.choices.keys())
+        return commands
+
+    def _get_available_arguments(self, parser=None):
+        if parser is None:
+            parser = self
+
+        arguments = []
+        for action in parser._actions:
+            if action.option_strings:
+                arguments.extend(action.option_strings)
+        return sorted(arguments)  # Sort for consistent output
+
+    def print_help(self, file=None):
+        pass
+
+    def _print_message(self, message, file=None):
+        if message and "error:" in message:
+            if file is None:
+                file = sys.stderr
+            file.write(message)
+
+    def _clean_error_message(self, message):
+        if "unrecognized arguments:" in message:
+            parts = message.split(":")
+            arg_part = parts[1].strip()
+            flag = arg_part.split()[0]
+            return f"unrecognized arguments: {flag}"
+        return message
+
+    def error(self, message):
+        commands = self._get_available_commands()
+
+        try:
+            clean_message = self._clean_error_message(message)
+            error_msg = f"error: {clean_message}"
+            suggestion = ""
+
+            if len(sys.argv) > 1:
+                if "invalid choice" in message and sys.argv[1] not in commands:
+                    suggestion = self._get_close_matches(
+                        sys.argv[1], commands, n=3, cutoff=0.65
+                    )
+                elif sys.argv[1] in commands:
+                    for action in self._actions:
+                        if isinstance(action, argparse._SubParsersAction):
+                            subparser = action.choices[sys.argv[1]]
+                            available_args = self._get_available_arguments(subparser)
+
+                            for arg in sys.argv[2:]:
+                                if arg.startswith("-"):
+                                    flag = arg.split("=")[0]
+                                    if flag not in available_args:
+                                        # Group similar arguments together
+                                        parts = flag.lstrip("-").split("-")
+                                        suggestion = self._get_close_matches(
+                                            flag, available_args, n=3, cutoff=0.65
+                                        )
+                                        break
+
+            sys.stderr.write(f"{error_msg}{suggestion}\n")
+            sys.exit(2)
+
+        except Exception:
+            sys.stderr.write(f"error: {message}\n")
+            sys.exit(2)
+
 
 def get_arguments(argv=None):
-    parser = argparse.ArgumentParser(
+    # Use our custom parser
+    parser = SubcommandHelpFormatter(
         description="A simple tool to calculate metrics from a BAM file and filter with uneven coverage.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        allow_abbrev=False,  # Disable prefix matching
     )
+
+    # Add the base arguments
     parser.add_argument(
         "--version",
         action="version",
@@ -623,13 +731,14 @@ def get_arguments(argv=None):
         "--debug", dest="debug", action="store_true", help=help_msg["debug"]
     )
 
+    # Create subparsers with allow_abbrev=False
     sub_parsers = parser.add_subparsers(
         help="positional arguments",
         dest="action",
     )
 
     # Create parent subparser. Note `add_help=False` and creation via `argparse.`
-    parent_parser = argparse.ArgumentParser(add_help=False)
+    parent_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
 
     required = parent_parser.add_argument_group("required arguments")
     required.add_argument(
@@ -671,24 +780,28 @@ def get_arguments(argv=None):
         help=help_msg["threads"],
     )
     # Create the parser sub-command for db creation
-    parser_reassign = sub_parsers.add_parser(
-        "reassign",
-        help="Reassign reads to references using an EM algorithm",
-        parents=[parent_parser],
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    # create the parser sub-commands
     parser_filter = sub_parsers.add_parser(
         "filter",
         help="Filter references based on coverage and other metrics",
         parents=[parent_parser],
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        allow_abbrev=False,
     )
-    parser_lca = sub_parsers.add_parser(
-        "lca",
-        help="Calculate LCA for each read and estimate abundances at each rank",
+
+    parser_reassign = sub_parsers.add_parser(
+        "reassign",
+        help="Reassign reads to references using an EM algorithm",
         parents=[parent_parser],
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        allow_abbrev=False,
+    )
+
+    parser_lca = sub_parsers.add_parser(
+        "lca",
+        help="Calculate LCA for each read and estimate abundances",
+        parents=[parent_parser],
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        allow_abbrev=False,
     )
 
     # createdb_required_args = parser_createdb.add_argument_group("required arguments")
@@ -1298,7 +1411,14 @@ def get_arguments(argv=None):
         required=False,
         help=help_msg["lca_stats"],
     )
-    args = parser.parse_args(None if sys.argv[1:] else ["-h"])
+    if argv is None:
+        argv = sys.argv[1:]
+
+    if not argv:
+        parser.print_help()
+        sys.exit(0)
+
+    args = parser.parse_args(argv)
     return args
 
 

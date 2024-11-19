@@ -13,7 +13,16 @@ see <https://www.gnu.org/licenses/>.
 
 import logging
 import pandas as pd
-from bam_filter.sam_utils import process_bam, filter_reference_BAM, check_bam_file
+
+# from bam_filter.sam_utils import process_bam, filter_reference_BAM, check_bam_file
+# Import BAM utilities
+from bam_filter.bam_utils import (
+    check_bam_file,
+    process_bam,
+    filter_reference_BAM,
+)
+
+
 from bam_filter.utils import (
     get_arguments,
     create_output_files,
