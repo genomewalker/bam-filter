@@ -23,7 +23,7 @@ import os
 import concurrent.futures
 import math
 import warnings
-from bam_filter.sam_utils import check_bam_file
+from bam_filter.bam_utils import check_bam_file
 import shutil
 import uuid
 import psutil

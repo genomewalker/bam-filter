@@ -15,7 +15,7 @@ from bam_filter.utils import (
     create_output_files,
     create_empty_output_files,
 )
-from bam_filter.sam_utils import check_bam_file
+from bam_filter.bam_utils import check_bam_file
 from collections import defaultdict
 from functools import reduce
 import operator
