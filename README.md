@@ -348,47 +348,74 @@ filterBAM lca --bam c55d4e2df1.dedup.filtered.bam --names ./taxonomy/names.dmp -
 
 **--scale**: Scale taxonomic abundance by this factor; suffix K/M recognized 
 
-## How the reassignment process works
+## Read Reassignment Algorithm
 
-The read reassignment algorithm aims to resolve multi-mapping reads by iteratively refining alignment probabilities between reads and reference sequences. It begins by calculating an initial score $S$ for each alignment:
+The algorithm implements a SQUAREM-accelerated Expectation-Maximization (EM) approach to resolve multi-mapping reads by iteratively refining alignment probabilities. For each alignment, we first compute a global alignment score $S$:
 
 $$S = r_m M - p_m X - p_o G - p_e E$$
 
-where $M$, $X$, $G$, and $E$ represent the number of matches, mismatches, gap openings, and gap extensions respectively. The terms $r_m$, $p_m$, $p_o$, and $p_e$ are the corresponding rewards or penalties.
+where:
+- $M$ is the number of matches
+- $X$ is the number of mismatches
+- $G$ is the number of gap openings
+- $E$ is the number of gap extensions
+- $r_m$, $p_m$, $p_o$, and $p_e$ are the corresponding rewards and penalties
 
-These raw scores are then normalized in two steps. First, they are shifted to ensure they are positive:
+The scores are normalized through a two-step process. First, we apply a positive shift transformation:
 
 $$S' = S - \min(S) + 1$$
 
-Then, they are divided by the alignment length $L$:
+followed by length normalization:
 
 $$S'' = \frac{S'}{L}$$
 
-Using these normalized scores, we initialize the probability $P(r_i|g_j)$ of read $r_i$ originating from reference sequence $g_j$:
+where $L$ is the alignment length.
 
-$$P(r_i|g_j) = \frac{S''\_{ij}}{\sum_{k} S''\_{ik}}$$
+These normalized scores initialize the probability distribution $P(r_i|g_j)$ of read $r_i$ originating from genome $g_j$:
 
-The algorithm then enters an iterative refinement phase. In each iteration, it first calculates subject weights:
+$$P(r_i|g_j) = \frac{S''_{ij}}{\sum_{k} S''_{ik}}$$
 
-$$W_j = \sum_i P(r_i|g_j)$$
+The SQUAREM acceleration framework then proceeds as follows:
 
-$$W'_j = \frac{W_j}{L_j}$$
+1. **E-step**: Calculate subject weights
+   $$W_j = \sum_i P(r_i|g_j)$$
+   
+   Normalize by sequence length:
+   $$W'_j = \frac{W_j}{L_j}$$
+   where $L_j$ is the length of genome $j$
 
-where $L_j$ is the length of reference sequence $g_j$. These weights are used to update the probabilities:
+2. **M-step**: Update probabilities
+   $$P'(r_i|g_j) = P(r_i|g_j) \cdot W'_j$$
+   $$P''(r_i|g_j) = \frac{P'(r_i|g_j)}{\sum_k P'(r_i|g_k)}$$
 
-$$P'(r_i|g_j) = P(r_i|g_j) \cdot W'_j$$
+3. **SQUAREM acceleration**: Let $q_1$ and $q_2$ be two consecutive EM updates. Define:
+   $$r = q_1 - P$$
+   $$v = q_2 - q_1$$
+   
+   The optimal step length is:
+   $$\alpha = -\sqrt{\frac{\|r\|^2}{\|v\|^2}}$$
+   
+   The accelerated update is:
+   $$P_{\text{new}} = P - 2\alpha r + \alpha^2 v$$
 
-$$P''(r_i|g_j) = \frac{P'(r_i|g_j)}{\sum_k P'(r_i|g_k)}$$
+4. **Assignment step**: For each read $r_i$, calculate:
+   $$P_{\text{max}}(r_i) = \max_j P''(r_i|g_j)$$
+   
+   Retain alignments satisfying:
+   $$P''(r_i|g_j) \geq \alpha \cdot P_{\text{max}}(r_i)$$
+   where $\alpha$ is a scaling factor (default 0.9)
 
-Following this update, the algorithm filters alignments. For each read $r_i$, it calculates the maximum probability across all references:
+The algorithm iterates until convergence, defined by one of these criteria:
+- Log-likelihood improvement $< \epsilon$
+- Maximum iterations reached
+- Complete resolution of multi-mapping reads
+- No further alignments can be removed
 
-$$P_{max}(r_i) = \max_j P''(r_i|g_j)$$
+This implementation builds on the SQUAREM method for EM acceleration (Varadhan & Roland, 2008) and incorporates elements from probabilistic read assignment algorithms in metagenomic analyses. The approach ensures robust convergence while maintaining the statistical properties of maximum likelihood estimation.
 
-It then applies a scaling factor $\alpha$ (a value < 1) and retains only alignments satisfying:
+### Applications and recommendations
 
-$$P''(r_i|g_j) \geq \alpha \cdot P_{max}(r_i)$$
-
-This iterative process continues until no more alignments are removed or a maximum number of iterations is reached. The final read-to-reference assignments are implicit in the filtering process, with only the highest probability alignments retained.
+[Rest of the original content remains the same...]
 
 ### Applications and recommendations
 
