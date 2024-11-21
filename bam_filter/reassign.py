@@ -15,6 +15,11 @@ from bam_filter.utils import (
     create_output_files,
     allocate_threads,
 )
+from bam_filter.bam_utils import (
+    write_to_file,
+    setup_bam_processing,
+    check_bam_file,
+)
 from multiprocessing import Pool, Manager
 from functools import partial
 import gc
@@ -23,13 +28,13 @@ import os
 import concurrent.futures
 import math
 import warnings
-from bam_filter.bam_utils import check_bam_file
 import shutil
 import uuid
 import psutil
 from memory_profiler import profile
 from numba import jit, prange
 import numba
+from typing import Dict
 
 log = logging.getLogger("my_logger")
 
@@ -44,36 +49,184 @@ def estimate_array_size(dtype, shape):
     return np.dtype(dtype).itemsize * np.prod(shape)
 
 
-def initialize_subject_weights(data, mmap_dir=None, max_memory=None):
-    if data.shape[0] > 0:
-        total_memory = max_memory if max_memory else psutil.virtual_memory().total
-        max_source = np.max(data["source"])
+class ManagedArrays:
+    def __init__(self, mmap_dir, max_memory=None):
+        """
+        Initialize ManagedArrays with memory management capabilities.
 
-        # Estimate sizes
-        sum_weights_size = estimate_array_size(np.float64, (max_source + 1,))
+        Args:
+            mmap_dir: Directory for memory-mapped files
+            max_memory: Maximum memory to use (in bytes). If None, uses 80% of system memory
+        """
+        self.mmap_dir = mmap_dir
+        self.total_memory = max_memory if max_memory else psutil.virtual_memory().total
+        self.arrays = {}
+        self.array_sizes = {}
+        self.mmap_status = {}  # Track which arrays are memory-mapped
+        self.mmap_files = set()  # Keep track of created mmap files
 
-        # Use memory-mapped arrays if estimated size exceeds available memory
-        if sum_weights_size > total_memory * 0.8:
-            sum_weights = np.memmap(
-                os.path.join(mmap_dir, "sum_weights.mmap"),
-                dtype="float64",
-                mode="w+",
-                shape=(max_source + 1,),
-            )
+    def estimate_total_size(self, array_specs):
+        """
+        Estimate total memory required for all arrays.
+
+        Args:
+            array_specs: Dictionary of array names and their sizes
+        Returns:
+            Total estimated size in bytes
+        """
+        total_size = 0
+        for name, size in array_specs.items():
+            array_size = estimate_array_size(np.float64, (size,))
+            self.array_sizes[name] = array_size
+            total_size += array_size
+        return total_size
+
+    def should_use_mmap(self, total_size):
+        """
+        Determine if memory mapping should be used based on total size.
+
+        Args:
+            total_size: Total estimated size in bytes
+        Returns:
+            Boolean indicating whether to use memory mapping
+        """
+        return (total_size > self.total_memory * 0.8) and (self.mmap_dir is not None)
+
+    def initialize(self, n_elements, max_subject, max_source):
+        """Initialize arrays with smart memory management."""
+        array_specs = {
+            "q1": n_elements,
+            "q2": n_elements,
+            "r": n_elements,
+            "v": n_elements,
+            "p_new": n_elements,
+            "subject_weights": max_subject + 1,
+            "source_sums": max_source + 1,
+        }
+
+        total_size = self.estimate_total_size(array_specs)
+        use_mmap = self.should_use_mmap(total_size)
+
+        if use_mmap:
+            log.info(f"::: Using memory-mapped arrays in {self.mmap_dir}")
+            log.info(f"::: Estimated memory requirement: {total_size / 1e9:.2f} GB")
+
+            for name, size in array_specs.items():
+                mmap_path = os.path.join(self.mmap_dir, f"{name}.mmap")
+                try:
+                    self.arrays[name] = np.memmap(
+                        mmap_path, dtype=np.float64, mode="w+", shape=(size,)
+                    )
+                    self.mmap_status[name] = True
+                    self.mmap_files.add(mmap_path)
+                except Exception as e:
+                    log.error(f"Error creating memory-mapped array {name}: {str(e)}")
+                    raise
         else:
-            sum_weights = np.zeros(max_source + 1, dtype="float64")
+            log.info("::: Using in-memory arrays")
+            log.info(f"::: Estimated memory requirement: {total_size / 1e9:.2f} GB")
 
-        # Calculate the sum of weights for each unique source using np.add.at for efficiency
-        np.add.at(sum_weights, data["source"], data["var"])
+            for name, size in array_specs.items():
+                self.arrays[name] = np.zeros(size, dtype=np.float64)
+                self.mmap_status[name] = False
 
-        # Calculate the normalized weights directly
-        data["prob"] = data["var"] / sum_weights[data["source"]]
+    def resize(self, n_elements):
+        """Resize dynamic arrays with smart memory management."""
+        dynamic_specs = {
+            "q1": n_elements,
+            "q2": n_elements,
+            "r": n_elements,
+            "v": n_elements,
+            "p_new": n_elements,
+        }
 
-        del sum_weights
+        # Calculate new total size including static arrays
+        total_dynamic_size = sum(
+            estimate_array_size(np.float64, (size,)) for size in dynamic_specs.values()
+        )
+        total_size = total_dynamic_size
+        for name, size in self.array_sizes.items():
+            if name not in dynamic_specs:
+                total_size += size
 
-        return data
-    else:
-        return None
+        use_mmap = self.should_use_mmap(total_size)
+
+        # Create temporary storage for array references
+        old_arrays = {}
+
+        # Handle each dynamic array
+        for name, size in dynamic_specs.items():
+            # Store old array reference
+            old_arrays[name] = self.arrays.pop(name, None)
+
+            # Create new array
+            if use_mmap:
+                mmap_path = os.path.join(self.mmap_dir, f"{name}.mmap")
+                try:
+                    self.arrays[name] = np.memmap(
+                        mmap_path, dtype=np.float64, mode="w+", shape=(size,)
+                    )
+                    self.mmap_status[name] = True
+                    self.mmap_files.add(mmap_path)
+                except Exception as e:
+                    log.error(f"Error creating memory-mapped array {name}: {str(e)}")
+                    raise
+            else:
+                self.arrays[name] = np.zeros(size, dtype=np.float64)
+                self.mmap_status[name] = False
+
+            self.array_sizes[name] = estimate_array_size(np.float64, (size,))
+
+        # Clean up old arrays
+        for name, old_array in old_arrays.items():
+            if old_array is not None:
+                del old_array
+                if self.mmap_status.get(name, False):
+                    old_path = os.path.join(self.mmap_dir, f"{name}.mmap")
+                    try:
+                        if os.path.exists(old_path):
+                            os.unlink(old_path)
+                            self.mmap_files.discard(old_path)
+                    except OSError:
+                        pass
+
+    def cleanup(self):
+        """Clean up all arrays and remove memory-mapped files."""
+        try:
+            # Make a copy of the keys to avoid dictionary size change during iteration
+            array_names = list(self.arrays.keys())
+
+            # Delete array objects
+            for name in array_names:
+                if name in self.arrays:
+                    del self.arrays[name]
+
+            # Clean up mmap files
+            for filepath in list(
+                self.mmap_files
+            ):  # Create a copy of the set for iteration
+                try:
+                    if os.path.exists(filepath):
+                        os.unlink(filepath)
+                except OSError as e:
+                    log.error(f"Error removing memory-mapped file {filepath}: {str(e)}")
+
+            # Clear all tracking containers
+            self.arrays.clear()
+            self.array_sizes.clear()
+            self.mmap_status.clear()
+            self.mmap_files.clear()
+
+        except Exception as e:
+            log.error(f"Error during cleanup: {str(e)}")
+
+    def __del__(self):
+        """Ensure cleanup on object destruction."""
+        try:
+            self.cleanup()
+        except Exception as e:
+            # Simply pass during final cleanup to avoid error messages during interpreter shutdown
+            pass
 
 
 def configure_numba_threads(threads=None):
@@ -85,7 +238,6 @@ def configure_numba_threads(threads=None):
     Returns:
         Original number of threads (for restoration if needed)
     """
-    import numba
     from numba import config
 
     # Store original settings
@@ -103,15 +255,65 @@ def configure_numba_threads(threads=None):
     return original_threads
 
 
+def initialize_subject_weights(data, mmap_dir=None, max_memory=None):
+    """
+    Initialize subject weights with smart memory management.
+
+    Args:
+        data: Input data array
+        mmap_dir: Directory for memory-mapped files
+        max_memory: Maximum memory to use (in bytes)
+    Returns:
+        Initialized data array
+    """
+    if data.shape[0] > 0:
+        # Estimate memory requirements
+        max_source = np.max(data["source"])
+        array_size = estimate_array_size(np.float64, (max_source + 1,))
+        total_memory = max_memory if max_memory else psutil.virtual_memory().total
+
+        # Decide whether to use mmap
+        use_mmap = (array_size > total_memory * 0.8) and (mmap_dir is not None)
+
+        if use_mmap:
+            log.info(f"::: Using memory-mapped arrays for initialization in {mmap_dir}")
+            sum_weights = np.memmap(
+                os.path.join(mmap_dir, "sum_weights.mmap"),
+                dtype=np.float64,
+                mode="w+",
+                shape=(max_source + 1,),
+            )
+        else:
+            log.info("::: Using in-memory arrays for initialization")
+            sum_weights = np.zeros(max_source + 1, dtype=np.float64)
+
+        try:
+            # Calculate weights
+            sum_weights.fill(0)
+            np.add.at(sum_weights, data["source"], data["var"])
+            data["prob"] = data["var"] / sum_weights[data["source"]]
+
+            return data
+
+        finally:
+            # Clean up if using mmap
+            if use_mmap:
+                del sum_weights
+                try:
+                    os.remove(os.path.join(mmap_dir, "sum_weights.mmap"))
+                except OSError:
+                    pass
+
+    return None
+
+
 @jit(nopython=True, parallel=True)
-def fast_e_step(prob_vector, subject_indices, slens, n_chunks):
-    """E-step using chunked accumulation for deterministic results"""
-    # Calculate chunk size
+def fast_e_step(prob_vector, subject_indices, slens, n_chunks, subject_weights):
+    """E-step using chunked accumulation with pre-allocated arrays"""
     array_len = len(prob_vector)
-    chunk_size = (array_len + n_chunks - 1) // n_chunks  # Ceiling division
+    chunk_size = (array_len + n_chunks - 1) // n_chunks
     n_chunks_actual = (array_len + chunk_size - 1) // chunk_size
 
-    # Create per-chunk accumulators to ensure deterministic summation
     max_subject_idx = np.max(subject_indices) + 1
     chunk_accumulators = np.zeros((n_chunks_actual, max_subject_idx), dtype=np.float64)
 
@@ -120,13 +322,12 @@ def fast_e_step(prob_vector, subject_indices, slens, n_chunks):
         chunk_start = chunk_idx * chunk_size
         chunk_end = min(chunk_start + chunk_size, array_len)
 
-        # Process chunk with local accumulator
         for i in range(chunk_start, chunk_end):
             subject_idx = subject_indices[i]
             chunk_accumulators[chunk_idx, subject_idx] += prob_vector[i]
 
     # Merge chunks deterministically
-    subject_weights = np.zeros(max_subject_idx, dtype=np.float64)
+    subject_weights.fill(0)  # Reset array
     for subject_idx in range(max_subject_idx):
         for chunk_idx in range(n_chunks_actual):
             subject_weights[subject_idx] += chunk_accumulators[chunk_idx, subject_idx]
@@ -136,13 +337,12 @@ def fast_e_step(prob_vector, subject_indices, slens, n_chunks):
     for i in range(array_len):
         s_w[i] = subject_weights[subject_indices[i]] / slens[i]
 
-    return s_w, subject_weights
+    return s_w
 
 
 @jit(nopython=True, parallel=True)
-def fast_m_step(prob_vector, s_w, source_indices, n_chunks):
-    """M-step using chunked accumulation for deterministic results"""
-    # Calculate chunk size
+def fast_m_step(prob_vector, s_w, source_indices, n_chunks, source_sums):
+    """M-step using chunked accumulation with pre-allocated arrays"""
     array_len = len(prob_vector)
     chunk_size = (array_len + n_chunks - 1) // n_chunks
     n_chunks_actual = (array_len + chunk_size - 1) // chunk_size
@@ -159,13 +359,12 @@ def fast_m_step(prob_vector, s_w, source_indices, n_chunks):
         chunk_start = chunk_idx * chunk_size
         chunk_end = min(chunk_start + chunk_size, array_len)
 
-        # Process chunk
         for i in range(chunk_start, chunk_end):
             source_idx = source_indices[i]
             chunk_accumulators[chunk_idx, source_idx] += new_prob[i]
 
     # Merge chunks deterministically
-    source_sums = np.zeros(max_source_idx, dtype=np.float64)
+    source_sums.fill(0)  # Reset array
     for source_idx in range(max_source_idx):
         for chunk_idx in range(n_chunks_actual):
             source_sums[source_idx] += chunk_accumulators[chunk_idx, source_idx]
@@ -180,17 +379,21 @@ def fast_m_step(prob_vector, s_w, source_indices, n_chunks):
 
 
 def parallel_em_step(
-    prob_vector,
-    subject_indices,
-    source_indices,
-    slens,
-    n_chunks,
+    prob_vector, subject_indices, source_indices, slens, n_chunks, array_manager
 ):
-    """Parallel EM step with deterministic operations"""
-    # Execute E and M steps
-    s_w, subject_weights = fast_e_step(prob_vector, subject_indices, slens, n_chunks)
+    """Parallel EM step using managed arrays"""
+    # Execute E and M steps using managed arrays
+    s_w = fast_e_step(
+        prob_vector,
+        subject_indices,
+        slens,
+        n_chunks,
+        array_manager.arrays["subject_weights"],
+    )
 
-    new_prob = fast_m_step(prob_vector, s_w, source_indices, n_chunks)
+    new_prob = fast_m_step(
+        prob_vector, s_w, source_indices, n_chunks, array_manager.arrays["source_sums"]
+    )
 
     return new_prob
 
@@ -203,80 +406,109 @@ def squarem_resolve_multimaps(
     max_memory=None,
     min_improvement=1e-4,
     threads=None,
+    max_step_factor=4.0,  # Maximum step size multiplier for stability
 ):
-    """SQUAREM-accelerated multimapping resolution."""
+    """SQUAREM-accelerated multimapping resolution with improved convergence.
+
+    Args:
+        data: Input data array with probability distributions
+        scale: Scaling factor for probability thresholding
+        iters: Maximum number of iterations (0 for convergence-based stopping)
+        mmap_dir: Directory for memory-mapped files
+        max_memory: Maximum memory limit in bytes
+        min_improvement: Minimum relative improvement for convergence
+        threads: Number of threads for parallel computation
+        max_step_factor: Maximum allowed step size multiplier for stability
+    """
     # Configure threading
     original_threads = configure_numba_threads(threads)
-    n_threads = numba.get_num_threads()
+
+    # Initialize array manager
+    array_manager = ManagedArrays(mmap_dir, max_memory)
 
     try:
-        total_memory = max_memory if max_memory else psutil.virtual_memory().total
         current_iter = 0
 
-        # Pre-calculate constants and arrays
+        # Pre-calculate constants
         max_subject = np.max(data["subject"])
         max_source = np.max(data["source"])
+        n_elements = len(data["prob"])
+
+        # Initialize managed arrays
+        array_manager.initialize(n_elements, max_subject, max_source)
+
         source_indices = data["source"].astype(np.int64)
         subject_indices = data["subject"].astype(np.int64)
         slens = data["slen"].astype(np.float64)
 
-        # Calculate optimal number of chunks
+        # Calculate optimal number of chunks for parallelization
         n_chunks = min(32, len(data["prob"]) // 1000)
-        if n_chunks < 1:
-            n_chunks = 1
+        n_chunks = max(1, n_chunks)
 
-        def adaptive_squarem_step():
-            """Adaptive SQUAREM step"""
-            # First EM update
-            r = parallel_em_step(
-                data["prob"].astype(np.float64),
+        def squarem_step():
+            """Enhanced SQUAREM step following the original algorithm."""
+            # Store current point
+            x_k = data["prob"].astype(np.float64)
+
+            # First EM update: q = M(x_k) - x_k
+            array_manager.arrays["r"][:] = parallel_em_step(
+                x_k,
                 subject_indices,
                 source_indices,
                 slens,
                 n_chunks,
+                array_manager,
             )
+            array_manager.arrays["v"][:] = array_manager.arrays["r"] - x_k
 
-            # Calculate first difference
-            v = (
+            # Second EM update: r = M(x_k + q) - (x_k + q)
+            x_q = x_k + array_manager.arrays["v"]
+            array_manager.arrays["p_new"][:] = (
                 parallel_em_step(
-                    r,
+                    x_q,
                     subject_indices,
                     source_indices,
                     slens,
                     n_chunks,
+                    array_manager,
                 )
-                - r
+                - x_q
             )
 
-            # Calculate second difference
-            w = parallel_em_step(
-                r + v,
-                subject_indices,
-                source_indices,
-                slens,
-                n_chunks,
-            ) - (r + v)
+            # Compute step size with improved stability
+            v_norm = np.sqrt(
+                np.sum(array_manager.arrays["v"] * array_manager.arrays["v"])
+            )
+            r_q = array_manager.arrays["p_new"] - array_manager.arrays["v"]
+            r_q_norm = np.sqrt(np.sum(r_q * r_q))
 
-            # Compute step size using stable computation
-            v_norm = np.sqrt(np.sum(v * v))  # Explicit sum for stability
-            w_v_norm = np.sqrt(np.sum((w - v) * (w - v)))
+            if r_q_norm < 1e-10:  # Avoid division by zero
+                return array_manager.arrays["r"].copy()
 
-            if w_v_norm == 0:
-                return r
+            # Original SQUAREM step length with stability bounds
+            alpha = -v_norm / r_q_norm
 
-            alpha = v_norm / w_v_norm
-            alpha = min(max(alpha, 0.1), 4.0)  # Clip step size for stability
+            # Apply adaptive step size control
+            alpha = np.clip(alpha, -max_step_factor, -1 / max_step_factor)
 
-            # SQUAREM update with numerical stability checks
-            new_prob = data["prob"] + 2 * alpha * v + (alpha * alpha) * (w - v)
+            # SQUAREM update: x_k+1 = x_k - 2αq + α²(r - q)
+            new_prob = (
+                x_k - 2 * alpha * array_manager.arrays["v"] + (alpha * alpha) * r_q
+            )
 
-            # Validate results
+            # Ensure probability constraints
             if np.any(new_prob < 0) or np.any(np.isnan(new_prob)):
-                return r
+                # Fall back to basic EM step if update is invalid
+                return array_manager.arrays["r"].copy()
+
+            # Normalize to ensure valid probabilities
+            row_sums = np.zeros(max_source + 1)
+            np.add.at(row_sums, source_indices, new_prob)
+            new_prob /= row_sums[source_indices]
 
             return new_prob
 
-        # Main iteration loop with convergence checking
+        # Main iteration loop
         prev_likelihood = -np.inf
 
         while True:
@@ -290,11 +522,11 @@ def squarem_resolve_multimaps(
             )
 
             # SQUAREM update
-            new_prob = adaptive_squarem_step()
+            new_prob = squarem_step()
             data["prob"] = new_prob
             progress_bar.update(4)
 
-            # Calculate convergence using stable log sum
+            # Calculate log-likelihood for convergence check
             current_likelihood = np.sum(np.log(new_prob[new_prob > 0]))
             improvement = (
                 (current_likelihood - prev_likelihood) / abs(prev_likelihood)
@@ -303,7 +535,7 @@ def squarem_resolve_multimaps(
             )
             prev_likelihood = current_likelihood
 
-            # Query counts
+            # Update query counts and masks
             query_counts = np.bincount(source_indices)
             data["n_aln"] = query_counts[source_indices]
 
@@ -315,7 +547,7 @@ def squarem_resolve_multimaps(
                 log.info("::: ::: No more multimapping reads. Early stopping.")
                 return data
 
-            # Calculate maximum probabilities
+            # Apply probability thresholding
             max_prob = np.zeros(max_source + 1, dtype=np.float64)
             np.maximum.at(max_prob, source_indices, data["prob"])
             data["max_prob"] = max_prob[source_indices] * scale
@@ -328,13 +560,18 @@ def squarem_resolve_multimaps(
             current_iter += 1
             data["iter"][final_mask] = current_iter
 
-            # Update data array with filtered results
+            # Update data array
             data = np.concatenate([data[unique_mask], data[final_mask]])
 
-            # Update indices for next iteration
-            source_indices = data["source"].astype(np.int64)
-            subject_indices = data["subject"].astype(np.int64)
-            slens = data["slen"].astype(np.float64)
+            # Resize managed arrays if needed
+            if len(data) != n_elements:
+                n_elements = len(data)
+                array_manager.resize(n_elements)
+
+                # Update indices
+                source_indices = data["source"].astype(np.int64)
+                subject_indices = data["subject"].astype(np.int64)
+                slens = data["slen"].astype(np.float64)
 
             progress_bar.update(5)
             progress_bar.close()
@@ -358,7 +595,8 @@ def squarem_resolve_multimaps(
                 break
 
     finally:
-        # Restore original Numba thread settings
+        # Clean up
+        array_manager.cleanup()
         numba.set_num_threads(original_threads)
 
     return data
@@ -370,9 +608,13 @@ def write_to_file(alns, out_bam_file, header=None):
 
 
 def process_references_batch(references, entries, bam, refs_idx, threads=1):
+    """Process a batch of references for reassignment."""
     alns = []
-    s_threads = threads
-    with pysam.AlignmentFile(bam, "rb", threads=s_threads) as samfile:
+    # Convert entries back to regular dict if it's a DictProxy
+    if hasattr(entries, "_getvalue"):
+        entries = dict(entries)
+
+    with pysam.AlignmentFile(bam, "rb", threads=threads) as samfile:
         for reference in references:
             r_ids = entries[reference]
             for aln in samfile.fetch(
@@ -397,127 +639,120 @@ def write_reassigned_bam(
     max_read_length=np.inf,
     disable_sort=False,
 ):
+    """Write reassigned BAM with optimized BAM writing and specific reassignment logic."""
     out_bam = out_files["bam_reassigned"]
     p_threads, s_threads = allocate_threads(threads, 1, 4)
+    references = list(entries.keys())
+    chunk_size = 1_000_000
+
+    # Get the header from the input BAM first
     with pysam.AlignmentFile(bam, "rb", threads=s_threads) as samfile:
+        original_header = samfile.header
         references = list(entries.keys())
         refs_dict = {x: samfile.get_reference_length(x) for x in references}
-        header = samfile.header
 
     log.info("::: Getting reference names and lengths...")
     (ref_names, ref_lengths) = zip(*refs_dict.items())
     refs_idx = {sys.intern(str(x)): i for i, x in enumerate(ref_names)}
     write_threads = s_threads
 
-    new_header = header.to_dict()
-
-    log.info("::: Creating new header...")
+    # Create new header
+    new_header = original_header.to_dict()
     ref_names_set = set(ref_names)
     new_header["SQ"] = [x for x in new_header["SQ"] if x["SN"] in ref_names_set]
-
     name_index = {name: idx for idx, name in enumerate(ref_names)}
     new_header["SQ"].sort(key=lambda x: name_index[x["SN"]])
     new_header["HD"]["SO"] = "unsorted"
 
-    with pysam.AlignmentFile(
+    # Create output BAM file
+    out_bam_file = pysam.AlignmentFile(
         out_files["bam_reassigned_tmp"],
         "wb",
         referencenames=list(ref_names),
         referencelengths=list(ref_lengths),
         threads=write_threads,
         header=new_header,
-    ) as out_bam_file:
+    )
 
-        num_cores = p_threads
+    # Create reference chunks
+    log.info("::: Creating reference chunks with uniform read amounts...")
+    ref_chunks = sort_keys_by_approx_weight(
+        input_dict=ref_counts,
+        scale=1,
+        num_cores=p_threads,
+        verbose=False,
+        max_entries_per_chunk=1_000_000,
+    )
+    log.info(f"::: Using {p_threads} processes to write {len(ref_chunks)} chunk(s)")
 
-        log.info("::: Creating reference chunks with uniform read amounts...")
+    total_entries = sum(len(chunk) for chunk in ref_chunks)
+    log.info(f"::: Total entries in all chunks: {total_entries:,}")
 
-        ref_chunks = sort_keys_by_approx_weight(
-            input_dict=ref_counts,
-            scale=1,
-            num_cores=num_cores,
-            verbose=False,
-            max_entries_per_chunk=1_000_000,
-        )
+    with Manager() as manager:
+        shared_entries = manager.dict(dict(entries))
 
-        log.info(f"::: Using {num_cores} processes to write {len(ref_chunks)} chunk(s)")
+        with concurrent.futures.ProcessPoolExecutor(max_workers=p_threads) as executor:
+            futures = []
+            total_alignments = 0
 
-        # get total entris in all chunks
-        total_entries = sum(len(chunk) for chunk in ref_chunks)
-        log.info(f"::: Total entries in all chunks: {total_entries:,}")
-
-        with Manager() as manager:
-            entries = manager.dict(dict(entries))
-
-            with concurrent.futures.ProcessPoolExecutor(
-                max_workers=num_cores
-            ) as executor:
-                futures = []
-                total_alignments = 0
-                for batch_references in tqdm.tqdm(
-                    ref_chunks,
-                    total=len(ref_chunks),
-                    desc="Submitted batches",
-                    unit="batch",
-                    leave=False,
-                    ncols=80,
-                    disable=is_debug(),
-                ):
-                    future = executor.submit(
-                        process_references_batch,
-                        batch_references,
-                        entries,
-                        bam,
-                        refs_idx,
-                        s_threads,
-                    )
-                    futures.append(future)
-
-                log.info("::: Collecting batches...")
-
-                completion_progress_bar = tqdm.tqdm(
-                    total=len(futures),
-                    desc="Completed",
-                    unit="batch",
-                    leave=False,
-                    ncols=80,
-                    disable=is_debug(),
+            for batch_references in tqdm.tqdm(
+                ref_chunks,
+                total=len(ref_chunks),
+                desc="Submitted batches",
+                unit="batch",
+                leave=False,
+                ncols=80,
+                disable=is_debug(),
+            ):
+                future = executor.submit(
+                    process_references_batch,
+                    batch_references,
+                    shared_entries,
+                    bam,
+                    refs_idx,
+                    s_threads,
                 )
-                completed_count = 0
+                futures.append(future)
 
-                processed_futures = set()
+            log.info("::: Collecting batches...")
+            completion_progress_bar = tqdm.tqdm(
+                total=len(futures),
+                desc="Completed",
+                unit="batch",
+                leave=False,
+                ncols=80,
+                disable=is_debug(),
+            )
 
-                for completed_future in concurrent.futures.as_completed(futures):
-                    try:
-                        alns = completed_future.result()
-                        total_alignments += len(alns)
-                        write_to_file(
-                            alns=alns, out_bam_file=out_bam_file, header=header
-                        )
-                        processed_futures.add(completed_future)
-                    except Exception as e:
-                        log.error(f"Error processing batch: {e}")
+            processed_futures = set()
+            for completed_future in concurrent.futures.as_completed(futures):
+                try:
+                    alns = completed_future.result()
+                    total_alignments += len(alns)
+                    write_to_file(
+                        alns=alns, out_bam_file=out_bam_file, header=original_header
+                    )
+                    processed_futures.add(completed_future)
+                except Exception as e:
+                    log.error(f"Error processing batch: {e}")
 
-                    completion_progress_bar.update(1)
-                    completed_count += 1
-                    completed_future.cancel()
+                completion_progress_bar.update(1)
+                completed_future.cancel()
 
-                completion_progress_bar.close()
+            completion_progress_bar.close()
 
-                # Verify that all futures have been processed
-                unprocessed_futures = set(futures) - processed_futures
-                if unprocessed_futures:
-                    log.error(f"{len(unprocessed_futures)} futures were not processed:")
-                    for future in unprocessed_futures:
-                        log.error(f"Unprocessed future: {future}")
-                else:
-                    log.info("All futures processed successfully.")
+            unprocessed_futures = set(futures) - processed_futures
+            if unprocessed_futures:
+                log.error(f"{len(unprocessed_futures)} futures were not processed")
+            else:
+                log.info("All futures processed successfully")
 
-                log.info(f"Completed {completed_count} out of {len(futures)} futures.")
+            log.info(f"Total alignments processed: {total_alignments:,}")
 
-                log.info(f"Total alignments processed: {total_alignments:,}")
+    out_bam_file.close()
 
-    entries = None
+    # Clean up
+    shared_entries = None
     gc.collect()
 
     if not disable_sort:
@@ -546,18 +781,11 @@ def write_reassigned_bam(
                 out_files["bam_reassigned_tmp"],
             )
 
-        logging.info("BAM index not found. Indexing...")
-
-        pysam.index(
-            "-c",
-            "-@",
-            str(threads),
-            out_bam,
-        )
-
+        log.info("Creating BAM index...")
+        pysam.index("-c", "-@", str(threads), out_bam)
         os.remove(out_files["bam_reassigned_tmp"])
     else:
-        logging.info("Skipping BAM file sorting...")
+        log.info("Skipping BAM file sorting...")
         shutil.move(out_files["bam_reassigned_tmp"], out_bam)
 
 
