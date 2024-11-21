@@ -350,133 +350,81 @@ filterBAM lca --bam c55d4e2df1.dedup.filtered.bam --names ./taxonomy/names.dmp -
 
 ## Read Reassignment Algorithm
 
-The algorithm implements a SQUAREM-accelerated Expectation-Maximization (EM) approach to resolve multi-mapping reads. The core concept is to iteratively refine alignment probabilities while accelerating convergence through the SQUAREM method.
+The algorithm implements a SQUAREM-accelerated Expectation-Maximization (EM) approach to resolve multi-mapping reads by iteratively refining alignment probabilities. This implementation builds on the SQUAREM method for EM acceleration (Varadhan & Roland, 2008). For each alignment, we first compute a global alignment score $S$:
 
-### Initial Score Computation
-
-For each alignment, we compute a global alignment score $S$ incorporating matches, mismatches, and gap penalties:
-
-$$
-S = r_m M - p_m X - p_o G - p_e E
-$$
+$$S = r_m M - p_m X - p_o G - p_e E$$
 
 where:
-- $M$ : number of matches
-- $X$ : number of mismatches
-- $G$ : number of gap openings
-- $E$ : number of gap extensions
-- $r_m$ : match reward (default: 1)
-- $p_m$ : mismatch penalty (default: -2)
-- $p_o$ : gap open penalty (default: 5)
-- $p_e$ : gap extension penalty (default: 2)
+- $M$ is the number of matches
+- $X$ is the number of mismatches
+- $G$ is the number of gap openings
+- $E$ is the number of gap extensions
+- $r_m$ is the match reward (default: 1)
+- $p_m$ is the mismatch penalty (default: -2)
+- $p_o$ is the gap open penalty (default: 5)
+- $p_e$ is the gap extension penalty (default: 2)
 
-### Score Normalization
+The scores are normalized through a two-step process. First, we apply a positive shift transformation:
 
-The scores undergo a two-step normalization process:
+$$S' = S - \min(S) + 1$$
 
-1. Positive shift transformation:
-   $$
-   S' = S - \min(S) + 1
-   $$
+followed by length normalization:
 
-2. Length normalization:
-   $$
-   S'' = \frac{S'}{L}
-   $$
-   where $L$ is the alignment length
+$$S'' = \frac{S'}{L}$$
+
+where $L$ is the alignment length.
 
 These normalized scores initialize the probability distribution $P(r_i|g_j)$ of read $r_i$ originating from genome $g_j$:
 
-$$
-P(r_i|g_j) = \frac{S''_{ij}}{\sum_{k} S''_{ik}}
-$$
+$$P(r_i|g_j) = \frac{S''\_{ij}}{\sum_{k} S''\_{ik}}$$
 
-### EM Iterations with SQUAREM Acceleration
-
-At each iteration, starting from point $x_k$:
+The SQUAREM acceleration framework then proceeds as follows:
 
 1. **E-step**: Calculate subject weights
-   $$
-   W_j = \sum_i P(r_i|g_j)
-   $$
-   
-   Normalize by sequence length:
-   $$
-   s_w_i = \frac{W_{j[i]}}{L_{j[i]}}
-   $$
-   where $j[i]$ is the subject index for alignment $i$
-
-2. **M-step**: Update probabilities
-   $$
-   \begin{align*}
-   P'(r_i|g_j) &= P(r_i|g_j) \cdot s_w_i \\
-   P''(r_i|g_j) &= \frac{P'(r_i|g_j)}{\sum_{k} P'(r_i|g_k)}
-   \end{align*}
-   $$
-
-3. **SQUAREM Acceleration**: 
    
    First EM evaluation:
-   $$
-   \begin{align*}
-   q_1 &= M(x_k) \\
-   r &= q_1 - x_k
-   \end{align*}
-   $$
+   
+   $$q_1 = M(x_k)$$
+
+   $$r = q_1 - x_k$$
 
    Second EM evaluation:
-   $$
-   \begin{align*}
-   q_2 &= M(x_k + r) \\
-   v &= q_2 - (x_k + r)
-   \end{align*}
-   $$
+   
+   $$q_2 = M(x_k + r)$$
+   
+   $$v = q_2 - (x_k + r)$$
 
-   Compute stabilized step length:
-   $$
-   \begin{align*}
-   \alpha &= -\frac{\|r\|}{\|v - r\|} \\
-   \alpha &= \text{clip}(\alpha, -\alpha_{\text{max}}, -\frac{1}{\alpha_{\text{max}}})
-   \end{align*}
-   $$
+3. **M-step**: Compute stabilized step length
+
+   $$\alpha = -\frac{\|r\|}{\|v - r\|}$$
+
+   $$\alpha = \text{clip}(\alpha, -\alpha_{\text{max}}, -\frac{1}{\alpha_{\text{max}}})$$
+
    where $\alpha_{\text{max}}$ is the maximum step factor (default: 4.0)
 
-   SQUAREM update:
-   $$
-   x_{k+1} = x_k - 2\alpha r + \alpha^2v
-   $$
+4. **SQUAREM update**: Calculate new probabilities
+
+   $$x_{k+1} = x_k - 2\alpha r + \alpha^2v$$
 
    If the update produces invalid probabilities, fall back to basic EM step:
-   $$
-   x_{k+1} = q_1
-   $$
 
-### Assignment and Filtering
+   $$x_{k+1} = q_1$$
 
-For each read $r_i$, compute:
+6. **Assignment step**: For each read $r_i$, calculate:
 
-$$
-P_{\text{max}}(r_i) = \max_j P''(r_i|g_j)
-$$
+   $$P_{\text{max}}(r_i) = \max_j P''(r_i|g_j)$$
+   
+   Retain alignments satisfying:
 
-Retain alignments satisfying:
+   $$P''(r_i|g_j) \geq \beta \cdot P_{\text{max}}(r_i)$$
 
-$$
-P''(r_i|g_j) \geq \beta \cdot P_{\text{max}}(r_i)
-$$
+   where $\beta$ is a scaling factor (default 0.9)
 
-where $\beta$ is a scaling factor (default: 0.9)
-
-### Convergence Criteria
-
-The algorithm terminates when any of these conditions are met:
-- Relative likelihood improvement $< \epsilon$
+The algorithm iterates until convergence, defined by one of these criteria:
+- Relative likelihood improvement < $\epsilon$ (default $10^{-4}$)
 - Maximum iterations reached (if specified)
-- No multi-mapping reads remain
+- Complete resolution of multi-mapping reads
 - No further alignments can be removed
-
-This implementation builds on the SQUAREM method for EM acceleration (Varadhan & Roland, 2008), providing robust convergence while maintaining the statistical properties of maximum likelihood estimation.
-
 
 ### Applications and recommendations
 
