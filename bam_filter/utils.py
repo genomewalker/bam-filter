@@ -547,6 +547,8 @@ defaults = {
     "reassign_gap_extension_penalty": 2,
     "rank_lca": "species",
     "lca_summary": None,
+    "squarem_min_improvement": 1e-4,
+    "squarem_max_step_factor": 4.0,
 }
 
 help_msg = {
@@ -606,6 +608,8 @@ help_msg = {
     "custom": "Use custom taxdump files",
     "version": "Print program version",
     "max_memory": "Maximum memory to use for the EM algorithm",
+    "squarem_min_improvement": "Minimum relative improvement for SQUAREM convergence",
+    "squarem_max_step_factor": "Maximum step size multiplier for SQUAREM stability",
 }
 
 from difflib import get_close_matches, SequenceMatcher
@@ -655,15 +659,12 @@ class SubcommandHelpFormatter(argparse.ArgumentParser):
         for action in parser._actions:
             if action.option_strings:
                 arguments.extend(action.option_strings)
-        return sorted(arguments)  # Sort for consistent output
-
-    def print_help(self, file=None):
-        pass
+        return sorted(arguments)
 
     def _print_message(self, message, file=None):
-        if message and "error:" in message:
+        if message:
             if file is None:
-                file = sys.stderr
+                file = sys.stderr if "error:" in message else sys.stdout
             file.write(message)
 
     def _clean_error_message(self, message):
@@ -697,8 +698,6 @@ class SubcommandHelpFormatter(argparse.ArgumentParser):
                                 if arg.startswith("-"):
                                     flag = arg.split("=")[0]
                                     if flag not in available_args:
-                                        # Group similar arguments together
-                                        parts = flag.lstrip("-").split("-")
                                         suggestion = self._get_close_matches(
                                             flag, available_args, n=3, cutoff=0.65
                                         )
@@ -965,6 +964,39 @@ def get_arguments(argv=None):
         metavar="INT",
         dest="gap_extension_penalty",
         help=help_msg["reassign_gap_extension_penalty"],
+    )
+    reassign_optional_args.add_argument(
+        "--squarem-min-improvement",
+        type=lambda x: float(
+            check_values(
+                x,
+                minval=1e-10,
+                maxval=1.0,
+                parser=parser,
+                var="--squarem-min-improvement",
+            )
+        ),
+        default=defaults["squarem_min_improvement"],
+        metavar="FLOAT",
+        dest="squarem_min_improvement",
+        help=help_msg["squarem_min_improvement"],
+    )
+
+    reassign_optional_args.add_argument(
+        "--squarem-max-step-factor",
+        type=lambda x: float(
+            check_values(
+                x,
+                minval=1.0,
+                maxval=10.0,
+                parser=parser,
+                var="--squarem-max-step-factor",
+            )
+        ),
+        default=defaults["squarem_max_step_factor"],
+        metavar="FLOAT",
+        dest="squarem_max_step_factor",
+        help=help_msg["squarem_max_step_factor"],
     )
     reassign_optional_args.add_argument(
         "-o",

@@ -404,9 +404,9 @@ def squarem_resolve_multimaps(
     iters=10,
     mmap_dir=None,
     max_memory=None,
-    min_improvement=1e-4,
     threads=None,
-    max_step_factor=4.0,  # Maximum step size multiplier for stability
+    min_improvement=1e-4,
+    max_step_factor=4.0,
 ):
     """SQUAREM-accelerated multimapping resolution with improved convergence.
 
@@ -933,6 +933,8 @@ def reassign_reads(
     disable_sort=False,
     tmp_dir=None,
     max_memory=None,
+    squarem_min_improvement=1e-4,
+    squarem_max_step_factor=4.0,
 ):
 
     p_threads, s_threads = allocate_threads(threads, 1, 4)
@@ -1208,6 +1210,8 @@ def reassign_reads(
         mmap_dir=tmp_dir.name,
         max_memory=total_memory,
         threads=threads,
+        min_improvement=squarem_min_improvement,
+        max_step_factor=squarem_max_step_factor,
     )
 
     n_reads = len(list(set(no_multimaps["source"])))
@@ -1356,6 +1360,8 @@ def reassign(args):
         gap_extension_penalty=args.gap_extension_penalty,
         disable_sort=args.disable_sort,
         tmp_dir=tmp_dir,
+        squarem_min_improvement=args.squarem_min_improvement,
+        squarem_max_step_factor=args.squarem_max_step_factor,
     )
 
     log.info("Done!")

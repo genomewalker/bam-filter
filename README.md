@@ -83,8 +83,8 @@ Full list of options:
 
 ```bash
 $ filterBAM reassign --help
-usage: filterBAM reassign [-h] --bam BAM [-p STR] [-r FILE] [-t INT] [-i INT] [-s FLOAT] [-A FLOAT] [-l INT] [-L INT] [-n INT] [--match-reward INT] [--mismatch-penalty INT]
-                          [--gap-open-penalty INT] [--gap-extension-penalty INT] [--lambda FLOAT] [-k FLOAT] [-o [FILE]] [-m STR] [-M INT] [-N] [--tmp-dir DIR] [--disable-sort]
+usage: filterBAM reassign [-h] --bam BAM [-p STR] [-r FILE] [-t INT] [-i INT] [-s FLOAT] [-A FLOAT] [-l INT] [-L INT] [-n INT] [--match-reward INT] [--mismatch-penalty INT] [--gap-open-penalty INT] [--gap-extension-penalty INT] [--squarem-min-improvement FLOAT] [--squarem-max-step-factor FLOAT]
+                          [-o [FILE]] [-m STR] [-M INT] [-N] [--tmp-dir DIR] [--disable-sort]
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -116,8 +116,10 @@ Re-assign optional arguments:
                         Gap open penalty for alignment score computation (default: 5)
   --gap-extension-penalty INT
                         Gap extension penalty for the alignment score (default: 2)
-  --lambda FLOAT        Lambda parameter for the alignment score (default: 1.33)
-  -k FLOAT              K parameter for the alignment score algorithm (default: 0.621)
+  --squarem-min-improvement FLOAT
+                        Minimum relative improvement for SQUAREM convergence (default: 0.0001)
+  --squarem-max-step-factor FLOAT
+                        Maximum step size multiplier for SQUAREM stability (default: 4.0)
   -o [FILE], --out-bam [FILE]
                         Save a BAM file without multimapping reads (default: None)
   -m STR, --sort-memory STR
@@ -348,83 +350,117 @@ filterBAM lca --bam c55d4e2df1.dedup.filtered.bam --names ./taxonomy/names.dmp -
 
 **--scale**: Scale taxonomic abundance by this factor; suffix K/M recognized 
 
-## Read Reassignment Algorithm
+# Read Reassignment Algorithm in FilterBAM
 
-The algorithm implements a SQUAREM-accelerated Expectation-Maximization (EM) approach to resolve multi-mapping reads by iteratively refining alignment probabilities. This implementation builds on the SQUAREM method for EM acceleration (Varadhan & Roland, 2008). For each alignment, we first compute a global alignment score $S$:
+The algorithm implements a SQUAREM-accelerated Expectation-Maximization (EM) approach to resolve multi-mapping reads by iteratively refining alignment probabilities. This implementation builds on the SQUAREM method for EM acceleration (Varadhan & Roland, 2008).
 
-$$S = r_m M - p_m X - p_o G - p_e E$$
+## Initial Score Calculation
 
-where:
-- $M$ is the number of matches
-- $X$ is the number of mismatches
-- $G$ is the number of gap openings
-- $E$ is the number of gap extensions
+For each alignment, we first compute a global alignment score $S$ that takes into account different aspects of the alignment quality:
+
+$S = r_m M - p_m X - p_o G - p_e E$
+
+Where:
+- $M$ represents the number of matching bases in the alignment
+- $X$ represents the number of mismatches in the alignment
+- $G$ represents the number of gap openings in the alignment
+- $E$ represents the number of gap extensions in the alignment
+
+The penalties and rewards are configurable parameters:
 - $r_m$ is the match reward (default: 1)
 - $p_m$ is the mismatch penalty (default: -2)
 - $p_o$ is the gap open penalty (default: 5)
 - $p_e$ is the gap extension penalty (default: 2)
 
-The scores are normalized through a two-step process. First, we apply a positive shift transformation:
+## Score Normalization
 
-$$S' = S - \min(S) + 1$$
+The scores undergo a two-step normalization process:
 
-followed by length normalization:
+1. First, a positive shift transformation ensures all scores are positive:
 
-$$S'' = \frac{S'}{L}$$
+   $S' = S - \min(S) + 1$
 
-where $L$ is the alignment length.
+2. Then, length normalization accounts for different alignment lengths:
 
-These normalized scores initialize the probability distribution $P(r_i|g_j)$ of read $r_i$ originating from genome $g_j$:
+   $S'' = \frac{S'}{L}$
 
-$$P(r_i|g_j) = \frac{S''\_{ij}}{\sum_{k} S''\_{ik}}$$
+   where $L$ is the alignment length
 
-The SQUAREM acceleration framework then proceeds as follows:
+These normalized scores are used to initialize the probability distribution $P(r_i|g_j)$ of read $r_i$ originating from genome $g_j$:
 
-1. **E-step**: Calculate subject weights
-   
-   First EM evaluation:
-   
-   $$q_1 = M(x_k)$$
+$P(r_i|g_j) = \frac{S''\_{ij}}{\sum_{k} S''\_{ik}}$
 
-   $$r = q_1 - x_k$$
+## SQUAREM Acceleration Framework
 
-   Second EM evaluation:
-   
-   $$q_2 = M(x_k + r)$$
-   
-   $$v = q_2 - (x_k + r)$$
+The algorithm uses SQUAREM to accelerate convergence of the EM process:
 
-3. **M-step**: Compute stabilized step length
+### 1. E-step (First Order)
 
-   $$\alpha = -\frac{\|r\|}{\|v - r\|}$$
+Calculate first EM evaluation:
 
-   $$\alpha = \text{clip}(\alpha, -\alpha_{\text{max}}, -\frac{1}{\alpha_{\text{max}}})$$
+$q_1 = M(x_k)$
 
-   where $\alpha_{\text{max}}$ is the maximum step factor (default: 4.0)
+$r = q_1 - x_k$
 
-4. **SQUAREM update**: Calculate new probabilities
+Calculate second EM evaluation:
 
-   $$x_{k+1} = x_k - 2\alpha r + \alpha^2v$$
+$q_2 = M(x_k + r)$
 
-   If the update produces invalid probabilities, fall back to basic EM step:
+$v = q_2 - (x_k + r)$
 
-   $$x_{k+1} = q_1$$
+Where:
+- $x_k$ is the current estimate
+- $M()$ is the EM mapping function
+- $r$ represents the first-order difference
+- $v$ represents the second-order difference
 
-6. **Assignment step**: For each read $r_i$, calculate:
+### 2. M-step (Step Length Calculation)
 
-   $$P_{\text{max}}(r_i) = \max_j P''(r_i|g_j)$$
-   
-   Retain alignments satisfying:
+Calculate the stabilized step length:
 
-   $$P''(r_i|g_j) \geq \beta \cdot P_{\text{max}}(r_i)$$
+$\alpha = -\frac{\|r\|}{\|v - r\|}$
+
+Apply clipping to ensure stability:
+
+$\alpha = \text{clip}(\alpha, -\alpha_{\text{max}}, -\frac{1}{\alpha_{\text{max}}})$
+
+Where:
+- $\alpha_{\text{max}}$ is the maximum step factor (default: 4.0)
+- $\|r\|$ represents the norm of the first-order difference
+- $\|v - r\|$ represents the norm of the difference between second and first-order differences
+
+### 3. SQUAREM Update
+
+Calculate new probabilities:
+
+$x_{k+1} = x_k - 2\alpha r + \alpha^2v$
+
+If the update produces invalid probabilities (e.g., negative values or values > 1), the algorithm falls back to a basic EM step:
+
+$x_{k+1} = q_1$
+
+### 4. Assignment Step
+
+For each read $r_i$:
+
+1. Calculate maximum probability:
+
+   $P_{\text{max}}(r_i) = \max_j P''(r_i|g_j)$
+
+2. Retain alignments that satisfy:
+
+   $P''(r_i|g_j) \geq \beta \cdot P_{\text{max}}(r_i)$
 
    where $\beta$ is a scaling factor (default 0.9)
 
-The algorithm iterates until convergence, defined by one of these criteria:
-- Relative likelihood improvement < $\epsilon$ (default $10^{-4}$)
-- Maximum iterations reached (if specified)
-- Complete resolution of multi-mapping reads
-- No further alignments can be removed
+## Convergence Criteria
+
+The algorithm iterates until one of these conditions is met:
+
+1. Relative likelihood improvement < $\epsilon$ (default $10^{-4}$)
+2. Maximum iterations reached (if specified)
+3. Complete resolution of multi-mapping reads
+4. No further alignments can be removed
 
 ### Applications and recommendations
 
