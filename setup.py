@@ -17,6 +17,7 @@ requirements = [
     "python-datatable>=1.1.3",
     "networkx>=3.2.1",
     "psutil>=5.9.8",
+    "numba>=0.60.0",
 ]
 
 setup(
