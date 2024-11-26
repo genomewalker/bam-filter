@@ -25,7 +25,6 @@ from pathlib import Path
 import concurrent.futures
 import gc
 import shutil
-from memory_profiler import profile
 
 # import cProfile as profile
 # import pstats
