@@ -763,7 +763,6 @@ class BamAlignment:
         return frags
 
 
-@profile
 def check_bam_file(
     bam,
     threads=1,
