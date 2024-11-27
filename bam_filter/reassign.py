@@ -974,7 +974,7 @@ def reassign_reads(
         scale=1,
         num_cores=threads,
         refinement_steps=10,
-        verbose=True,
+        verbose=False,
         max_entries_per_chunk=100_000_000,
     )
 
