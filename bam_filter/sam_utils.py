@@ -899,13 +899,13 @@ def process_bam(
             )
 
             index_statistics = samfile.get_index_statistics()
-
             references_m = {
                 chrom.contig: chrom.mapped
                 for chrom in index_statistics
                 if chrom.mapped >= min_read_count
             }
             references = list(references_m.keys())
+            ref_positions = {ref: samfile.get_tid(ref) for ref in references}
 
         if len(references) == 0:
             logging.warning(
@@ -935,6 +935,7 @@ def process_bam(
     # ify the number of chunks
     ref_chunks = sort_keys_by_approx_weight(
         input_dict=references_m,
+        ref_positions=ref_positions,
         scale=1,
         num_cores=p_threads,
         verbose=False,

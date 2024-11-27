@@ -195,6 +195,7 @@ def refine_chunks(chunks, input_dict, chunk_weights, target_weight):
 
 def sort_keys_by_approx_weight(
     input_dict,
+    ref_positions=None,  # Make positions optional
     scale=1,
     num_cores=1,
     refinement_steps=10,
@@ -205,54 +206,98 @@ def sort_keys_by_approx_weight(
 ):
     if scale == 0:
         raise ValueError("Scale cannot be zero.")
+
+    num_cores = scale * num_cores
+
     if mode == "weight":
-        target_weight = scale * max(input_dict.values())
+        target_weight = max(input_dict.values())
         total_weight = sum(input_dict.values())
         target_weight = max(
             scale * max(input_dict.values()), max_entries_per_chunk or 0
         )
         num_chunks = max(num_cores, (total_weight // target_weight) + 1)
-    elif mode == "entries":
-        # split that it has at least 1000 entries per chunk
+    else:  # mode == "entries"
         total_entries = len(input_dict)
-        entries = list(input_dict.keys())
         num_chunks = max(num_cores, (total_entries // num_entries) + 1)
-        num_chunks = 100
-        # split entries into num_chunks
-        chunks = [entries[i::num_chunks] for i in range(num_chunks)]
+        num_chunks = min(num_chunks, 100)  # Cap at 100 chunks
 
-    # Refine chunks
-    if mode == "weight":
-        sorted_keys = sorted(input_dict, key=input_dict.get, reverse=True)
-        chunks = [[] for _ in range(num_chunks)]
-        chunk_weights = [0] * num_chunks
+    # Sort items differently based on whether positions are available
+    if ref_positions is not None:
+        # Sort by position and weight if positions are available
+        sorted_items = sorted(
+            ((k, v, ref_positions.get(k, float("inf"))) for k, v in input_dict.items()),
+            key=lambda x: (
+                x[2],
+                -x[1],
+            ),  # Sort by position first, then by weight descending
+        )
+        # Extract just the key and weight for further processing
+        sorted_items = [(item[0], item[1]) for item in sorted_items]
+    else:
+        # Sort only by weight if no positions are available
+        sorted_items = sorted(
+            input_dict.items(),
+            key=lambda x: x[1],
+            reverse=True,  # Sort by weight descending
+        )
 
-        for key in tqdm.tqdm(
-            sorted_keys,
-            desc="Distributing keys",
-            unit_scale=True,
-            unit_divisor=500,
-            leave=False,
-            ncols=80,
-            unit=" keys",
-        ):
-            min_chunk_idx = chunk_weights.index(min(chunk_weights))
-            chunks[min_chunk_idx].append(key)
-            chunk_weights[min_chunk_idx] += input_dict[key]
+    # Initialize chunks
+    chunks = [[] for _ in range(num_chunks)]
+    chunk_weights = [0] * num_chunks
 
-        for _ in range(refinement_steps):
-            initial_balance = max(len(chunk) for chunk in chunks) - min(
-                len(chunk) for chunk in chunks
-            )
-            chunks = refine_chunks(chunks, input_dict, chunk_weights, target_weight)
-            current_balance = max(len(chunk) for chunk in chunks) - min(
-                len(chunk) for chunk in chunks
-            )
-            if current_balance >= initial_balance:
-                break  # No improvement, exit the loop
+    # Initial distribution - modified to work without position information
+    for i, (key, weight) in enumerate(sorted_items):
+        chunk_idx = i % num_chunks
+        chunks[chunk_idx].append(key)
+        chunk_weights[chunk_idx] += weight
+
+    # Refinement steps
+    if refinement_steps > 0:
+        # Sort chunks by weight for balancing
+        chunk_info = [(i, w, c) for i, (w, c) in enumerate(zip(chunk_weights, chunks))]
+        chunk_info.sort(key=lambda x: x[1], reverse=True)  # Sort by weight
+
+        # Try to balance the heaviest with the lightest
+        for i in range(len(chunk_info) // 2):
+            heavy_idx = i
+            light_idx = -(i + 1)
+
+            heavy_chunk = chunk_info[heavy_idx]
+            light_chunk = chunk_info[light_idx]
+
+            # Try to move the smallest item from heavy to light that improves balance
+            if heavy_chunk[1] > light_chunk[1] * 1.1:  # Only if significant imbalance
+                heavy_items = [(k, input_dict[k]) for k in chunks[heavy_chunk[0]]]
+                heavy_items.sort(key=lambda x: x[1])  # Sort by weight
+
+                for key, weight in heavy_items:
+                    if heavy_chunk[1] - weight > light_chunk[1] + weight:
+                        # Move item
+                        chunks[heavy_chunk[0]].remove(key)
+                        chunks[light_chunk[0]].append(key)
+                        chunk_weights[heavy_chunk[0]] -= weight
+                        chunk_weights[light_chunk[0]] += weight
+                        break
 
     if verbose:
         print_chunk_stats(chunks, input_dict)
+        # Only print position stats if positions are available
+        if ref_positions is not None:
+            print("\nBAM position stats:")
+            for i, chunk in enumerate(chunks):
+                if chunk:
+                    positions = [ref_positions.get(ref, 0) for ref in chunk]
+                    positions.sort()
+                    span = positions[-1] - positions[0] if len(positions) > 1 else 0
+                    jumps = sum(
+                        abs(positions[j] - positions[j - 1])
+                        for j in range(1, len(positions))
+                    )
+                    avg_jump = jumps / (len(positions) - 1) if len(positions) > 1 else 0
+                    print(
+                        f"Chunk {i+1}: Position span = {span}, Avg ref-to-ref jump = {avg_jump:.2f}, "
+                        f"Refs: {chunk[0]}..{chunk[-1]}"
+                    )
 
     return chunks
 
@@ -260,9 +305,14 @@ def sort_keys_by_approx_weight(
 def print_chunk_stats(chunks, input_dict):
     for i, chunk in enumerate(chunks, 1):
         weights = [input_dict[key] for key in chunk]
-        print(
-            f"Chunk {i}: Total = {sum(weights)}, Min = {min(weights)}, Max = {max(weights)}, Avg = {sum(weights) / len(chunk)}"
-        )
+        if weights:
+            print(
+                f"Chunk {i}: Total = {sum(weights)}, "
+                f"Min = {min(weights)}, "
+                f"Max = {max(weights)}, "
+                f"Avg = {sum(weights) / len(chunk)}, "
+                f"Size = {len(chunk)}"
+            )
 
 
 def create_empty_output_files(out_files):

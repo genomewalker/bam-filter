@@ -677,11 +677,13 @@ def write_reassigned_bam(
     log.info("::: Creating reference chunks with uniform read amounts...")
     ref_chunks = sort_keys_by_approx_weight(
         input_dict=ref_counts,
+        ref_positions=refs_idx,
         scale=1,
         num_cores=p_threads,
         verbose=False,
         max_entries_per_chunk=1_000_000,
     )
+
     log.info(f"::: Using {p_threads} processes to write {len(ref_chunks)} chunk(s)")
 
     total_entries = sum(len(chunk) for chunk in ref_chunks)
@@ -788,41 +790,6 @@ def write_reassigned_bam(
         shutil.move(out_files["bam_reassigned_tmp"], out_bam)
 
 
-def calculate_global_alignment_score(
-    num_matches,
-    num_mismatches,
-    num_gaps,
-    gap_extensions,
-    match_reward,
-    mismatch_penalty,
-    gap_open_penalty,
-    gap_extension_penalty,
-):
-    # Calculate the raw alignment score for global alignment
-    S = (
-        (num_matches * match_reward)
-        - (num_mismatches * mismatch_penalty)
-        - (num_gaps * gap_open_penalty)
-        - (gap_extensions * gap_extension_penalty)
-    )
-    return S
-
-
-def normalize_scores(scores):
-    # Step 1: Ensure all scores are positive by shifting if necessary
-    min_score = min(scores)
-    if min_score < 0:
-        scores = [
-            score - min_score + 1 for score in scores
-        ]  # Shift to make all scores positive
-
-    # Step 2: Apply softmax to convert scores to probabilities
-    exp_scores = np.exp(scores)
-    probabilities = exp_scores / np.sum(exp_scores)
-
-    return probabilities
-
-
 def process_alignments(
     parms,
     ref_lengths=None,
@@ -839,62 +806,60 @@ def process_alignments(
     """Process BAM alignments and calculate alignment scores."""
     bam, references = parms
     dt.options.progress.enabled = False
-    dt.options.progress.clear_on_success = True
-
     results = []
     empty_df = 0
+    percid_factor = percid / 100.0
 
     with pysam.AlignmentFile(bam, "rb", threads=threads) as samfile:
         if ref_lengths is None:
             reference_lengths = {
-                reference: np.int64(samfile.get_reference_length(reference))
-                for reference in references
+                ref: np.int64(samfile.get_reference_length(ref)) for ref in references
             }
         else:
-            reference_lengths = {
-                reference: np.int64(ref_lengths[reference]) for reference in references
-            }
+            reference_lengths = {ref: np.int64(ref_lengths[ref]) for ref in references}
 
         for reference in references:
+            alignment_info = []  # Single list of tuples
+            info_append = alignment_info.append  # Local reference to append
             reference_length = reference_lengths[reference]
-            alignment_info = []
 
             for aln in samfile.fetch(
                 reference, multiple_iterators=False, until_eof=True
             ):
                 query_length = aln.query_length or aln.infer_query_length()
-                if min_read_length <= query_length <= max_read_length:
-                    num_mismatches = aln.get_tag("NM")
-                    pident = (1 - (num_mismatches / query_length)) * 100
-                    if pident >= percid:
-                        num_matches = query_length - num_mismatches
-                        num_gaps = aln.get_tag("XO") if aln.has_tag("XO") else 0
-                        gap_extensions = aln.get_tag("XG") if aln.has_tag("XG") else 0
+                if query_length < min_read_length or query_length > max_read_length:
+                    continue
 
-                        score = (
-                            (num_matches * match_reward)
-                            - (num_mismatches * mismatch_penalty)
-                            - (num_gaps * gap_open_penalty)
-                            - (gap_extensions * gap_extension_penalty)
-                        )
+                num_mismatches = aln.get_tag("NM")
+                if (query_length - num_mismatches) / query_length < percid_factor:
+                    continue
 
-                        alignment_info.append(
-                            (aln.query_name, aln.reference_name, score, query_length)
-                        )
+                num_matches = query_length - num_mismatches
+                num_gaps = aln.get_tag("XO") if aln.has_tag("XO") else 0
+                gap_extensions = aln.get_tag("XG") if aln.has_tag("XG") else 0
 
-            if alignment_info:
-                scores = np.array([info[2] for info in alignment_info])
-                lengths = np.array([info[3] for info in alignment_info])
-                normalized_scores = (scores - np.min(scores) + 1) / lengths
-
-                aln_data = dt.Frame(
-                    [
-                        (info[0], info[1], normalized_scores[i], reference_length)
-                        for i, info in enumerate(alignment_info)
-                    ],
-                    names=["queryId", "subjectId", "bitScore", "slen"],
+                score = (
+                    (num_matches * match_reward)
+                    - (num_mismatches * mismatch_penalty)
+                    - (num_gaps * gap_open_penalty)
+                    - (gap_extensions * gap_extension_penalty)
                 )
 
+                info_append((aln.query_name, aln.reference_name, score, query_length))
+
+            if alignment_info:
+                scores = np.array([x[2] for x in alignment_info], dtype=np.float32)
+                lengths = np.array([x[3] for x in alignment_info], dtype=np.float32)
+                normalized_scores = (scores - scores.min() + 1) / lengths
+
+                aln_data = dt.Frame(
+                    {
+                        "queryId": [x[0] for x in alignment_info],
+                        "subjectId": [x[1] for x in alignment_info],
+                        "bitScore": normalized_scores,
+                        "slen": np.full(len(scores), reference_length),
+                    }
+                )
                 aln_data = aln_data[
                     :1, :, dt.by(dt.f.queryId, dt.f.subjectId), dt.sort(-dt.f.bitScore)
                 ]
@@ -975,6 +940,7 @@ def reassign_reads(
             ref_len_dict = None
 
         index_statistics = samfile.get_index_statistics()
+        ref_positions = {ref: samfile.get_tid(ref) for ref in references}
 
     references_m = {
         chrom.contig: chrom.mapped
@@ -1004,15 +970,16 @@ def reassign_reads(
     log.info("::: Creating reference chunks with uniform read amounts...")
     ref_chunks = sort_keys_by_approx_weight(
         input_dict=references_m,
+        ref_positions=ref_positions,
         scale=1,
         num_cores=threads,
         refinement_steps=10,
-        verbose=False,
+        verbose=True,
         max_entries_per_chunk=100_000_000,
     )
 
     log.info(f"::: ::: Created {len(ref_chunks):,} chunks")
-    ref_chunks = random.sample(ref_chunks, len(ref_chunks))
+    # ref_chunks = random.sample(ref_chunks, len(ref_chunks))
     dt.options.progress.enabled = False
     dt.options.progress.clear_on_success = True
     dt.options.nthreads = 1
