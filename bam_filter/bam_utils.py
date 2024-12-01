@@ -5,7 +5,7 @@ import logging
 import gc
 import shutil
 import tqdm
-from multiprocessing import Process, Queue, Pool
+from multiprocessing import Process, Queue, Pool, Manager
 from bam_filter.utils import (
     is_debug,
     create_empty_output_files,
@@ -16,6 +16,9 @@ import concurrent.futures
 import functools
 import pandas as pd
 import numpy as np
+import datatable as dt
+
+from bam_filter.stats_utils import initializer_lengths
 
 log = logging.getLogger("my_logger")
 
@@ -264,6 +267,14 @@ def process_bam(
     save = pysam.set_verbosity(0)
 
     p_threads, s_threads = allocate_threads(threads, 1, 4)
+
+    dt.options.progress.enabled = True
+    dt.options.progress.clear_on_success = True
+    if threads > 1:
+        dt.options.nthreads = p_threads
+    else:
+        dt.options.nthreads = 1
+
     log.info(f"::: IO Threads: {s_threads} | Processing Threads: {p_threads}")
 
     with pysam.AlignmentFile(bam, "rb", threads=s_threads) as samfile:
@@ -271,15 +282,29 @@ def process_bam(
         pysam.set_verbosity(save)
 
         ref_lengths = None
+
+        bam_reference_lengths = {
+            reference: np.int64(samfile.get_reference_length(reference))
+            for reference in references
+        }
+
         if reference_lengths is not None:
-            ref_lengths = pd.read_csv(
-                reference_lengths, sep="\t", index_col=0, names=["reference", "length"]
+            ref_len_dt = dt.fread(reference_lengths)
+            ref_len_dt.names = ["subjectId", "slen"]
+            ref_lengths = dict(
+                zip(
+                    ref_len_dt["subjectId"].to_list()[0],
+                    ref_len_dt["slen"].to_list()[0],
+                )
             )
-            if not set(references).issubset(set(ref_lengths.index)):
+            del ref_len_dt
+            if not set(references).issubset(set(ref_lengths.keys())):
                 logging.error(
                     "The BAM file contains references not found in the reference lengths file"
                 )
-                sys.exit(1)
+            sys.exit(1)
+        else:
+            ref_lengths = bam_reference_lengths
 
         total_refs = samfile.nreferences
         logging.info(f"Found {total_refs:,} reference sequences")
@@ -287,27 +312,24 @@ def process_bam(
         if plot:
             if not os.path.exists(plots_dir):
                 os.makedirs(plots_dir)
+        logging.info(f"Removing references with less than {min_read_count} reads...")
+        index_statistics = samfile.get_index_statistics()
 
-            logging.info(
-                f"Removing references with less than {min_read_count} reads..."
+        references_m = {
+            chrom.contig: chrom.mapped
+            for chrom in tqdm.tqdm(
+                index_statistics,
+                desc="Filtering references",
+                unit="chrom",
+                leave=False,
+                ncols=80,
+                unit_scale=True,
+                unit_divisor=1000,
             )
-            references_m = {
-                chrom.contig: chrom.mapped
-                for chrom in samfile.get_index_statistics()
-                if chrom.mapped >= min_read_count
-            }
-        else:
-            logging.info(
-                f"Removing references with less than {min_read_count} reads..."
-            )
-            index_statistics = samfile.get_index_statistics()
-            references_m = {
-                chrom.contig: chrom.mapped
-                for chrom in index_statistics
-                if chrom.mapped >= min_read_count
-            }
-            references = list(references_m.keys())
-            ref_positions = {ref: samfile.get_tid(ref) for ref in references}
+            if chrom.mapped >= min_read_count
+        }
+
+        references = list(references_m.keys())
 
         if len(references) == 0:
             logging.warning(
@@ -315,6 +337,8 @@ def process_bam(
             )
             create_empty_output_files(output_files)
             sys.exit(0)
+
+        ref_positions = {ref: samfile.get_tid(ref) for ref in references}
 
         logging.info(f"Keeping {len(references):,} references")
 
@@ -341,14 +365,22 @@ def process_bam(
     log.info(f"::: Created {len(ref_chunks):,} chunks")
 
     params = zip([bam] * len(ref_chunks), ref_chunks)
+    ref_lengths = {ref: ref_lengths[ref] for ref in references}
+
+    bam_reference_lengths = {ref: bam_reference_lengths[ref] for ref in references}
+
     try:
         logging.info(f"Processing {len(ref_chunks):,} chunks")
+        # logging.info("::: Distributing shared objects...")
+        # manager = Manager()
+
         if is_debug():
             data = list(
                 map(
                     functools.partial(
                         get_bam_stats,
-                        ref_lengths=ref_lengths,
+                        # ref_lengths=filtered_ref_lengths,
+                        # bam_reference_lengths=filtered_bam_ref_lengths,
                         min_read_ani=min_read_ani,
                         trim_ends=0,
                         trim_min=trim_min,
@@ -363,13 +395,21 @@ def process_bam(
                 )
             )
         else:
-            with Pool(threads) as p:
+            with Pool(
+                p_threads,
+                initializer_lengths,
+                (
+                    ref_lengths,
+                    bam_reference_lengths,
+                ),
+            ) as p:
                 data = list(
                     tqdm.tqdm(
                         p.imap_unordered(
                             functools.partial(
                                 get_bam_stats,
-                                ref_lengths=ref_lengths,
+                                # ref_lengths=filtered_ref_lengths,
+                                # bam_reference_lengths=filtered_bam_ref_lengths,
                                 min_read_ani=min_read_ani,
                                 trim_ends=0,
                                 trim_min=trim_min,
@@ -378,7 +418,7 @@ def process_bam(
                                 plot=plot,
                                 plots_dir=plots_dir,
                                 read_length_freqs=read_length_freqs,
-                                threads=threads,
+                                threads=s_threads,
                             ),
                             params,
                             chunksize=1,
@@ -391,10 +431,10 @@ def process_bam(
                 )
 
     except KeyboardInterrupt:
-        logging.info("User canceled the operation. Terminating jobs.")
+        logging.info("::: ::: User interrupted execution")
         p.terminate()
         p.join()
-        sys.exit(0)
+        sys.exit(1)
 
     return data
 
@@ -417,6 +457,10 @@ def filter_reference_BAM(
 
     logging.info("Filtering stats...")
 
+    dt.options.nthreads = threads
+    dt.options.progress.enabled = True
+    dt.options.progress.clear_on_success = True
+
     # Store original columns order
     original_columns = df.columns.tolist()
 
@@ -430,9 +474,8 @@ def filter_reference_BAM(
 
     # Write filtered stats to file with same format
     logging.info(f"Writing filtered statistics to {out_files['stats_filtered']}")
-    df_filtered.to_csv(
-        out_files["stats_filtered"], sep="\t", index=False, float_format="%.6g"
-    )
+
+    dt.Frame(df_filtered).to_csv(out_files["stats_filtered"], sep="\t", header=True)
 
     if len(df_filtered.index) == 0:
         logging.info("No references meet the filter conditions.")
@@ -604,7 +647,14 @@ def setup_bam_processing(bam, references, threads, chunk_size, out_files):
             refs_idx = {sys.intern(str(ref)): idx for idx, ref in enumerate(ref_names)}
 
             log.info("::: ::: Creating balanced reference chunks...")
-            ref_chunks = create_balanced_chunks(ref_dict_m, chunk_size, threads)
+            ref_chunks = sort_keys_by_approx_weight(
+                input_dict=ref_dict_m,
+                ref_positions=refs_idx,
+                scale=1,
+                num_cores=threads,
+                verbose=False,
+                max_entries_per_chunk=100_000_000,
+            )
             log.info(f"::: ::: Created {len(ref_chunks):,} processing chunks")
 
             log.info("::: BAM setup completed successfully")
@@ -615,28 +665,28 @@ def setup_bam_processing(bam, references, threads, chunk_size, out_files):
         return None
 
 
-def create_balanced_chunks(ref_dict, chunk_size, num_threads):
-    """Create balanced chunks based on reference sizes"""
-    total_size = sum(ref_dict.values())
-    chunk_target = max(chunk_size, total_size // (num_threads * 2))
+# def create_balanced_chunks(ref_dict, chunk_size, num_threads):
+#     """Create balanced chunks based on reference sizes"""
+#     total_size = sum(ref_dict.values())
+#     chunk_target = max(chunk_size, total_size // (num_threads * 2))
 
-    chunks = []
-    current_chunk = []
-    current_size = 0
+#     chunks = []
+#     current_chunk = []
+#     current_size = 0
 
-    for ref, size in sorted(ref_dict.items(), key=lambda x: x[1], reverse=True):
-        if current_size + size > chunk_target and current_chunk:
-            chunks.append(current_chunk)
-            current_chunk = []
-            current_size = 0
+#     for ref, size in sorted(ref_dict.items(), key=lambda x: x[1], reverse=True):
+#         if current_size + size > chunk_target and current_chunk:
+#             chunks.append(current_chunk)
+#             current_chunk = []
+#             current_size = 0
 
-        current_chunk.append(ref)
-        current_size += size
+#         current_chunk.append(ref)
+#         current_size += size
 
-    if current_chunk:
-        chunks.append(current_chunk)
+#     if current_chunk:
+#         chunks.append(current_chunk)
 
-    return chunks
+#     return chunks
 
 
 def process_bam_parallel(
@@ -651,6 +701,7 @@ def process_bam_parallel(
     chunk_size,
 ):
     """Process BAM file in parallel with memory management"""
+    logging.info("::: Dumping alignments...")
     # Create proper pysam header
     with pysam.AlignmentFile(bam, "rb") as samfile:
         pysam_header = samfile.header

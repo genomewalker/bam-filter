@@ -762,34 +762,32 @@ class SubcommandHelpFormatter(argparse.ArgumentParser):
 
 
 def get_arguments(argv=None):
-    # Use our custom parser
+    # Create the base parent parser for common arguments
+    parent_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+
+    # Add debug to parent parser
+    parent_parser.add_argument(
+        "--debug", dest="debug", action="store_true", help=help_msg["debug"]
+    )
+
+    # Create the main parser
     parser = SubcommandHelpFormatter(
         description="A simple tool to calculate metrics from a BAM file and filter with uneven coverage.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        allow_abbrev=False,  # Disable prefix matching
+        allow_abbrev=False,
     )
 
-    # Add the base arguments
+    # Add version to main parser
     parser.add_argument(
         "--version",
         action="version",
         version="%(prog)s " + __version__,
         help=help_msg["version"],
     )
-    parser.add_argument(
-        "--debug", dest="debug", action="store_true", help=help_msg["debug"]
-    )
 
-    # Create subparsers with allow_abbrev=False
-    sub_parsers = parser.add_subparsers(
-        help="positional arguments",
-        dest="action",
-    )
-
-    # Create parent subparser. Note `add_help=False` and creation via `argparse.`
-    parent_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
-
-    required = parent_parser.add_argument_group("required arguments")
+    # Create the shared parser for common required arguments
+    common_required = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    required = common_required.add_argument_group("required arguments")
     required.add_argument(
         "--bam",
         required=True,
@@ -797,8 +795,10 @@ def get_arguments(argv=None):
         type=lambda x: is_valid_file(parser, x, "bam"),
         help=help_msg["bam"],
     )
-    # required = parent_parser.add_argument_group("required arguments")
-    optional = parent_parser.add_argument_group("optional arguments")
+
+    # Create the shared parser for common optional arguments
+    common_optional = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    optional = common_optional.add_argument_group("optional arguments")
     optional.add_argument(
         "-p",
         "--prefix",
@@ -828,27 +828,36 @@ def get_arguments(argv=None):
         default=1,
         help=help_msg["threads"],
     )
-    # Create the parser sub-command for db creation
+
+    # Create subparsers
+    sub_parsers = parser.add_subparsers(
+        help="positional arguments",
+        dest="action",
+    )
+
+    # Create the parser for the filter command with all parent parsers
     parser_filter = sub_parsers.add_parser(
         "filter",
         help="Filter references based on coverage and other metrics",
-        parents=[parent_parser],
+        parents=[parent_parser, common_required, common_optional],
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         allow_abbrev=False,
     )
 
+    # Create the parser for the reassign command with all parent parsers
     parser_reassign = sub_parsers.add_parser(
         "reassign",
         help="Reassign reads to references using an EM algorithm",
-        parents=[parent_parser],
+        parents=[parent_parser, common_required, common_optional],
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         allow_abbrev=False,
     )
 
+    # Create the parser for the lca command with all parent parsers
     parser_lca = sub_parsers.add_parser(
         "lca",
         help="Calculate LCA for each read and estimate abundances",
-        parents=[parent_parser],
+        parents=[parent_parser, common_required, common_optional],
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         allow_abbrev=False,
     )
@@ -1501,6 +1510,10 @@ def get_arguments(argv=None):
         sys.exit(0)
 
     args = parser.parse_args(argv)
+
+    if args.debug:
+        logging.getLogger("my_logger").setLevel(logging.DEBUG)
+
     return args
 
 
@@ -1699,6 +1712,12 @@ def create_output_files(
         exit(1)
     out_files["tmp_dir"] = tmp_dir
     out_files["sorted_bam"] = f"{tmp_dir}/{prefix}.bf-sorted.bam"
+
+    # check that read_length_freqs is a json file
+    if read_length_freqs is not None:
+        if not read_length_freqs.endswith(".json"):
+            log.error("--read-length-freqs must be a JSON file")
+            exit(1)
     return out_files
 
     # out_files = {

@@ -31,7 +31,7 @@ import warnings
 import shutil
 import uuid
 import psutil
-from numba import jit, prange
+from numba import njit, prange
 import numba
 from typing import Dict
 
@@ -306,7 +306,7 @@ def initialize_subject_weights(data, mmap_dir=None, max_memory=None):
     return None
 
 
-@jit(nopython=True, parallel=True)
+@njit(parallel=True, cache=True)
 def fast_e_step(prob_vector, subject_indices, slens, n_chunks, subject_weights):
     """E-step using chunked accumulation with pre-allocated arrays"""
     array_len = len(prob_vector)
@@ -339,7 +339,7 @@ def fast_e_step(prob_vector, subject_indices, slens, n_chunks, subject_weights):
     return s_w
 
 
-@jit(nopython=True, parallel=True)
+@njit(parallel=True, cache=True)
 def fast_m_step(prob_vector, s_w, source_indices, n_chunks, source_sums):
     """M-step using chunked accumulation with pre-allocated arrays"""
     array_len = len(prob_vector)
@@ -790,9 +790,11 @@ def write_reassigned_bam(
         shutil.move(out_files["bam_reassigned_tmp"], out_bam)
 
 
+# import cProfile, pstats
+
+
 def process_alignments(
     parms,
-    ref_lengths=None,
     percid=90,
     min_read_length=30,
     max_read_length=np.inf,
@@ -803,79 +805,118 @@ def process_alignments(
     gap_extension_penalty=2,
     tmpdir=None,
 ):
-    """Process BAM alignments and calculate alignment scores."""
+    # profiler = cProfile.Profile()
+    # profiler.enable()
     bam, references = parms
     dt.options.progress.enabled = False
+    dt.options.progress.clear_on_success = True
+
     results = []
     empty_df = 0
-    percid_factor = percid / 100.0
+    percid = percid / 100
 
     with pysam.AlignmentFile(bam, "rb", threads=threads) as samfile:
-        if ref_lengths is None:
-            reference_lengths = {
-                ref: np.int64(samfile.get_reference_length(ref)) for ref in references
-            }
-        else:
-            reference_lengths = {ref: np.int64(ref_lengths[ref]) for ref in references}
-
         for reference in references:
-            alignment_info = []  # Single list of tuples
-            info_append = alignment_info.append  # Local reference to append
-            reference_length = reference_lengths[reference]
+            reference_length = ref_lengths[reference]
+            fetch = samfile.fetch(reference, multiple_iterators=False, until_eof=True)
 
-            for aln in samfile.fetch(
-                reference, multiple_iterators=False, until_eof=True
-            ):
+            # Initialize lists for collecting alignment data
+            alignment_info = []
+
+            # Collect alignment information with cached values
+            for aln in fetch:
                 query_length = aln.query_length or aln.infer_query_length()
-                if query_length < min_read_length or query_length > max_read_length:
-                    continue
+                if query_length >= min_read_length and query_length <= max_read_length:
+                    try:
+                        num_mismatches = aln.get_tag("NM")
+                        pident = 1 - (num_mismatches / query_length)
 
-                num_mismatches = aln.get_tag("NM")
-                if (query_length - num_mismatches) / query_length < percid_factor:
-                    continue
+                        if pident < percid:
+                            continue
 
-                num_matches = query_length - num_mismatches
-                num_gaps = aln.get_tag("XO") if aln.has_tag("XO") else 0
-                gap_extensions = aln.get_tag("XG") if aln.has_tag("XG") else 0
+                        # Cache all computed values
+                        num_matches = query_length - num_mismatches
 
-                score = (
-                    (num_matches * match_reward)
-                    - (num_mismatches * mismatch_penalty)
-                    - (num_gaps * gap_open_penalty)
-                    - (gap_extensions * gap_extension_penalty)
-                )
+                        try:
+                            num_gaps = aln.get_tag("XO")
+                        except KeyError:
+                            num_gaps = 0
 
-                info_append((aln.query_name, aln.reference_name, score, query_length))
+                        try:
+                            gap_extensions = aln.get_tag("XG")
+                        except KeyError:
+                            gap_extensions = 0
 
+                        # Calculate score in one operation
+                        S = (
+                            (num_matches * match_reward)
+                            - (num_mismatches * mismatch_penalty)
+                            - (num_gaps * gap_open_penalty)
+                            - (gap_extensions * gap_extension_penalty)
+                        )
+
+                        # Store all information in one tuple
+                        alignment_info.append(
+                            (
+                                aln.query_name,
+                                aln.reference_name,
+                                reference_length,
+                                S,
+                                aln.query_alignment_length,
+                            )
+                        )
+                    except KeyError:
+                        # Skip if NM tag is missing
+                        continue
+
+            # Process scores using numpy operations if we have alignments
             if alignment_info:
-                scores = np.array([x[2] for x in alignment_info], dtype=np.float32)
-                lengths = np.array([x[3] for x in alignment_info], dtype=np.float32)
-                normalized_scores = (scores - scores.min() + 1) / lengths
+                # Convert to numpy arrays for faster operations
+                raw_scores = np.array([info[3] for info in alignment_info])
+                aln_lengths = np.array([info[4] for info in alignment_info])
 
-                aln_data = dt.Frame(
-                    {
-                        "queryId": [x[0] for x in alignment_info],
-                        "subjectId": [x[1] for x in alignment_info],
-                        "bitScore": normalized_scores,
-                        "slen": np.full(len(scores), reference_length),
-                    }
+                # Calculate shifted and normalized scores in one step
+                shifted_scores = (raw_scores - np.min(raw_scores) + 1) / aln_lengths
+
+                # Create final alignment data in one go
+                aln_data = [
+                    (info[0], info[1], score, info[2])
+                    for info, score in zip(alignment_info, shifted_scores)
+                ]
+
+                # Create and process datatable efficiently
+                aln_data_dt = dt.Frame(
+                    aln_data, names=["queryId", "subjectId", "bitScore", "slen"]
                 )
-                aln_data = aln_data[
+
+                # Single operation for sorting and grouping
+                aln_data_dt = aln_data_dt[
                     :1, :, dt.by(dt.f.queryId, dt.f.subjectId), dt.sort(-dt.f.bitScore)
                 ]
-                results.append(aln_data)
+                results.append(aln_data_dt)
             else:
                 empty_df += 1
 
+    # Handle results
     if results:
         combined_results = dt.rbind(results)
         if tmpdir is not None:
-            jay_file = os.path.join(tmpdir, f"{uuid.uuid4()}.jay")
+            uuid_name = str(uuid.uuid4())
+            jay_file = os.path.join(tmpdir, f"{uuid_name}.jay")
             combined_results.to_jay(jay_file)
             del combined_results
+            # profiler.disable()
+            # pstats.Stats(profiler).sort_stats("tottime").print_stats(25)
             return (jay_file, empty_df)
-        return (combined_results, empty_df)
-    return (None, empty_df)
+        else:
+            return (combined_results, empty_df)
+    else:
+        return (None, empty_df)
+
+
+def initializer(init_dict):
+    global ref_lengths
+    ref_lengths = init_dict
 
 
 def reassign_reads(
@@ -921,7 +962,11 @@ def reassign_reads(
         total_refs = samfile.nreferences
         log.info(f"::: Found {total_refs:,} reference sequences")
 
-        log.info(f"::: Removing references with less than {min_read_count} reads...")
+        bam_reference_lengths = {
+            reference: np.int64(samfile.get_reference_length(reference))
+            for reference in references
+        }
+
         if reference_lengths is not None:
             ref_len_dt = dt.fread(reference_lengths)
             ref_len_dt.names = ["subjectId", "slen"]
@@ -937,24 +982,26 @@ def reassign_reads(
                 )
                 sys.exit(1)
         else:
-            ref_len_dict = None
+            ref_len_dict = bam_reference_lengths
 
         index_statistics = samfile.get_index_statistics()
         ref_positions = {ref: samfile.get_tid(ref) for ref in references}
 
-    references_m = {
-        chrom.contig: chrom.mapped
-        for chrom in tqdm.tqdm(
-            [chrom for chrom in index_statistics if chrom.mapped >= min_read_count],
-            desc="Filtering references",
-            total=len(index_statistics),
-            unit="chrom",
-            leave=False,
-            ncols=80,
-            unit_scale=True,
-            unit_divisor=1000,
-        )
-    }
+        log.info(f"::: Removing references with less than {min_read_count} reads...")
+        references_m = {
+            chrom.contig: chrom.mapped
+            for chrom in tqdm.tqdm(
+                index_statistics,
+                desc="Filtering references",
+                unit="chrom",
+                leave=False,
+                ncols=80,
+                unit_scale=True,
+                unit_divisor=1000,
+            )
+            if chrom.mapped >= min_read_count
+        }
+
     del index_statistics
     n_alns = sum(references_m.values())
     log.info(f"::: Kept {n_alns:,} alignments")
@@ -964,6 +1011,9 @@ def reassign_reads(
         log.warning("::: No reference sequences with alignments found in the BAM file")
         create_empty_output_files(out_files)
         sys.exit(0)
+
+    # keep only references in references
+    ref_lengths = {ref: ref_len_dict[ref] for ref in references}
 
     log.info(f"::: Keeping {len(references):,} references")
 
@@ -995,7 +1045,6 @@ def reassign_reads(
                 map(
                     partial(
                         process_alignments,
-                        ref_lengths=ref_len_dict,
                         percid=min_read_ani,
                         min_read_length=min_read_length,
                         max_read_length=max_read_length,
@@ -1016,13 +1065,12 @@ def reassign_reads(
             )
         )
     else:
-        p = Pool(p_threads)
+        p = Pool(p_threads, initializer, (ref_lengths,))
         data = list(
             tqdm.tqdm(
                 p.imap_unordered(
                     partial(
                         process_alignments,
-                        ref_lengths=ref_len_dict,
                         percid=min_read_ani,
                         min_read_length=min_read_length,
                         max_read_length=max_read_length,

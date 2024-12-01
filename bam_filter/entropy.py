@@ -2,6 +2,7 @@ import numpy as np
 from kneed import KneeLocator
 import matplotlib.pyplot as plt
 import logging
+from numba import jit
 
 log = logging.getLogger("my_logger")
 
@@ -11,143 +12,101 @@ plt_log.setLevel(logging.ERROR)
 logging.getLogger("PIL").setLevel(logging.WARNING)
 
 
-# Code from: https://www.frontiersin.org/articles/10.3389/fmicb.2022.918015/full
+# Numba-optimized functions
+@jit(nopython=True, cache=True)
 def entropy(counts):
-    counts_vector = np.array(counts)
-    frequencies = counts_vector / counts_vector.sum()
-    H = 0
+    counts_sum = np.sum(counts)
+    frequencies = counts / counts_sum
+    H = 0.0
     for p in frequencies:
         if p != 0:
             H = H - p * np.log(p)
     return H
 
 
+@jit(nopython=True, cache=True)
+def get_even_distribution(n_obs, n_bins):
+    quotient = n_obs // n_bins
+    remainder = n_obs % n_bins
+    values = np.empty(n_bins, dtype=np.int64)
+    values[: n_bins - remainder] = quotient
+    values[n_bins - remainder :] = quotient + 1
+    return values
+
+
+@jit(nopython=True, cache=True)
 def norm_entropy(counts):
-    """
+    counts_sum = np.sum(counts)
+    n_bins = len(counts)
 
-    Entropy divided by the maximum entropy possible with that number of counts
-    and that number of bins.
+    if counts_sum == 1:
+        return 1.0
 
-    Parameters
-    ----------
-    counts : array-like object
-        Counts associated to each class.
-    Returns
-    -------
-    rel_possible_ent : float
-        Ranges from 0, when entropy is 0, to 1, when entropy is the maximum
-        possible entropy. The maximum possible entropy depends on the number of
-        counts and bins, and it's achieved when the counts are distributed as
-        evenly as possible among the bins. Example: with 10 bins and 12 counts,
-        maximum possible entropy is the entropy of the distribution where 2
-        bins contain 2 counts, and 8 bins contain 1 count.
-    """
-
-    counts_vector = np.array(counts)
-    n_obs = counts_vector.sum()
-    n_bins = len(counts_vector)
-    if n_obs == 1:
-        rel_possible_ent = 1
-    else:
-        # Compute max entropy possible with that number of obs and bins
-        quotient = n_obs // n_bins
-        remainder = n_obs % n_bins
-        chunk_1 = np.repeat(quotient, n_bins - remainder)
-        chunk_2 = np.repeat(quotient + 1, remainder)
-        values = np.hstack((chunk_1, chunk_2))  # values distr as evenly as possible
-        max_possible_entropy = entropy(values)
-        # Compute relative entropy
-        rel_possible_ent = entropy(counts) / max_possible_entropy
-    return rel_possible_ent
+    values = get_even_distribution(counts_sum, n_bins)
+    max_possible_entropy = entropy(values)
+    return entropy(counts) / max_possible_entropy
 
 
-def gini_coeff(values_for_each_class):
-    """
-    Gini coefficient measures distribution inequality.
-    Parameters
-    ----------
-    values_for_each_class : array-like object
-        Values associated to each class.
-        They don't need to be already sorted and/or normalized.
-    Returns
-    -------
-    gini_coeff : float
-        Ranges from 0 (perfect equality) to 1 (maximal inequality).
-    """
-
-    import numpy as np
-
-    values = np.array(values_for_each_class)
-    norm_values = values / values.sum()  # normalize
-
-    # Generate Lorenz curve
-    norm_values.sort()
-    cum_distr = np.cumsum(norm_values)
-    cum_distr = list(cum_distr)
-    cum_distr.insert(0, 0)
-
-    # Get area under Lorenz curve
-    n_classes = len(cum_distr) - 1
-    under_lorenz = np.trapz(y=cum_distr, dx=1 / n_classes)
-
-    # Area under Perfect Equality curve
-    # It's the area of a triangle with base = 1 and height = 1
-    under_PE = 0.5
-
-    # Compute Gini coefficient
-    gini_coeff = (under_PE - under_lorenz) / under_PE
-
-    return gini_coeff
+@jit(nopython=True, cache=True)
+def cumsum(arr):
+    result = np.empty(len(arr) + 1)
+    result[0] = 0
+    sum_val = 0
+    for i in range(len(arr)):
+        sum_val += arr[i]
+        result[i + 1] = sum_val
+    return result
 
 
-def norm_gini_coeff(values_for_each_class):
-    """
-    Normalized Gini coefficient.
-    The minimum and maximum possible Gini coefficient with that number of
-    bins and observations are computed. Then, norm_Gini_coefficient is
-    defined as
-    norm_Gini_coefficient := (Gini - min_Gini) / (max_Gini - min_Gini)
-    Parameters
-    ----------
-    values_for_each_class : array-like object
-        Values associated to each class.
-        They don't need to be already sorted and/or normalized.
-    Returns
-    -------
-    norm_gini_coeff : float
-        Ranges from 0 (minimal inequality possible) to 1 (maximal
-        inequality possible).
-    """
+@jit(nopython=True, cache=True)
+def trapezoid(y, dx):
+    n = len(y) - 1
+    area = 0.0
+    for i in range(n):
+        area += (y[i] + y[i + 1]) * dx / 2
+    return area
 
-    import numpy as np
 
-    # Compute Gini coefficient
-    nuber_of_bins = len(values_for_each_class)
-    number_of_obs = np.array(values_for_each_class).sum()
-    Gini = gini_coeff(values_for_each_class)
+@jit(nopython=True, cache=True)
+def gini_coeff(values):
+    total = np.sum(values)
+    if total == 0:
+        return 0.0
 
-    # Compute minimum possible Gini coefficient
-    quotient = number_of_obs // nuber_of_bins
-    remainder = number_of_obs % nuber_of_bins
-    chunk_1 = np.repeat(quotient, nuber_of_bins - remainder)
-    chunk_2 = np.repeat(quotient + 1, remainder)
-    vect = np.hstack((chunk_1, chunk_2))  # values distr as evenly as possible
-    min_Gini = gini_coeff(vect)
+    norm_values = values / total
+    sorted_values = np.sort(norm_values)
 
-    # Compute maximum possible Gini coefficient
-    chunk_1 = np.repeat(0, nuber_of_bins - 1)
-    chunk_2 = np.repeat(number_of_obs, 1)
-    vect = np.hstack((chunk_1, chunk_2))  # values distr as unevenly as possible
-    vect = [int(v) for v in vect]
-    max_Gini = gini_coeff(vect)
+    # Calculate cumulative distribution including 0
+    cum_distr = cumsum(sorted_values)
 
-    # Compute normalized Gini coefficient
-    if max_Gini - min_Gini == 0:
-        norm_gini = 0
-    else:
-        norm_gini = (Gini - min_Gini) / (max_Gini - min_Gini)
+    # Compute area under Lorenz curve using trapezoidal rule
+    n_classes = len(values)
+    dx = 1.0 / n_classes
+    under_lorenz = trapezoid(cum_distr, dx)
 
-    return norm_gini
+    return (0.5 - under_lorenz) / 0.5
+
+
+@jit(nopython=True, cache=True)
+def norm_gini_coeff(values):
+    n_bins = len(values)
+    n_obs = np.sum(values)
+
+    if n_obs == 0:
+        return 0.0
+
+    gini = gini_coeff(values)
+
+    min_values = get_even_distribution(n_obs, n_bins)
+    min_gini = gini_coeff(min_values)
+
+    max_values = np.zeros(n_bins, dtype=np.int64)
+    max_values[-1] = n_obs
+    max_gini = gini_coeff(max_values)
+
+    if max_gini - min_gini == 0:
+        return 0.0
+    return (gini - min_gini) / (max_gini - min_gini)
 
 
 def find_knee(df, out_plot_name):

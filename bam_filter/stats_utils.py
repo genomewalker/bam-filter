@@ -1,91 +1,250 @@
 import numpy as np
 import pandas as pd
 import logging
-import tqdm
 import warnings
 from collections import defaultdict
 from scipy import stats
 import matplotlib.pyplot as plt
 import pysam
 from bam_filter.entropy import entropy, norm_entropy, gini_coeff, norm_gini_coeff
-from bam_filter.utils import is_debug
+from numba import jit
 
 log = logging.getLogger("my_logger")
 
 
+def initializer_lengths(init_dict, init_dict2):
+    global ref_lengths
+    ref_lengths = init_dict
+    global bam_reference_lengths
+    bam_reference_lengths = init_dict2
+
+
+# @jit(nopython=True, cache=True)
+# def get_tad(cov, trim_min=10, trim_max=90):
+#     """
+#     Fast TAD calculation that maintains perfect accuracy.
+#     Uses direct integer counting for exact results.
+#     """
+#     if len(cov) == 0:
+#         return 0.0, 0
+
+#     n = len(cov)
+#     min_count = (n * trim_min) // 100
+#     max_count = (n * trim_max) // 100
+
+#     if min_count >= max_count:
+#         return 0.0, 0
+
+#     # For small arrays, just use sort directly
+#     if n < 500:
+#         sorted_cov = np.sort(cov)
+#         filtered = sorted_cov[min_count:max_count]
+#         return np.sum(filtered) / len(filtered), len(filtered)
+
+#     # Find max and min values in one pass
+#     max_val = cov[0]
+#     for i in range(n):
+#         if cov[i] > max_val:
+#             max_val = cov[i]
+
+#     # Use stable counting sort
+#     counts = np.zeros(int(max_val) + 1, dtype=np.int32)
+#     for i in range(n):
+#         counts[int(cov[i])] += 1
+
+#     # Calculate running sum and find trim points
+#     curr_count = 0
+#     start_val = -1
+#     end_val = -1
+
+#     # Find start value
+#     for i in range(len(counts)):
+#         curr_count += counts[i]
+#         if curr_count > min_count:
+#             start_val = i
+#             break
+
+#     # Reset and find end value
+#     curr_count = 0
+#     for i in range(len(counts)):
+#         curr_count += counts[i]
+#         if curr_count > max_count:
+#             end_val = i
+#             break
+
+#     if start_val == -1 or end_val == -1:
+#         return 0.0, 0
+
+#     # Calculate exact sum and count
+#     total = 0.0
+#     count = 0
+#     for i in range(start_val, end_val + 1):
+#         total += i * counts[i]
+#         count += counts[i]
+
+#     if count == 0:
+#         return 0.0, 0
+
+#     return total / count, count
+
+
+@jit(nopython=True, cache=True)
 def get_tad(cov, trim_min=10, trim_max=90):
     """
-    Get the TAD (Truncated Average Depth) of coverage more efficiently
-
-    Args:
-        cov: numpy array of coverage values
-        trim_min: minimum percentile to include (default: 10)
-        trim_max: maximum percentile to include (default: 90)
-
-    Returns:
-        tuple: (TAD value, number of positions used)
+    Ultrafast TAD calculation optimized for coverage data characteristics:
+    - Non-negative integers
+    - Often sparse (many zeros)
+    - Values typically cluster in lower ranges
     """
-    if len(cov) == 0:
-        return (0, 0)
+    n = len(cov)
+    if n == 0:
+        return 0.0, 0
 
-    # Calculate percentiles once
-    min_val = np.percentile(cov, trim_min)
-    max_val = np.percentile(cov, trim_max)
+    # Early return for uniform coverage
+    if cov[0] == cov[-1]:  # Check if first and last are same
+        if cov[n // 2] == cov[0]:  # Check middle
+            return float(cov[0]), n
 
-    # Use boolean indexing in one step
-    mask = (cov >= min_val) & (cov <= max_val)
-    filtered_cov = cov[mask]
+    min_count = (n * trim_min) // 100
+    max_count = (n * trim_max) // 100
 
-    count = len(filtered_cov)
-    return (np.sum(filtered_cov) / count, count) if count > 0 else (0, 0)
+    if min_count >= max_count:
+        return 0.0, 0
+
+    # For tiny arrays, direct sort
+    if n < 32:  # Reduced threshold since we handle uniform case above
+        sorted_cov = np.sort(cov)
+        filtered = sorted_cov[min_count:max_count]
+        return np.sum(filtered) / len(filtered), len(filtered)
+
+    # Count zeros up front since they're common in coverage data
+    zeros = 0
+    for i in range(n):
+        if cov[i] == 0:
+            zeros += 1
+
+    # Skip zeros array allocation if all values are above trimming point
+    if zeros < min_count:
+        counts = np.zeros(int(cov.max()) + 1, dtype=np.int32)
+        start_idx = 1  # Skip zero bin
+    else:
+        counts = np.zeros(int(cov.max()) + 1, dtype=np.int32)
+        counts[0] = zeros
+        start_idx = 0
+
+    # Count only non-zero values
+    for i in range(n):
+        val = cov[i]
+        if val > 0:  # Skip zeros since we counted them
+            counts[val] += 1
+
+    # Direct trim point search optimized for coverage distribution
+    start_val = -1
+    end_val = -1
+    curr_count = 0
+
+    for i in range(start_idx, len(counts)):
+        curr_count += counts[i]
+        if start_val == -1 and curr_count > min_count:
+            start_val = i
+        if curr_count > max_count:
+            end_val = i
+            break
+
+    if start_val == -1 or end_val == -1:
+        return 0.0, 0
+
+    # Fast sum calculation
+    total = 0.0
+    count = 0
+    for i in range(start_val, end_val + 1):
+        c = counts[i]
+        total += i * c
+        count += c
+
+    if count == 0:
+        return 0.0, 0
+
+    return total / count, count
 
 
-def coverage_evenness(coverage):
+# @jit(nopython=True, cache=True)
+# def coverage_evenness(coverage):
+#     """
+#     Optimized coverage evenness calculation that avoids nonzero()
+#     """
+#     if len(coverage) == 0:
+#         return 0.0
+
+#     # Calculate mean directly without np.mean()
+#     total = 0.0
+#     n = len(coverage)
+#     for i in range(n):
+#         total += coverage[i]
+#     C = round(total / n)
+
+#     if C == 0:
+#         return 0.0
+
+#     # Count values <= C and their sum directly
+#     count_leq_C = 0
+#     sum_leq_C = 0.0
+#     for i in range(n):
+#         val = coverage[i]
+#         if val <= C:
+#             count_leq_C += 1
+#             sum_leq_C += val
+
+#     return 1.0 - (count_leq_C - sum_leq_C / C) / n
+
+
+@jit(nopython=True, cache=True, fastmath=True)
+def get_coverage_stats(coverage):
     """
-    Calculate the evenness of coverage using a more efficient implementation.
-
-    Formula: E = 1 - (|D2| - sum(D2)/C) / |D|
-    where:
-    - C is rounded mean coverage
-    - D2 is subset of positions with coverage <= C
-    - |D| is total number of positions
-
-    Args:
-        coverage: numpy array of coverage values
-
-    Returns:
-        float: Evenness score between 0 and 1
-        - 1.0 indicates perfectly even coverage
-        - 0.0 indicates completely uneven coverage or zero coverage
+    Ultra-fast coverage stats using minimal operations
+    Returns: (evenness, number_of_positions, positions)
     """
-    # Handle empty input
-    if len(coverage) == 0:
-        return 0.0
+    n = len(coverage)
+    positions = np.empty(n, dtype=np.int64)  # Preallocate max size
+    pos_idx = 0
+    total = 0.0
 
-    # Calculate mean coverage once and round
-    C = float(np.rint(np.mean(coverage)))
+    # Single pass for both positions and total
+    for i in range(n):
+        val = coverage[i]
+        if val > 0:
+            positions[pos_idx] = i
+            pos_idx += 1
+            total += val
 
-    # Early returns for edge cases
+    # Early exit for empty
+    if pos_idx == 0:
+        return 0.0, 0, positions[:0]
+
+    # Fast C calculation
+    C = round(total / n)
     if C == 0:
-        return 0.0
+        return 0.0, pos_idx, positions[:pos_idx]
 
-    # Use boolean indexing for efficient filtering
-    mask = coverage <= C
-    D2 = coverage[mask]
+    # Direct count and sum for values <= C
+    count_leq_C = 0
+    sum_leq_C = 0.0
 
-    if len(D2) == 0:
-        return 1.0
+    # Raw loop is faster than numpy operations for this case
+    for i in range(n):
+        val = coverage[i]
+        if val <= C:
+            count_leq_C += 1
+            sum_leq_C += val
 
-    # Calculate evenness score in one step
-    return 1.0 - (len(D2) - np.sum(D2) / C) / len(coverage)
+    # Final calculation
+    evenness = 1.0 - (count_leq_C - sum_leq_C / C) / n
+    return evenness, pos_idx, positions[:pos_idx]
 
 
 def calc_gc_content(seq):
     """Calculate GC content of a sequence"""
     return seq.count("G") + seq.count("C")
-
-
-import numpy as np
 
 
 def merge_intervals(starts, ends):
@@ -278,16 +437,20 @@ class BamAlignment:
         }
 
     def get_read_length_freqs(self):
-        """Calculate read length frequencies"""
-        lengths = pd.Series(self.read_length)
-        lengths = lengths.value_counts().sort_index()
-        freqs = list(lengths / np.sum(lengths))
-        return {self.reference: {"length": list(lengths.index), "freq": freqs}}
+        """Calculate read length frequencies using optimized methods"""
+        unique_lengths, counts = np.unique(self.read_length, return_counts=True)
+        freqs = counts / counts.sum()
+        return {
+            self.reference: {"length": unique_lengths.tolist(), "freq": freqs.tolist()}
+        }
+
+
+# import cProfile, pstats
+
 
 
 def get_bam_stats(
     params,
-    ref_lengths=None,
     min_read_ani=90.0,
     scale=1e6,
     trim_ends=0,
@@ -298,15 +461,14 @@ def get_bam_stats(
     read_length_freqs=False,
     threads=1,
 ):
+    # profiler = cProfile.Profile()
+    # profiler.enable()
+
     """Calculate comprehensive statistics from BAM file alignments"""
     bam, references = params
     results = []
 
     with pysam.AlignmentFile(bam, "rb", threads=threads) as samfile:
-        bam_reference_lengths = {
-            reference: np.int64(samfile.get_reference_length(reference))
-            for reference in references
-        }
         read_hits = defaultdict(int)
 
         for reference in references:
@@ -319,11 +481,9 @@ def get_bam_stats(
             read_names = set()
             read_gc_content = []
             n_alns = 0
+            min_read_ani /= 100
 
-            if ref_lengths is None:
-                reference_length = bam_reference_lengths[reference]
-            else:
-                reference_length = np.int64(ref_lengths.loc[reference, "length"])
+            reference_length = ref_lengths[reference]
             bam_reference_length = bam_reference_lengths[reference]
 
             log.debug(f"Processing reference {reference}")
@@ -333,10 +493,12 @@ def get_bam_stats(
             starts = []
             ends = []
             strands = []
-            cov_np = np.zeros(samfile.get_reference_length(reference), dtype=np.int32)
+            cov_np = np.zeros(reference_length, dtype=np.int32)
 
-            for aln in samfile.fetch(reference, multiple_iterators=False):
-                ani_read = (1 - ((aln.get_tag("NM") / aln.infer_query_length()))) * 100
+            for aln in samfile.fetch(
+                reference, multiple_iterators=False, until_eof=True
+            ):
+                ani_read = 1 - ((aln.get_tag("NM") / aln.infer_query_length()))
                 if ani_read >= min_read_ani:
                     n_alns += 1
                     read_hits[aln.query_name] += 1
@@ -345,7 +507,7 @@ def get_bam_stats(
                     if aln.has_tag("AS"):
                         read_aln_score.append(aln.get_tag("AS"))
                         edit_distances.append(aln.get_tag("NM"))
-                        ani_nm.append(ani_read)
+                        ani_nm.append(ani_read * 100)
                     else:
                         read_aln_score.append(np.nan)
                         edit_distances.append(np.nan)
@@ -376,9 +538,11 @@ def get_bam_stats(
                 if trim_ends > 0:
                     cov_np = cov_np[trim_ends:-trim_ends]
 
-                # Calculate coverage statistics
-                cov_pos = cov_np[cov_np > 0]
-                cov_positions = np.nonzero(cov_np)[0]
+                # Get all coverage statistics in one pass
+                cov_evenness, bases_covered, cov_positions = get_coverage_stats(cov_np)
+
+                # Create cov_pos array only once
+                cov_pos = cov_np[cov_positions]
 
                 # Use merge_intervals instead of PyRanges
                 merged_starts, merged_ends = merge_intervals(starts, ends)
@@ -388,7 +552,6 @@ def get_bam_stats(
 
                 max_covered_bases = np.max(ranges)
                 mean_covered_bases = np.mean(ranges)
-                bases_covered = len(cov_pos)
 
                 # Calculate coverage metrics
                 mean_coverage_trunc, mean_coverage_trunc_len = get_tad(
@@ -397,7 +560,7 @@ def get_bam_stats(
                     trim_max=trim_max,
                 )
 
-                # Coverage calculations
+                # Coverage calculations using pre-computed values
                 mean_coverage = np.sum(cov_pos) / (reference_length - (2 * trim_ends))
                 mean_coverage_covered = (
                     np.sum(cov_pos) / bases_covered if bases_covered > 0 else 0
@@ -410,7 +573,7 @@ def get_bam_stats(
                 )
 
                 # Calculate evenness and statistical metrics
-                cov_evenness = coverage_evenness(cov_np)
+                # cov_evenness = coverage_evenness(cov_np)
                 c_v = (
                     np.std(cov_pos, ddof=1) / mean_coverage if mean_coverage > 0 else 0
                 )
@@ -503,6 +666,10 @@ def get_bam_stats(
 
     results = list(filter(None, results))
     data_df = pd.DataFrame([x.to_summary() for x in results])
+
+    # profiler.disable()
+    # stats = pstats.Stats(profiler).sort_stats("totti")
+    # stats.print_stats(25)
 
     if read_length_freqs:
         read_lens = [x.get_read_length_freqs() for x in results]

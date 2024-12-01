@@ -1,17 +1,5 @@
-"""
-This program is free software: you can redistribute it and/or modify it under the terms of the GNU
-General Public License as published by the Free Software Foundation, either version 3 of the
-License, or (at your option) any later version.
-
-This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without
-even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
-General Public License for more details.
-
-You should have received a copy of the GNU General Public License along with this program. If not,
-see <https://www.gnu.org/licenses/>.
-"""
-
 import logging
+import datatable as dt
 import pandas as pd
 
 # Import BAM utilities
@@ -20,7 +8,6 @@ from bam_filter.bam_utils import (
     process_bam,
     filter_reference_BAM,
 )
-
 
 from bam_filter.utils import (
     get_arguments,
@@ -37,8 +24,80 @@ from collections import Counter
 from functools import reduce
 import os
 import sys
+from typing import Dict, List, TextIO, Union, Iterator, Any
+from itertools import islice
 
 log = logging.getLogger("my_logger")
+
+
+class StreamingJSONWriter:
+    """Helper class to write formatted JSON array with proper indentation."""
+
+    def __init__(self, file: TextIO, indent: int = 4):
+        self.file = file
+        self.indent = indent
+        self.first_item = True
+        self._wrote_open = False
+
+    def write_open(self):
+        """Write the opening bracket of the JSON array."""
+        self.file.write("[\n")
+        self._wrote_open = True
+
+    def write_close(self):
+        """Write the closing bracket of the JSON array."""
+        if self._wrote_open:
+            self.file.write("\n]")
+
+    def write_item(self, item: Any, obj_dict: Any = None):
+        """Write a single item to the JSON array with proper formatting."""
+        if not self._wrote_open:
+            self.write_open()
+
+        if not self.first_item:
+            self.file.write(",\n")
+        self.first_item = False
+
+        json_str = json.dumps(item, default=obj_dict, ensure_ascii=False)
+        indent_str = " " * self.indent
+        self.file.write(f"{indent_str}{json_str}")
+
+
+def write_lengths_to_file(
+    data: List[Any], output_path: str, obj_dict: Any, batch_size: int = 10000
+) -> None:
+    """
+    Write read lengths to file in a memory-efficient way with proper JSON formatting.
+
+    Args:
+        data: Input data containing items where second element is length
+        output_path: Path to output file
+        obj_dict: Function to handle object serialization
+        batch_size: Size of batches for processing
+    """
+    logging.info("Writing read lengths to file...")
+
+    with open(output_path, "w", encoding="utf-8") as outfile:
+        writer = StreamingJSONWriter(outfile)
+        data_iter = iter(data)
+
+        while True:
+            # Process data in batches
+            batch = list(islice(data_iter, batch_size))
+            if not batch:
+                break
+
+            # Extract valid lengths from current batch
+            batch_lengths = [x[1] for x in batch if x[1] is not None]
+
+            # Write each length
+            for length in batch_lengths:
+                writer.write_item(length, obj_dict)
+
+        # Close the JSON array
+        writer.write_close()
+
+    logging.info(f"Wrote length list to {output_path}")
 
 
 def obj_dict(obj):
@@ -61,6 +120,14 @@ def filter_references(args):
     )
 
     args = get_arguments()
+
+    if args.debug:
+        log.warning("Debug mode enabled")
+
+    # Set datatable threads
+    dt.options.nthreads = args.threads
+    dt.options.progress.enabled = True
+    dt.options.progress.clear_on_success = True
 
     tmp_dir = check_tmp_dir_exists(args.tmp_dir)
     log.info("Temporary directory: %s", tmp_dir.name)
@@ -134,42 +201,38 @@ def filter_references(args):
         bam = out_files["bam_tmp_sorted"]
 
     logging.info("Reducing results to a single dataframe")
-    # data = list(filter(None, data))
     data_df = [x[0] for x in data if x[0] is not None]
-    # remove empty dataframes
     data_df = [x for x in data_df if not x.empty]
     data_df = concat_df(data_df)
+
     if args.read_length_freqs is not None:
-        logging.info("Calculating read length frequencies...")
-        lens = [x[1] for x in data if x[1] is not None]
-        lens = json.dumps(lens, default=obj_dict, ensure_ascii=False, indent=4)
-        with open(out_files["read_length_freqs"], "w", encoding="utf-8") as outfile:
-            print(lens, file=outfile)
+        write_lengths_to_file(
+            data,
+            out_files["read_length_freqs"],
+            obj_dict,
+            batch_size=1_000_000,  # Adjust based on available memory
+        )
 
     if args.read_hits_count is not None:
+
         logging.info("Calculating read hits counts...")
         hits = [x[2] for x in data if x[2] is not None]
 
         # merge dicts and sum values
         hits = reduce(lambda x, y: x.update(y) or x, (Counter(dict(x)) for x in hits))
-        # hits = sum(map(Counter, hits), Counter())
 
-        # convert dict to dataframe
-        hits = (
-            pd.DataFrame.from_dict(hits, orient="index", columns=["count"])
-            .rename_axis("read")
-            .reset_index()
-            .sort_values(by="count", ascending=False)
-        )
+        # convert dict to datatable
+        hits_dt = dt.Frame({"read": list(hits.keys()), "count": list(hits.values())})
 
-        hits.to_csv(
-            out_files["read_hits_count"],
-            sep="\t",
-            index=False,
+        # Save using datatable
+        hits_dt[:, :, dt.sort(-dt.f.count)].to_csv(
+            out_files["read_hits_count"], sep="\t", header=True
         )
 
     logging.info(f"Writing reference statistics to {out_files['stats']}")
-    data_df.to_csv(out_files["stats"], sep="\t", index=False)
+    # Convert pandas DataFrame to datatable
+    data_dt = dt.Frame(data_df)
+    data_dt.to_csv(out_files["stats"], sep="\t", header=True)
 
     if args.min_norm_entropy is None or args.min_norm_gini is None:
         filter_conditions = {
@@ -219,7 +282,7 @@ def filter_references(args):
                     "min_norm_gini": min_norm_gini,
                 }
         else:
-            min_norm_gini = 0.5
+            min_norm_gini = 0.4
             min_norm_entropy = 0.75
             logging.warning(
                 f"There's only one genome. Using min_norm_gini={min_norm_gini} and min_norm_entropy={min_norm_entropy}. Please check the results."
@@ -272,5 +335,4 @@ def filter_references(args):
 
     if args.low_memory:
         os.remove(out_files["bam_tmp_sorted"])
-    # check if sorted BAM file exists, if yes remove it
     logging.info("ALL DONE.")
