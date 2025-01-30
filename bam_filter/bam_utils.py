@@ -110,8 +110,9 @@ def write_to_file(alns, out_bam_file, header):
 def process_references_batch(
     references, bam, refs_idx, min_read_ani, threads=1, batch_size=10000
 ):
-    """Process a batch of references"""
-    alns = []
+    """Process a batch of references, returning multiple batches if needed"""
+    all_batches = []
+    current_batch = []
     total_size = 0
     max_batch_memory = 500 * 1024 * 1024  # 500MB batch size limit
 
@@ -122,12 +123,23 @@ def process_references_batch(
                 if ani_read >= min_read_ani:
                     aln.reference_id = refs_idx[aln.reference_name]
                     aln_str = aln.to_string()
-                    alns.append(aln_str)
+                    current_batch.append(aln_str)
                     total_size += len(aln_str)
 
-                    if total_size >= max_batch_memory or len(alns) >= batch_size:
-                        return alns
-    return alns if alns else []
+                    # If we hit our limits, add the current batch to all_batches and start a new one
+                    if (
+                        total_size >= max_batch_memory
+                        or len(current_batch) >= batch_size
+                    ):
+                        all_batches.append(current_batch)
+                        current_batch = []
+                        total_size = 0
+
+        # Don't forget the last batch if it exists
+        if current_batch:
+            all_batches.append(current_batch)
+
+    return all_batches if all_batches else [[]]  # Return at least an empty batch
 
 
 def create_output_bam(output_file, params, threads):
@@ -280,7 +292,6 @@ def process_bam(
     with pysam.AlignmentFile(bam, "rb", threads=s_threads) as samfile:
         references = samfile.references
         pysam.set_verbosity(save)
-
         ref_lengths = None
 
         bam_reference_lengths = {
@@ -294,7 +305,7 @@ def process_bam(
             ref_lengths = dict(
                 zip(
                     ref_len_dt["subjectId"].to_list()[0],
-                    ref_len_dt["slen"].to_list()[0],
+                    map(int, ref_len_dt["slen"].to_list()[0]),
                 )
             )
             del ref_len_dt
@@ -302,7 +313,7 @@ def process_bam(
                 logging.error(
                     "The BAM file contains references not found in the reference lengths file"
                 )
-            sys.exit(1)
+                sys.exit(1)
         else:
             ref_lengths = bam_reference_lengths
 
@@ -749,12 +760,14 @@ def bam_writer_process(queue, out_bam_file, header):
     """Dedicated process for writing BAM output"""
     try:
         while True:
-            batch = queue.get()
-            if batch is None:
+            batches = queue.get()
+            if batches is None:
                 break
 
-            write_to_file(batch, out_bam_file, header)
-            del batch
+            # Process all batches received
+            for batch in batches:
+                write_to_file(batch, out_bam_file, header)
+                del batch
             gc.collect()
     except Exception as e:
         logging.error(f"Error in writer process: {str(e)}")

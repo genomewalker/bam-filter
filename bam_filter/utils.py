@@ -385,69 +385,46 @@ def check_values_auto(val, minval, maxval, parser, var):
         return check_values(val, minval, maxval, parser, var)
 
 
-# From: https://note.nkmk.me/en/python-check-int-float/
-def is_integer(n):
+def is_integer(value):
     try:
-        float(n)
+        int(value)
+        return True
     except ValueError:
         return False
-    else:
-        return float(n).is_integer()
-
-
-# function to check if the input value has K, M or G suffix in it
 
 
 def check_suffix(val, parser, var):
+    # Define valid units for the argument
     if var == "--scale":
         units = ["K", "M"]
+        multiplier = 1000  # Base-1000 scaling
     else:
         units = ["K", "M", "G"]
+        multiplier = 1024  # Base-1024 scaling
 
-    unit = val[-1]
-    value = val[:-1]
+    # Extract the value and unit
+    if val[-1].upper() in units:
+        unit = val[-1].upper()
+        value = val[:-1]
+    else:
+        unit = None
+        value = val
 
-    if is_integer(value) and (unit in units) and (int(value) > 0):
+    # Validate and convert
+    if is_integer(value) and int(value) > 0:
         value = int(value)
-        if var == "--scale":
-            if unit == "K":
-                val = value * 1000
-            elif unit == "M":
-                val = value * 1000000
-            return str(val)
-        else:
-            if unit == "K":
-                val = value * 1024
-            elif unit == "M":
-                val = value * 1024 * 1024
-            elif unit == "G":
-                val = value * 1024 * 1024 * 1024
-            return val
+        if unit == "K":
+            value *= multiplier
+        elif unit == "M":
+            value *= multiplier**2
+        elif unit == "G":
+            value *= multiplier**3
+        return value
     else:
         parser.error(
-            "argument %s: Invalid value %s. Has to be an integer larger than 0 with the following suffix K, M or G"
-            % (var, val)
+            f"argument {var}: Invalid value {val}. "
+            f"Must be a positive integer optionally followed by {'/'.join(units)}."
         )
-
-
-# # Example usage with argparse
-# if __name__ == "__main__":
-
-#     parser = argparse.ArgumentParser(description="Process some integers.")
-#     parser.add_argument(
-#         "--scale",
-#         type=lambda x: check_suffix(x, parser, "--scale"),
-#         help="Scale value with K or M suffix",
-#     )
-#     parser.add_argument(
-#         "--memory",
-#         type=lambda x: check_suffix(x, parser, "--memory"),
-#         help="Memory value with K, M, or G suffix",
-#     )
-
-#     args = parser.parse_args()
-#     print("Scale:", args.scale)
-#     print("Memory:", args.memory)
 
 
 def get_compression_type(filename):

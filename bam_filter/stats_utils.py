@@ -448,11 +448,10 @@ class BamAlignment:
 # import cProfile, pstats
 
 
-
 def get_bam_stats(
     params,
     min_read_ani=90.0,
-    scale=1e6,
+    scale=1_000_000,
     trim_ends=0,
     trim_min=10,
     trim_max=90,
