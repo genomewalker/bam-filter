@@ -16,8 +16,6 @@ from bam_filter.utils import (
     allocate_threads,
 )
 from bam_filter.bam_utils import (
-    write_to_file,
-    setup_bam_processing,
     check_bam_file,
 )
 from multiprocessing import Pool, Manager
@@ -26,7 +24,6 @@ import gc
 from collections import defaultdict
 import os
 import concurrent.futures
-import math
 import warnings
 import shutil
 import uuid
@@ -307,8 +304,13 @@ def initialize_subject_weights(data, mmap_dir=None, max_memory=None):
 
 
 @njit(parallel=True, cache=True)
-def fast_e_step(prob_vector, subject_indices, slens, n_chunks, subject_weights):
-    """E-step using chunked accumulation with pre-allocated arrays"""
+def fast_e_step(
+    prob_vector, subject_indices, slens, median_sl, n_chunks, subject_weights
+):
+    """
+    E-step with built-in length weighting.
+    Each alignment's contribution is boosted by (reference length / median reference length).
+    """
     array_len = len(prob_vector)
     chunk_size = (array_len + n_chunks - 1) // n_chunks
     n_chunks_actual = (array_len + chunk_size - 1) // chunk_size
@@ -316,26 +318,24 @@ def fast_e_step(prob_vector, subject_indices, slens, n_chunks, subject_weights):
     max_subject_idx = np.max(subject_indices) + 1
     chunk_accumulators = np.zeros((n_chunks_actual, max_subject_idx), dtype=np.float64)
 
-    # First pass: Accumulate within chunks
+    # Accumulate probabilities within chunks
     for chunk_idx in prange(n_chunks_actual):
         chunk_start = chunk_idx * chunk_size
         chunk_end = min(chunk_start + chunk_size, array_len)
-
         for i in range(chunk_start, chunk_end):
             subject_idx = subject_indices[i]
             chunk_accumulators[chunk_idx, subject_idx] += prob_vector[i]
 
-    # Merge chunks deterministically
-    subject_weights.fill(0)  # Reset array
+    # Merge chunk accumulators
+    subject_weights.fill(0)
     for subject_idx in range(max_subject_idx):
         for chunk_idx in range(n_chunks_actual):
             subject_weights[subject_idx] += chunk_accumulators[chunk_idx, subject_idx]
 
-    # Calculate s_W deterministically
+    # Update probabilities: boost by (slens[i] / median_sl)
     s_w = np.empty_like(prob_vector, dtype=np.float64)
-    for i in range(array_len):
-        s_w[i] = subject_weights[subject_indices[i]] / slens[i]
-
+    for i in prange(array_len):
+        s_w[i] = subject_weights[subject_indices[i]] * (slens[i] / median_sl)
     return s_w
 
 
@@ -378,22 +378,29 @@ def fast_m_step(prob_vector, s_w, source_indices, n_chunks, source_sums):
 
 
 def parallel_em_step(
-    prob_vector, subject_indices, source_indices, slens, n_chunks, array_manager
+    prob_vector,
+    subject_indices,
+    source_indices,
+    slens,
+    n_chunks,
+    array_manager,
+    median_sl,
 ):
-    """Parallel EM step using managed arrays"""
-    # Execute E and M steps using managed arrays
+    """
+    EM step: First compute s_w with length weighting (using the passed median_sl)
+    and then run the M-step.
+    """
     s_w = fast_e_step(
         prob_vector,
         subject_indices,
         slens,
+        median_sl,
         n_chunks,
         array_manager.arrays["subject_weights"],
     )
-
     new_prob = fast_m_step(
         prob_vector, s_w, source_indices, n_chunks, array_manager.arrays["source_sums"]
     )
-
     return new_prob
 
 
@@ -407,49 +414,28 @@ def squarem_resolve_multimaps(
     min_improvement=1e-4,
     max_step_factor=4.0,
 ):
-    """SQUAREM-accelerated multimapping resolution with improved convergence.
-
-    Args:
-        data: Input data array with probability distributions
-        scale: Scaling factor for probability thresholding
-        iters: Maximum number of iterations (0 for convergence-based stopping)
-        mmap_dir: Directory for memory-mapped files
-        max_memory: Maximum memory limit in bytes
-        min_improvement: Minimum relative improvement for convergence
-        threads: Number of threads for parallel computation
-        max_step_factor: Maximum allowed step size multiplier for stability
-    """
-    # Configure threading
     original_threads = configure_numba_threads(threads)
-
-    # Initialize array manager
     array_manager = ManagedArrays(mmap_dir, max_memory)
-
     try:
         current_iter = 0
-
-        # Pre-calculate constants
         max_subject = np.max(data["subject"])
         max_source = np.max(data["source"])
         n_elements = len(data["prob"])
 
-        # Initialize managed arrays
         array_manager.initialize(n_elements, max_subject, max_source)
 
         source_indices = data["source"].astype(np.int64)
         subject_indices = data["subject"].astype(np.int64)
         slens = data["slen"].astype(np.float64)
 
-        # Calculate optimal number of chunks for parallelization
+        # Compute the median reference length once for this iteration.
+        median_sl = np.median(slens)
+
         n_chunks = min(32, len(data["prob"]) // 1000)
         n_chunks = max(1, n_chunks)
 
         def squarem_step():
-            """Enhanced SQUAREM step following the original algorithm."""
-            # Store current point
             x_k = data["prob"].astype(np.float64)
-
-            # First EM update: q = M(x_k) - x_k
             array_manager.arrays["r"][:] = parallel_em_step(
                 x_k,
                 subject_indices,
@@ -457,10 +443,10 @@ def squarem_resolve_multimaps(
                 slens,
                 n_chunks,
                 array_manager,
+                median_sl,  # Pass the precomputed median
             )
             array_manager.arrays["v"][:] = array_manager.arrays["r"] - x_k
 
-            # Second EM update: r = M(x_k + q) - (x_k + q)
             x_q = x_k + array_manager.arrays["v"]
             array_manager.arrays["p_new"][:] = (
                 parallel_em_step(
@@ -470,46 +456,31 @@ def squarem_resolve_multimaps(
                     slens,
                     n_chunks,
                     array_manager,
+                    median_sl,  # Reuse the same median_sl
                 )
                 - x_q
             )
 
-            # Compute step size with improved stability
             v_norm = np.sqrt(
                 np.sum(array_manager.arrays["v"] * array_manager.arrays["v"])
             )
             r_q = array_manager.arrays["p_new"] - array_manager.arrays["v"]
             r_q_norm = np.sqrt(np.sum(r_q * r_q))
-
-            if r_q_norm < 1e-10:  # Avoid division by zero
+            if r_q_norm < 1e-10:
                 return array_manager.arrays["r"].copy()
-
-            # Original SQUAREM step length with stability bounds
             alpha = -v_norm / r_q_norm
-
-            # Apply adaptive step size control
             alpha = np.clip(alpha, -max_step_factor, -1 / max_step_factor)
-
-            # SQUAREM update: x_k+1 = x_k - 2αq + α²(r - q)
             new_prob = (
                 x_k - 2 * alpha * array_manager.arrays["v"] + (alpha * alpha) * r_q
             )
-
-            # Ensure probability constraints
             if np.any(new_prob < 0) or np.any(np.isnan(new_prob)):
-                # Fall back to basic EM step if update is invalid
                 return array_manager.arrays["r"].copy()
-
-            # Normalize to ensure valid probabilities
             row_sums = np.zeros(max_source + 1)
             np.add.at(row_sums, source_indices, new_prob)
             new_prob /= row_sums[source_indices]
-
             return new_prob
 
-        # Main iteration loop
         prev_likelihood = -np.inf
-
         while True:
             progress_bar = tqdm.tqdm(
                 total=9,
@@ -519,13 +490,9 @@ def squarem_resolve_multimaps(
                 leave=False,
                 ncols=80,
             )
-
-            # SQUAREM update
             new_prob = squarem_step()
             data["prob"] = new_prob
             progress_bar.update(4)
-
-            # Calculate log-likelihood for convergence check
             current_likelihood = np.sum(np.log(new_prob[new_prob > 0]))
             improvement = (
                 (current_likelihood - prev_likelihood) / abs(prev_likelihood)
@@ -534,7 +501,6 @@ def squarem_resolve_multimaps(
             )
             prev_likelihood = current_likelihood
 
-            # Update query counts and masks
             query_counts = np.bincount(source_indices)
             data["n_aln"] = query_counts[source_indices]
 
@@ -546,43 +512,35 @@ def squarem_resolve_multimaps(
                 log.info("::: ::: No more multimapping reads. Early stopping.")
                 return data
 
-            # Apply probability thresholding
             max_prob = np.zeros(max_source + 1, dtype=np.float64)
             np.maximum.at(max_prob, source_indices, data["prob"])
             data["max_prob"] = max_prob[source_indices] * scale
 
-            # Filter alignments
             to_remove = np.sum(data["prob"] < data["max_prob"])
             filter_mask = data["prob"] >= data["max_prob"]
             final_mask = non_unique_mask & filter_mask
 
             current_iter += 1
             data["iter"][final_mask] = current_iter
-
-            # Update data array
             data = np.concatenate([data[unique_mask], data[final_mask]])
 
-            # Resize managed arrays if needed
             if len(data) != n_elements:
                 n_elements = len(data)
                 array_manager.resize(n_elements)
-
-                # Update indices
                 source_indices = data["source"].astype(np.int64)
                 subject_indices = data["subject"].astype(np.int64)
                 slens = data["slen"].astype(np.float64)
+                # Recompute the median only when the data size changes
+                median_sl = np.median(slens)
 
             progress_bar.update(5)
             progress_bar.close()
 
-            # Logging
             log.info(
                 f"::: Iter: {current_iter} - R: {to_remove:,} | U: {np.sum(unique_mask):,} | "
                 f"NU: {len(np.unique(data[data['n_aln'] > 1]['source'])):,} | L: {data.shape[0]:,} | "
                 f"Improvement: {improvement:.6f}"
             )
-
-            # Check stopping conditions
             if improvement < min_improvement:
                 log.info("::: ::: Converged. Stopping.")
                 break
@@ -594,10 +552,8 @@ def squarem_resolve_multimaps(
                 break
 
     finally:
-        # Clean up
         array_manager.cleanup()
         numba.set_num_threads(original_threads)
-
     return data
 
 

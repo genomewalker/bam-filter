@@ -390,6 +390,19 @@ These normalized scores are used to initialize the probability distribution $P(r
 
 $P(r_i|g_j) = \frac{S''\_{ij}}{\sum_{k} S''\_{ik}}$
 
+## Incorporation of Median Reference Length
+
+Before commencing the EM iterations, the median reference length is computed from all alignment lengths:
+
+$\tilde{L} = \text{median}(L)$
+
+During the EM E-step, each alignment’s contribution is boosted by the factor
+
+$\frac{L}{\tilde{L}}$
+
+so that longer alignments receive proportionally higher weight. This update helps to account for variations in reference lengths across the dataset.
+
+
 ## SQUAREM Acceleration Framework
 
 The algorithm uses SQUAREM to accelerate convergence of the EM process:
@@ -413,6 +426,9 @@ Where:
 - $M()$ is the EM mapping function
 - $r$ represents the first-order difference
 - $v$ represents the second-order difference
+
+*Note:* During the E-step, the contribution of each alignment is scaled by the factor $\(\frac{L}{\tilde{L}}\)$.
+
 
 ### 2. M-step (Step Length Calculation)
 
