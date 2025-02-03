@@ -209,6 +209,14 @@ def sort_keys_by_approx_weight(
 
     num_cores = scale * num_cores
 
+    # Calculate the total weight of all keys so we can refine the max_entries_per_chunk
+    # if the total weight is greater than the max_entries_per_chunk use the number of cores to
+    # find a better value
+
+    total_weight = sum(input_dict.values())
+    if max_entries_per_chunk > total_weight:
+        max_entries_per_chunk = total_weight // num_cores
+
     if mode == "weight":
         target_weight = max(input_dict.values())
         total_weight = sum(input_dict.values())
@@ -624,6 +632,7 @@ help_msg = {
     "reassign_mismatch_penalty": "Mismatch penalty for the alignment score ",
     "reassign_gap_open_penalty": "Gap open penalty for alignment score computation",
     "reassign_gap_extension_penalty": "Gap extension penalty for the alignment score",
+    "reassign_e_step_wl": "Scores are weighted by the reference length during the E-step",
     "lca": "Calculate LCA for each read and estimate abundances",
     "names": "Names dmp file from taxonomy",
     "nodes": "Nodes dmp file from taxonomy",
@@ -1033,6 +1042,12 @@ def get_arguments(argv=None):
         metavar="FLOAT",
         dest="squarem_max_step_factor",
         help=help_msg["squarem_max_step_factor"],
+    )
+    reassign_optional_args.add_argument(
+        "--e-step-wl",
+        dest="e_step_wl",
+        action="store_true",
+        help=help_msg["reassign_e_step_wl"],
     )
     reassign_optional_args.add_argument(
         "-o",

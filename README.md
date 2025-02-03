@@ -390,19 +390,6 @@ These normalized scores are used to initialize the probability distribution $P(r
 
 $P(r_i|g_j) = \frac{S''\_{ij}}{\sum_{k} S''\_{ik}}$
 
-## Incorporation of Median Reference Length
-
-Before commencing the EM iterations, the median reference length is computed from all alignment lengths:
-
-$\tilde{L} = \text{median}(L)$
-
-During the EM E-step, each alignment’s contribution is boosted by the factor
-
-$\frac{L}{\tilde{L}}$
-
-so that longer alignments receive proportionally higher weight. This update helps to account for variations in reference lengths across the dataset.
-
-
 ## SQUAREM Acceleration Framework
 
 The algorithm uses SQUAREM to accelerate convergence of the EM process:
@@ -426,9 +413,6 @@ Where:
 - $M()$ is the EM mapping function
 - $r$ represents the first-order difference
 - $v$ represents the second-order difference
-
-*Note:* During the E-step, the contribution of each alignment is scaled by the factor $\(\frac{L}{\tilde{L}}\)$.
-
 
 ### 2. M-step (Step Length Calculation)
 
@@ -477,6 +461,33 @@ The algorithm iterates until one of these conditions is met:
 2. Maximum iterations reached (if specified)
 3. Complete resolution of multi-mapping reads
 4. No further alignments can be removed
+
+
+## Weighted Reference Length Normalization
+
+FilterBAM implements an asymmetric weighting scheme that penalizes mappings to shorter reference sequences while maintaining equal weights for longer sequences. This helps resolve ambiguous mappings by giving preference to longer references above a certain threshold.
+
+### Method Overview
+
+The weighting uses a one-sided sigmoid transformation that only penalizes references shorter than the mean length of all mappings for a given read:
+
+1. For each read's mappings, calculate log-space statistics:
+   - Mean of log-transformed reference lengths ($\mu_{\ln(S)}$)
+   - Standard deviation of log-transformed lengths ($\sigma_{\ln(S)}$)
+
+2. Calculate z-score (only penalizing shorter sequences):
+   
+   $z_i = \max(0, \frac{\mu_{\ln(S)} - \ln(S_i)}{\sigma_{\ln(S)}})$
+
+3. Transform to weight via sigmoid:
+   
+   $w_i = \frac{1}{1 + e^{(z_i - 2.0)}}$
+
+The weighted probabilities are then calculated as:
+
+$s_w = w_i \cdot P(g_j)$
+
+This approach helps resolve ambiguous mappings between fragments and full-length sequences while maintaining equal treatment of references above the mean length.
 
 ### Applications and recommendations
 
