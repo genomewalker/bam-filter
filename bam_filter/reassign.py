@@ -636,7 +636,10 @@ def squarem_resolve_multimaps(
             # Apply probability thresholding
             max_prob = np.zeros(max_source + 1, dtype=np.float64)
             np.maximum.at(max_prob, source_indices, data["prob"])
-            data["max_prob"] = max_prob[source_indices] * scale
+            if scale == 0:
+                data["max_prob"] = max_prob[source_indices]
+            else:
+                data["max_prob"] = max_prob[source_indices] * scale
 
             # Filter alignments
             to_remove = np.sum(data["prob"] < data["max_prob"])
