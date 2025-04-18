@@ -882,7 +882,8 @@ def write_reassigned_bam(
 
 def process_alignments(
     references,  # Changed: directly receive references instead of parms tuple
-    samfile,     # Changed: receive open samfile object instead of opening inside
+    samfile,  # Changed: receive open samfile object instead of opening inside
+    ref_lengths,  # Added: receive ref_lengths dict instead of using global
     percid=90,
     min_read_length=30,
     max_read_length=np.inf,
@@ -899,7 +900,6 @@ def process_alignments(
     empty_df = 0
     percid = percid / 100
 
-    global ref_lengths  # Use global ref_lengths as before
     for reference in references:
         reference_length = ref_lengths[reference]
         # Using multiple_iterators=True to ensure thread safety
@@ -1020,8 +1020,6 @@ def reassign_reads(
     squarem_max_step_factor=4.0,
     e_step_wl=False,
 ):
-    global ref_lengths  # Declare ref_lengths as global for access by threads
-
     p_threads, s_threads = allocate_threads(threads, 1, 4)
     dt.options.progress.enabled = True
     dt.options.progress.clear_on_success = True
@@ -1089,7 +1087,9 @@ def reassign_reads(
         references = list(references_m.keys())
 
         if len(references) == 0:
-            log.warning("::: No reference sequences with alignments found in the BAM file")
+            log.warning(
+                "::: No reference sequences with alignments found in the BAM file"
+            )
             create_empty_output_files(out_files)
             sys.exit(0)
 
@@ -1122,14 +1122,15 @@ def reassign_reads(
         with concurrent.futures.ThreadPoolExecutor(max_workers=p_threads) as executor:
             # Create a list of futures
             futures = []
-            
+
             # Submit jobs to the thread pool
             for chunk in ref_chunks:
-                # Pass the open samfile and references to the worker
+                # Pass the open samfile, references, and ref_lengths to the worker
                 future = executor.submit(
                     process_alignments,
                     references=chunk,
                     samfile=samfile,
+                    ref_lengths=ref_lengths,  # Pass ref_lengths explicitly
                     percid=min_read_ani,
                     min_read_length=min_read_length,
                     max_read_length=max_read_length,
@@ -1140,7 +1141,7 @@ def reassign_reads(
                     tmpdir=out_files["tmp_dir"],
                 )
                 futures.append(future)
-            
+
             # Collect results with progress bar
             progress_bar = tqdm.tqdm(
                 total=len(futures),
@@ -1150,7 +1151,7 @@ def reassign_reads(
                 ncols=80,
                 disable=is_debug(),
             )
-            
+
             for future in concurrent.futures.as_completed(futures):
                 try:
                     result = future.result()
@@ -1158,7 +1159,7 @@ def reassign_reads(
                     progress_bar.update(1)
                 except Exception as exc:
                     log.error(f"Chunk processing generated an exception: {exc}")
-            
+
             progress_bar.close()
 
     dt.options.progress.enabled = True
