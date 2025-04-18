@@ -60,6 +60,120 @@ def is_debug():
     return logging.getLogger("my_logger").getEffectiveLevel() == logging.DEBUG
 
 
+# def refine_chunks(chunks, input_dict, target_weight):
+#     # Calculate the current weight of each chunk
+#     chunk_weights = [sum(input_dict[key] for key in chunk) for chunk in chunks]
+
+#     while max(chunk_weights) - min(chunk_weights) > target_weight:
+#         # Find the chunk with the maximum weight
+#         src_chunk = chunk_weights.index(max(chunk_weights))
+
+#         # Find the chunk with the minimum weight
+#         dest_chunk = chunk_weights.index(min(chunk_weights))
+
+#         # Find the key in the source chunk with the maximum weight
+#         max_weight_key = max(chunks[src_chunk], key=lambda key: input_dict[key])
+
+#         # Move the key with maximum weight from the source to the destination chunk
+#         chunks[src_chunk].remove(max_weight_key)
+#         chunks[dest_chunk].append(max_weight_key)
+
+#         # Recalculate chunk weights
+#         chunk_weights = [sum(input_dict[key] for key in chunk) for chunk in chunks]
+
+#     # Remove empty chunks
+#     chunks = [chunk for chunk in chunks if chunk]
+
+#     return chunks
+
+
+# def sort_keys_by_approx_weight(
+#     input_dict, scale=1, num_cores=1, refinement_steps=10, verbose=False
+# ):
+#     if scale == 0:
+#         raise ValueError("Scale cannot be zero.")
+
+#     # Calculate the target weight for each chunk
+#     target_weight = scale * int(max(input_dict.values()))
+
+#     # Determine the initial number of chunks based on the number of cores
+#     # num_chunks = num_cores * scale
+#     num_chunks = (((sum(input_dict.values()) // target_weight)) // num_cores) + 1
+#     if num_chunks < num_cores:
+#         num_chunks = num_cores
+#     # Sort keys by their weights in descending order
+#     sorted_keys = sorted(input_dict, key=lambda k: input_dict[k], reverse=True)
+
+#     # Initialize chunks
+#     chunks = [[] for _ in range(num_chunks)]
+#     total_weight = [0] * num_chunks
+
+#     # Create a progress bar
+#     progress_bar = tqdm.tqdm(
+#         total=len(sorted_keys),
+#         desc="Distributing keys",
+#         unit="k",
+#         unit_scale=True,
+#         unit_divisor=1000,
+#         disable=False,
+#         leave=False,
+#         ncols=80,
+#     )
+
+#     # Distribute keys into chunks with weights close to target_weight
+#     for key in sorted_keys:
+#         # Find the chunk with the least total weight
+#         min_chunk_index = min(range(num_chunks), key=lambda i: total_weight[i])
+
+#         # If adding the key doesn't exceed the target weight, add it to the chunk
+#         if total_weight[min_chunk_index] + input_dict[key] <= target_weight:
+#             chunks[min_chunk_index].append(key)
+#             total_weight[min_chunk_index] += input_dict[key]
+#         else:
+#             # Find the chunk with the weight closest to the target_weight
+#             closest_chunk_index = min(
+#                 range(num_chunks),
+#                 key=lambda i: abs(total_weight[i] + input_dict[key] - target_weight),
+#             )
+#             chunks[closest_chunk_index].append(key)
+#             total_weight[closest_chunk_index] += input_dict[key]
+
+#     # Close the progress bar
+#     progress_bar.close()
+
+#     # Initial balance
+#     initial_balance = max(len(chunk) for chunk in chunks) - min(
+#         len(chunk) for chunk in chunks
+#     )
+
+#     # Refinement step
+#     for _ in range(refinement_steps):
+#         chunks = refine_chunks(chunks, input_dict, target_weight)
+
+#         # Check for improvement in balance
+#         current_balance = max(len(chunk) for chunk in chunks) - min(
+#             len(chunk) for chunk in chunks
+#         )
+#         if current_balance >= initial_balance:
+#             break  # No improvement, exit the loop
+
+#         # Update initial balance for the next iteration
+#         initial_balance = current_balance
+
+#     # Print the min, max, and average weight of each chunk
+#     if verbose:
+#         for i, chunk in enumerate(chunks, 1):
+#             chunk_weights = [input_dict[key] for key in chunk]
+#             min_weight = min(chunk_weights)
+#             max_weight = max(chunk_weights)
+#             avg_weight = sum(chunk_weights) / len(chunk_weights)
+#             print(
+#                 f"Chunk {i}: Total = {sum(chunk_weights)}, Min Weight = {min_weight}, Max Weight = {max_weight}, Average Weight = {avg_weight}"
+#             )
+
+#     return chunks
+
+
 def refine_chunks(chunks, input_dict, chunk_weights, target_weight):
     while max(chunk_weights) - min(chunk_weights) > target_weight:
         src_idx = chunk_weights.index(max(chunk_weights))
@@ -1454,28 +1568,112 @@ def calc_chunksize(n_workers, len_iterable, factor=4):
     return chunksize
 
 
-def create_output_files(prefix, bam, tmp_dir, mode, bam_reassigned=None):
-    # Ensure tmp_dir is always a string path
-    if hasattr(tmp_dir, "name"):
-        tmp_dir = tmp_dir.name
+# def create_output_files(
+#     prefix,
+#     bam,
+#     stats,
+#     stats_filtered,
+#     bam_filtered,
+#     read_length_freqs,
+#     read_hits_count,
+#     knee_plot,
+#     coverage_plots,
+# ):
+#     if prefix is None:
+#         prefix = bam.replace(".bam", "")
 
+#     out_files = {}
+#     if stats is not None:
+#         if stats == "":
+#             out_files["stats"] = f"{prefix}_stats.tsv.gz"
+#         else:
+#             out_files["stats"] = stats
+#     if stats_filtered is not None:
+#         if stats_filtered == "":
+#             out_files["stats_filtered"] = f"{prefix}_stats-filtered.tsv.gz"
+#         else:
+#             out_files["stats_filtered"] = stats_filtered
+#     if bam_filtered is not None:
+#         if bam_filtered == "":
+#             out_files["bam_filtered"] = f"{prefix}.filtered.bam"
+#         else:
+#             out_files["bam_filtered"] = bam_filtered
+#     if read_length_freqs is not None:
+#         if read_length_freqs == "":
+#             out_files["read_length_freqs"] = f"{prefix}_read-length-freqs.json"
+#         else:
+#             out_files["read_length_freqs"] = read_length_freqs
+#     if read_hits_count is not None:
+#         if read_hits_count == "":
+#             out_files["read_hits_count"] = f"{prefix}_read-hits-count.tsv.gz"
+#         else:
+#             out_files["read_hits_count"] = read_hits_count
+#     if knee_plot is not None:
+#         if knee_plot == "":
+#             out_files["knee_plot"] = f"{prefix}_knee-plot.png"
+#         else:
+#             out_files["knee_plot"] = knee_plot
+#     if coverage_plots is not None:
+#         if coverage_plots == "":
+#             out_files["coverage_plot_dir"] = f"{prefix}_coverage-plots"
+#         else:
+#             out_files["coverage_plot_dir"] = coverage_plots
+#     out_files["bam_filtered_tmp"] = (f"{prefix}.filtered.tmp.bam",)
+
+
+#     # create output files
+#     out_files = {
+#         "stats": stats,
+#         "stats_filtered": stats_filtered,
+#         "bam_filtered_tmp": f"{prefix}.filtered.tmp.bam",
+#         "bam_filtered": bam_filtered,
+#         "read_length_freqs": read_length_freqs,
+#         "read_hits_count": read_hits_count,
+#         "knee_plot": knee_plot,
+#         "coverage_plot_dir": coverage_plots,
+#     }
+#     return out_files
+def create_output_files(
+    bam,
+    tmp_dir,
+    prefix=None,
+    mode=None,
+    stats="",
+    stats_filtered="",
+    bam_reassigned="",
+    bam_filtered="",
+    read_length_freqs="",
+    read_hits_count="",
+    knee_plot="",
+    coverage_plots="",
+    lca_summary="",
+):
     if prefix is None:
         prefix = Path(bam).with_suffix("").name
 
     if tmp_dir is not None:
-        tmp_dir = tmp_dir
+        tmp_dir = tmp_dir.name
     else:
         tmp_dir = check_tmp_dir_exists(tmp_dir).name
 
-    stats = f"{prefix}_stats.tsv.gz"
-    stats_filtered = f"{prefix}_stats-filtered.tsv.gz"
-    bam_filtered = f"{prefix}.filtered.bam"
-    bam_reassigned = bam_reassigned or f"{prefix}.reassigned.bam"
-    read_length_freqs = f"{prefix}_read-length-freqs.json"
-    read_hits_count = f"{prefix}_read-hits-count.tsv.gz"
-    knee_plot = f"{prefix}_knee-plot.png"
-    coverage_plots = f"{prefix}_coverage-plots"
-    lca_summary = f"{prefix}_lca-summary.tsv.gz"
+    if stats == "" or stats is None:
+        stats = f"{prefix}_stats.tsv.gz"
+    if stats_filtered == "" or stats_filtered is None:
+        stats_filtered = f"{prefix}_stats-filtered.tsv.gz"
+    if bam_filtered == "" or bam_filtered is None:
+        bam_filtered = f"{prefix}.filtered.bam"
+    if bam_reassigned == "" or bam_reassigned is None:
+        bam_reassigned = f"{prefix}.reassigned.bam"
+    if read_length_freqs == "" or read_length_freqs is None:
+        read_length_freqs = f"{prefix}_read-length-freqs.json"
+    if read_hits_count == "" or read_hits_count is None:
+        read_hits_count = f"{prefix}_read-hits-count.tsv.gz"
+    if knee_plot == "" or knee_plot is None:
+        knee_plot = f"{prefix}_knee-plot.png"
+    if coverage_plots == "" or coverage_plots is None:
+        coverage_plots = f"{prefix}_coverage-plots"
+    if lca_summary == "" or lca_summary is None:
+        lca_summary = f"{prefix}_lca-summary.tsv.gz"
 
     # create output files
     if mode == "filter":
@@ -1513,6 +1711,23 @@ def create_output_files(prefix, bam, tmp_dir, mode, bam_reassigned=None):
             log.error("--read-length-freqs must be a JSON file")
             exit(1)
     return out_files
+
+    # out_files = {
+    #     "stats": stats,
+    #     "stats_filtered": stats_filtered,
+    #     "bam_filtered_tmp": f"{tmp_dir}/{prefix}.filtered.tmp.bam",
+    #     "bam_tmp": f"{tmp_dir}/{prefix}.tmp.bam",
+    #     "bam_tmp_sorted": f"{tmp_dir}/{prefix}.tmp.sorted.bam",
+    #     "bam_filtered": bam_filtered,
+    #     "bam_reassigned_tmp": f"{tmp_dir}/{prefix}.reassigned.tmp.bam",
+    #     "bam_reassigned_sorted": f"{tmp_dir}/{prefix}.reassigned.sorted.bam",
+    #     "bam_reassigned": bam_reassigned,
+    #     "read_length_freqs": read_length_freqs,
+    #     "read_hits_count": read_hits_count,
+    #     "knee_plot": knee_plot,
+    #     "coverage_plot_dir": coverage_plots,
+    #     "lca_summary": lca_summary,
+    # }
 
 
 def allocate_threads(total_threads, min_io_processes, max_io_processes):

@@ -34,8 +34,6 @@ import psutil
 from numba import njit, prange
 import numba
 from typing import Dict
-import tempfile
-from concurrent.futures import ThreadPoolExecutor
 
 log = logging.getLogger("my_logger")
 
@@ -65,13 +63,6 @@ class ManagedArrays:
         self.array_sizes = {}
         self.mmap_status = {}  # Track which arrays are memory-mapped
         self.mmap_files = set()  # Keep track of created mmap files
-        self._cleaned_up = False  # Flag to prevent double cleanup
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.cleanup()
 
     def estimate_total_size(self, array_specs):
         """
@@ -224,20 +215,17 @@ class ManagedArrays:
             self.array_sizes.clear()
             self.mmap_status.clear()
             self.mmap_files.clear()
-            self._cleaned_up = True  # Mark as cleaned up
 
         except Exception as e:
             log.error(f"Error during cleanup: {str(e)}")
 
     def __del__(self):
         """Ensure cleanup on object destruction."""
-        # Check the flag to prevent cleanup if already done by __exit__
-        if not getattr(self, '_cleaned_up', True):  # Default to True if _cleaned_up doesn't exist
-            try:
-                self.cleanup()
-            except Exception as e:
-                # Suppress errors during final garbage collection
-                pass
+        try:
+            self.cleanup()
+        except Exception as e:
+            # Simply pass during final cleanup to avoid error messages during interpreter shutdown
+            pass
 
 
 def configure_numba_threads(threads=None):
@@ -892,30 +880,32 @@ def write_reassigned_bam(
         shutil.move(out_files["bam_reassigned_tmp"], out_bam)
 
 
-def process_references_thread(
-    references,
-    samfile,  # Now receives the shared samfile handle
-    ref_lengths,
+# import cProfile, pstats
+
+
+def process_alignments(
+    parms,
     percid=90,
     min_read_length=30,
     max_read_length=np.inf,
+    threads=1,
     match_reward=1,
     mismatch_penalty=-1,
     gap_open_penalty=1,
     gap_extension_penalty=2,
     tmpdir=None,
 ):
-    """Process a chunk of references using a shared BAM file handle"""
+    # profiler = cProfile.Profile()
+    # profiler.enable()
+    bam, references = parms
     dt.options.progress.enabled = False
     dt.options.progress.clear_on_success = True
 
     results = []
     empty_df = 0
     percid = percid / 100
-    jay_file = None
 
-    try:
-        # No need to open the BAM file - we're using the shared handle
+    with pysam.AlignmentFile(bam, "rb", threads=threads) as samfile:
         for reference in references:
             reference_length = ref_lengths[reference]
             fetch = samfile.fetch(reference, multiple_iterators=False, until_eof=True)
@@ -997,38 +987,26 @@ def process_references_thread(
             else:
                 empty_df += 1
 
-        # Handle results - write to jay file if needed
-        if results:
-            combined_results = dt.rbind(results)
-            if tmpdir is not None:
-                if not os.path.exists(tmpdir):
-                    os.makedirs(tmpdir, exist_ok=True)  # Create if it doesn't exist
-                uuid_name = str(uuid.uuid4())
-                jay_file = os.path.join(tmpdir, f"{uuid_name}.jay")
-                try:
-                    combined_results.to_jay(jay_file)
-                except Exception as e:
-                    log.error(f"Failed to write temporary JAY file {jay_file}: {e}")
-                    if jay_file and os.path.exists(jay_file):
-                        try:
-                            os.remove(jay_file)
-                        except OSError as rm_err:
-                            log.error(f"Failed to remove temporary file {jay_file} during error handling: {rm_err}")
-                    return (None, empty_df)
-                del combined_results
-                return (jay_file, empty_df)
-            else:
-                return (combined_results, empty_df)
+    # Handle results
+    if results:
+        combined_results = dt.rbind(results)
+        if tmpdir is not None:
+            uuid_name = str(uuid.uuid4())
+            jay_file = os.path.join(tmpdir, f"{uuid_name}.jay")
+            combined_results.to_jay(jay_file)
+            del combined_results
+            # profiler.disable()
+            # pstats.Stats(profiler).sort_stats("tottime").print_stats(25)
+            return (jay_file, empty_df)
         else:
-            return (None, empty_df)
-    except Exception as e:
-        log.error(f"Error processing alignments for chunk: {e}", exc_info=True)
-        if jay_file and os.path.exists(jay_file):
-            try:
-                os.remove(jay_file)
-            except OSError as rm_err:
-                log.error(f"Failed to remove temporary file {jay_file} during error handling: {rm_err}")
+            return (combined_results, empty_df)
+    else:
         return (None, empty_df)
+
+
+def initializer(init_dict):
+    global ref_lengths
+    ref_lengths = init_dict
 
 
 def reassign_reads(
@@ -1142,62 +1120,70 @@ def reassign_reads(
     )
 
     log.info(f"::: ::: Created {len(ref_chunks):,} chunks")
+    # ref_chunks = random.sample(ref_chunks, len(ref_chunks))
     dt.options.progress.enabled = False
     dt.options.progress.clear_on_success = True
     dt.options.nthreads = 1
     del references_m
     gc.collect()
 
-    log.info("::: Extracting reads from BAM file...")
-    data = []
-    try:
-        with pysam.AlignmentFile(bam, "rb", threads=s_threads) as samfile:
-            if is_debug():
-                for chunk in tqdm.tqdm(ref_chunks, total=len(ref_chunks), leave=False, ncols=80, desc="Chunks (debug)"):
-                    data.append(
-                        process_references_thread(
-                            chunk, samfile, ref_lengths,
-                            percid=min_read_ani,
-                            min_read_length=min_read_length,
-                            max_read_length=max_read_length,
-                            match_reward=match_reward,
-                            mismatch_penalty=mismatch_penalty,
-                            gap_open_penalty=gap_open_penalty,
-                            gap_extension_penalty=gap_extension_penalty,
-                            tmpdir=out_files["tmp_dir"],
-                        )
-                    )
-            else:
-                with ThreadPoolExecutor(max_workers=p_threads) as executor:
-                    futures = [
-                        executor.submit(
-                            process_references_thread,
-                            chunk,
-                            samfile,
-                            ref_lengths,
-                            min_read_ani,
-                            min_read_length,
-                            max_read_length,
-                            match_reward,
-                            mismatch_penalty,
-                            gap_open_penalty,
-                            gap_extension_penalty,
-                            out_files["tmp_dir"],
-                        )
-                        for chunk in ref_chunks
-                    ]
-                    for future in tqdm.tqdm(concurrent.futures.as_completed(futures),
-                                            total=len(futures), leave=False, ncols=80, desc="Chunks"):
-                        try:
-                            data.append(future.result())
-                        except Exception as exc:
-                            log.error(f"Thread error: {exc}")
-    except KeyboardInterrupt:
-        log.warning("User interrupted during fetch.")
-        sys.exit(1)
+    parms = list(zip([bam] * len(ref_chunks), ref_chunks))
 
-    # drop empty results
-    data = [d for d in data if d[0] is not None]
+    log.info("::: Extracting reads from BAM file...")
+    if is_debug():
+        data = list(
+            tqdm.tqdm(
+                map(
+                    partial(
+                        process_alignments,
+                        percid=min_read_ani,
+                        min_read_length=min_read_length,
+                        max_read_length=max_read_length,
+                        match_reward=match_reward,
+                        mismatch_penalty=mismatch_penalty,
+                        gap_open_penalty=gap_open_penalty,
+                        gap_extension_penalty=gap_extension_penalty,
+                        threads=s_threads,
+                        tmpdir=out_files["tmp_dir"],
+                    ),
+                    parms,
+                    chunksize=1,
+                ),
+                total=len(parms),
+                leave=False,
+                ncols=80,
+                desc="Chunks processed",
+            )
+        )
+    else:
+        p = Pool(p_threads, initializer, (ref_lengths,))
+        data = list(
+            tqdm.tqdm(
+                p.imap_unordered(
+                    partial(
+                        process_alignments,
+                        percid=min_read_ani,
+                        min_read_length=min_read_length,
+                        max_read_length=max_read_length,
+                        match_reward=match_reward,
+                        mismatch_penalty=mismatch_penalty,
+                        gap_open_penalty=gap_open_penalty,
+                        gap_extension_penalty=gap_extension_penalty,
+                        threads=s_threads,
+                        tmpdir=out_files["tmp_dir"],
+                    ),
+                    parms,
+                    chunksize=1,
+                ),
+                total=len(parms),
+                leave=False,
+                ncols=80,
+                desc="Chunks processed",
+            )
+        )
+
+        p.close()
+        p.join()
 
     dt.options.progress.enabled = True
     dt.options.progress.clear_on_success = True
@@ -1207,15 +1193,24 @@ def reassign_reads(
         dt.options.nthreads = 1
 
     log.info("::: Collecting results...")
-    reads, refs, empty_df = set(), set(), 0
-    tables = []
-    with tqdm.tqdm(total=len(data), leave=False, ncols=80, desc="Reading tables") as pbar:
-        for path, count in data:
-            empty_df += count
-            df = dt.fread(path)
-            tables.append(df)
-            pbar.update(1)
-    data = tables
+    reads = set()
+    refs = set()
+    empty_df = 0
+
+    for i in tqdm.tqdm(range(len(data)), total=len(data), leave=False, ncols=80):
+        empty_df += data[i][1]
+        df = dt.fread(data[i][0])
+        data[i] = df
+        query_ids = df[:, "queryId"].to_list()[0]
+        subject_ids = df[:, "subjectId"].to_list()[0]
+
+        reads.update(query_ids)
+        refs.update(subject_ids)
+
+        del df
+
+    reads = list(reads)
+    refs = list(refs)
 
     log.info(f"::: ::: Removed {empty_df:,} references without alignments")
 
@@ -1420,100 +1415,62 @@ def reassign(args):
     )
 
     args = get_arguments()
-
-    # Input validation
-    if not os.path.exists(args.bam):
-        log.error(f"Input BAM file not found: {args.bam}")
-        sys.exit(1)
-    if args.reference_lengths and not os.path.exists(args.reference_lengths):
-        log.error(f"Reference lengths file not found: {args.reference_lengths}")
-        sys.exit(1)
-
     if args.max_read_length < args.min_read_length:
         logging.error("Maximum read length cannot be less than minimum read length")
         sys.exit(1)
+    bam = args.bam
+    tmp_dir = check_tmp_dir_exists(args.tmp_dir)
+    log.info("Temporary directory: %s", tmp_dir.name)
+    out_files = create_output_files(
+        prefix=args.prefix,
+        bam=args.bam,
+        tmp_dir=tmp_dir,
+        mode="reassign",
+        bam_reassigned=args.bam_reassigned,
+    )
+    bam = check_bam_file(
+        bam=args.bam,
+        threads=args.threads,
+        reference_lengths=args.reference_lengths,
+        sort_memory=args.sort_memory,
+        sorted_bam=out_files["sorted_bam"],
+    )
+    if bam is None:
+        logging.warning("No reference sequences with alignments found in the BAM file")
+        create_empty_output_files(out_files)
+        sys.exit(0)
 
-    # Temporary directory management
-    tmp_dir_obj = None
-    tmp_dir_path = None
-    try:
-        if args.tmp_dir:
-            os.makedirs(args.tmp_dir, exist_ok=True)
-            tmp_dir_obj = args.tmp_dir
-            tmp_dir_path = args.tmp_dir  # Store path as a string
-            log.info(f"Using specified temporary directory: {tmp_dir_obj}")
-        else:
-            tmp_dir_obj = tempfile.TemporaryDirectory(prefix="bamfilter_reassign_")
-            tmp_dir_path = tmp_dir_obj.name  # Get path from TemporaryDirectory object
-            log.info(f"Created temporary directory: {tmp_dir_path}")
+    logging.getLogger("my_logger").setLevel(
+        logging.DEBUG if args.debug else logging.INFO
+    )
 
-        # Always pass the string path, not the object
-        out_files = create_output_files(
-            prefix=args.prefix,
-            bam=args.bam,
-            tmp_dir=tmp_dir_path,
-            mode="reassign",
-            bam_reassigned=args.bam_reassigned,
-        )
+    if args.debug:
+        warnings.showwarning = handle_warning
+    else:
+        warnings.filterwarnings("ignore")
+    logging.info("Resolving multi-mapping reads...")
+    reassign_reads(
+        bam=bam,
+        threads=args.threads,
+        reference_lengths=args.reference_lengths,
+        min_read_count=args.min_read_count,
+        min_read_ani=args.min_read_ani,
+        min_read_length=args.min_read_length,
+        max_read_length=args.max_read_length,
+        reassign_iters=args.reassign_iters,
+        reassign_scale=args.reassign_scale,
+        max_memory=args.max_memory,
+        sort_memory=args.sort_memory,
+        out_files=out_files,
+        match_reward=args.match_reward,
+        mismatch_penalty=args.mismatch_penalty,
+        gap_open_penalty=args.gap_open_penalty,
+        gap_extension_penalty=args.gap_extension_penalty,
+        disable_sort=args.disable_sort,
+        tmp_dir=tmp_dir,
+        squarem_min_improvement=args.squarem_min_improvement,
+        squarem_max_step_factor=args.squarem_max_step_factor,
+        e_step_wl=args.e_step_wl,
+    )
 
-        bam = check_bam_file(
-            bam=args.bam,
-            threads=args.threads,
-            reference_lengths=args.reference_lengths,
-            sort_memory=args.sort_memory,
-            sorted_bam=out_files["sorted_bam"],
-        )
-        if bam is None:
-            logging.warning("No reference sequences with alignments found in the BAM file")
-            create_empty_output_files(out_files)
-            sys.exit(0)
-
-        logging.getLogger("my_logger").setLevel(
-            logging.DEBUG if args.debug else logging.INFO
-        )
-
-        if args.debug:
-            warnings.showwarning = handle_warning
-        else:
-            warnings.filterwarnings("ignore")
-        logging.info("Resolving multi-mapping reads...")
-        reassign_reads(
-            bam=bam,
-            threads=args.threads,
-            reference_lengths=args.reference_lengths,
-            min_read_count=args.min_read_count,
-            min_read_ani=args.min_read_ani,
-            min_read_length=args.min_read_length,
-            max_read_length=args.max_read_length,
-            reassign_iters=args.reassign_iters,
-            reassign_scale=args.reassign_scale,
-            max_memory=args.max_memory,
-            sort_memory=args.sort_memory,
-            out_files=out_files,
-            match_reward=args.match_reward,
-            mismatch_penalty=args.mismatch_penalty,
-            gap_open_penalty=args.gap_open_penalty,
-            gap_extension_penalty=args.gap_extension_penalty,
-            disable_sort=args.disable_sort,
-            tmp_dir=tmp_dir_obj,
-            squarem_min_improvement=args.squarem_min_improvement,
-            squarem_max_step_factor=args.squarem_max_step_factor,
-            e_step_wl=args.e_step_wl,
-        )
-
-        log.info("Done!")
-
-    except Exception as e:
-        log.error(f"An error occurred in the reassign process: {e}", exc_info=True)
-        sys.exit(1)
-    finally:
-        if isinstance(tmp_dir_obj, tempfile.TemporaryDirectory):
-            try:
-                tmp_dir_obj.cleanup()
-                log.info(f"Successfully removed temporary directory: {tmp_dir_obj.name}")
-            except Exception as cleanup_err:
-                log.error(f"Failed to remove temporary directory {tmp_dir_obj.name}: {cleanup_err}")
-        elif tmp_dir_obj:
-            log.info(f"Temporary files were stored in user-specified directory: {tmp_dir_obj}. Manual cleanup may be required.")
-        else:
-            log.info("No temporary directory was created or managed.")
+    log.info("Done!")
