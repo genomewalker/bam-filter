@@ -20,7 +20,7 @@ from bam_filter.bam_utils import (
     setup_bam_processing,
     check_bam_file,
 )
-from multiprocessing import Manager
+from multiprocessing import Pool, Manager
 from functools import partial
 import gc
 from collections import defaultdict
@@ -880,19 +880,24 @@ def write_reassigned_bam(
         shutil.move(out_files["bam_reassigned_tmp"], out_bam)
 
 
+# import cProfile, pstats
+
+
 def process_alignments(
-    references,  # Changed: directly receive references instead of parms tuple
-    samfile,  # Changed: receive open samfile object instead of opening inside
-    ref_lengths,  # Added: receive ref_lengths dict instead of using global
+    parms,
     percid=90,
     min_read_length=30,
     max_read_length=np.inf,
+    threads=1,
     match_reward=1,
     mismatch_penalty=-1,
     gap_open_penalty=1,
     gap_extension_penalty=2,
     tmpdir=None,
 ):
+    # profiler = cProfile.Profile()
+    # profiler.enable()
+    bam, references = parms
     dt.options.progress.enabled = False
     dt.options.progress.clear_on_success = True
 
@@ -900,87 +905,87 @@ def process_alignments(
     empty_df = 0
     percid = percid / 100
 
-    for reference in references:
-        reference_length = ref_lengths[reference]
-        # Using multiple_iterators=True to ensure thread safety
-        fetch = samfile.fetch(reference, multiple_iterators=True, until_eof=True)
+    with pysam.AlignmentFile(bam, "rb", threads=threads) as samfile:
+        for reference in references:
+            reference_length = ref_lengths[reference]
+            fetch = samfile.fetch(reference, multiple_iterators=False, until_eof=True)
 
-        # Initialize lists for collecting alignment data
-        alignment_info = []
+            # Initialize lists for collecting alignment data
+            alignment_info = []
 
-        # Collect alignment information with cached values
-        for aln in fetch:
-            query_length = aln.query_length or aln.infer_query_length()
-            if query_length >= min_read_length and query_length <= max_read_length:
-                try:
-                    num_mismatches = aln.get_tag("NM")
-                    pident = 1 - (num_mismatches / query_length)
+            # Collect alignment information with cached values
+            for aln in fetch:
+                query_length = aln.query_length or aln.infer_query_length()
+                if query_length >= min_read_length and query_length <= max_read_length:
+                    try:
+                        num_mismatches = aln.get_tag("NM")
+                        pident = 1 - (num_mismatches / query_length)
 
-                    if pident < percid:
+                        if pident < percid:
+                            continue
+
+                        # Cache all computed values
+                        num_matches = query_length - num_mismatches
+
+                        try:
+                            num_gaps = aln.get_tag("XO")
+                        except KeyError:
+                            num_gaps = 0
+
+                        try:
+                            gap_extensions = aln.get_tag("XG")
+                        except KeyError:
+                            gap_extensions = 0
+
+                        # Calculate score in one operation
+                        S = (
+                            (num_matches * match_reward)
+                            - (num_mismatches * mismatch_penalty)
+                            - (num_gaps * gap_open_penalty)
+                            - (gap_extensions * gap_extension_penalty)
+                        )
+
+                        # Store all information in one tuple
+                        alignment_info.append(
+                            (
+                                aln.query_name,
+                                aln.reference_name,
+                                reference_length,
+                                S,
+                                aln.query_alignment_length,
+                            )
+                        )
+                    except KeyError:
+                        # Skip if NM tag is missing
                         continue
 
-                    # Cache all computed values
-                    num_matches = query_length - num_mismatches
+            # Process scores using numpy operations if we have alignments
+            if alignment_info:
+                # Convert to numpy arrays for faster operations
+                raw_scores = np.array([info[3] for info in alignment_info])
+                aln_lengths = np.array([info[4] for info in alignment_info])
 
-                    try:
-                        num_gaps = aln.get_tag("XO")
-                    except KeyError:
-                        num_gaps = 0
+                # Calculate shifted and normalized scores in one step
+                shifted_scores = (raw_scores - np.min(raw_scores) + 1) / aln_lengths
 
-                    try:
-                        gap_extensions = aln.get_tag("XG")
-                    except KeyError:
-                        gap_extensions = 0
+                # Create final alignment data in one go
+                aln_data = [
+                    (info[0], info[1], score, info[2])
+                    for info, score in zip(alignment_info, shifted_scores)
+                ]
 
-                    # Calculate score in one operation
-                    S = (
-                        (num_matches * match_reward)
-                        - (num_mismatches * mismatch_penalty)
-                        - (num_gaps * gap_open_penalty)
-                        - (gap_extensions * gap_extension_penalty)
-                    )
+                # Create and process datatable efficiently
+                aln_data_dt = dt.Frame(
+                    aln_data, names=["queryId", "subjectId", "bitScore", "slen"]
+                )
 
-                    # Store all information in one tuple
-                    alignment_info.append(
-                        (
-                            aln.query_name,
-                            aln.reference_name,
-                            reference_length,
-                            S,
-                            aln.query_alignment_length,
-                        )
-                    )
-                except KeyError:
-                    # Skip if NM tag is missing
-                    continue
-
-        # Process scores using numpy operations if we have alignments
-        if alignment_info:
-            # Convert to numpy arrays for faster operations
-            raw_scores = np.array([info[3] for info in alignment_info])
-            aln_lengths = np.array([info[4] for info in alignment_info])
-
-            # Calculate shifted and normalized scores in one step
-            shifted_scores = (raw_scores - np.min(raw_scores) + 1) / aln_lengths
-
-            # Create final alignment data in one go
-            aln_data = [
-                (info[0], info[1], score, info[2])
-                for info, score in zip(alignment_info, shifted_scores)
-            ]
-
-            # Create and process datatable efficiently
-            aln_data_dt = dt.Frame(
-                aln_data, names=["queryId", "subjectId", "bitScore", "slen"]
-            )
-
-            # Single operation for sorting and grouping
-            aln_data_dt = aln_data_dt[
-                :1, :, dt.by(dt.f.queryId, dt.f.subjectId), dt.sort(-dt.f.bitScore)
-            ]
-            results.append(aln_data_dt)
-        else:
-            empty_df += 1
+                # Single operation for sorting and grouping
+                aln_data_dt = aln_data_dt[
+                    :1, :, dt.by(dt.f.queryId, dt.f.subjectId), dt.sort(-dt.f.bitScore)
+                ]
+                results.append(aln_data_dt)
+            else:
+                empty_df += 1
 
     # Handle results
     if results:
@@ -990,11 +995,18 @@ def process_alignments(
             jay_file = os.path.join(tmpdir, f"{uuid_name}.jay")
             combined_results.to_jay(jay_file)
             del combined_results
+            # profiler.disable()
+            # pstats.Stats(profiler).sort_stats("tottime").print_stats(25)
             return (jay_file, empty_df)
         else:
             return (combined_results, empty_df)
     else:
         return (None, empty_df)
+
+
+def initializer(init_dict):
+    global ref_lengths
+    ref_lengths = init_dict
 
 
 def reassign_reads(
@@ -1020,6 +1032,7 @@ def reassign_reads(
     squarem_max_step_factor=4.0,
     e_step_wl=False,
 ):
+
     p_threads, s_threads = allocate_threads(threads, 1, 4)
     dt.options.progress.enabled = True
     dt.options.progress.clear_on_success = True
@@ -1033,7 +1046,6 @@ def reassign_reads(
 
     log.info(f"::: IO Threads: {s_threads} | Processing Threads: {p_threads}")
 
-    # Open the BAM file once at this level
     with pysam.AlignmentFile(bam, "rb", threads=s_threads) as samfile:
         references = samfile.references
         pysam.set_verbosity(save)
@@ -1081,86 +1093,97 @@ def reassign_reads(
             if chrom.mapped >= min_read_count
         }
 
-        del index_statistics
-        n_alns = sum(references_m.values())
-        log.info(f"::: Kept {n_alns:,} alignments")
-        references = list(references_m.keys())
+    del index_statistics
+    n_alns = sum(references_m.values())
+    log.info(f"::: Kept {n_alns:,} alignments")
+    references = list(references_m.keys())
 
-        if len(references) == 0:
-            log.warning(
-                "::: No reference sequences with alignments found in the BAM file"
-            )
-            create_empty_output_files(out_files)
-            sys.exit(0)
+    if len(references) == 0:
+        log.warning("::: No reference sequences with alignments found in the BAM file")
+        create_empty_output_files(out_files)
+        sys.exit(0)
 
-        # keep only references in references
-        ref_lengths = {ref: ref_len_dict[ref] for ref in references}
+    # keep only references in references
+    ref_lengths = {ref: ref_len_dict[ref] for ref in references}
 
-        log.info(f"::: Keeping {len(references):,} references")
+    log.info(f"::: Keeping {len(references):,} references")
 
-        log.info("::: Creating reference chunks with uniform read amounts...")
-        ref_chunks = sort_keys_by_approx_weight(
-            input_dict=references_m,
-            ref_positions=ref_positions,
-            scale=1,
-            num_cores=threads,
-            refinement_steps=10,
-            verbose=False,
-            max_entries_per_chunk=100_000_000,
-        )
+    log.info("::: Creating reference chunks with uniform read amounts...")
+    ref_chunks = sort_keys_by_approx_weight(
+        input_dict=references_m,
+        ref_positions=ref_positions,
+        scale=1,
+        num_cores=threads,
+        refinement_steps=10,
+        verbose=False,
+        max_entries_per_chunk=100_000_000,
+    )
 
-        log.info(f"::: ::: Created {len(ref_chunks):,} chunks")
-        dt.options.progress.enabled = False
-        dt.options.progress.clear_on_success = True
-        dt.options.nthreads = 1
-        del references_m
-        gc.collect()
+    log.info(f"::: ::: Created {len(ref_chunks):,} chunks")
+    # ref_chunks = random.sample(ref_chunks, len(ref_chunks))
+    dt.options.progress.enabled = False
+    dt.options.progress.clear_on_success = True
+    dt.options.nthreads = 1
+    del references_m
+    gc.collect()
 
-        log.info("::: Extracting reads from BAM file using threads...")
-        data = []
-        # Use ThreadPoolExecutor instead of multiprocessing.Pool
-        with concurrent.futures.ThreadPoolExecutor(max_workers=p_threads) as executor:
-            # Create a list of futures
-            futures = []
+    parms = list(zip([bam] * len(ref_chunks), ref_chunks))
 
-            # Submit jobs to the thread pool
-            for chunk in ref_chunks:
-                # Pass the open samfile, references, and ref_lengths to the worker
-                future = executor.submit(
-                    process_alignments,
-                    references=chunk,
-                    samfile=samfile,
-                    ref_lengths=ref_lengths,  # Pass ref_lengths explicitly
-                    percid=min_read_ani,
-                    min_read_length=min_read_length,
-                    max_read_length=max_read_length,
-                    match_reward=match_reward,
-                    mismatch_penalty=mismatch_penalty,
-                    gap_open_penalty=gap_open_penalty,
-                    gap_extension_penalty=gap_extension_penalty,
-                    tmpdir=out_files["tmp_dir"],
-                )
-                futures.append(future)
-
-            # Collect results with progress bar
-            progress_bar = tqdm.tqdm(
-                total=len(futures),
-                desc="Chunks processed",
-                unit="chunk",
+    log.info("::: Extracting reads from BAM file...")
+    if is_debug():
+        data = list(
+            tqdm.tqdm(
+                map(
+                    partial(
+                        process_alignments,
+                        percid=min_read_ani,
+                        min_read_length=min_read_length,
+                        max_read_length=max_read_length,
+                        match_reward=match_reward,
+                        mismatch_penalty=mismatch_penalty,
+                        gap_open_penalty=gap_open_penalty,
+                        gap_extension_penalty=gap_extension_penalty,
+                        threads=s_threads,
+                        tmpdir=out_files["tmp_dir"],
+                    ),
+                    parms,
+                    chunksize=1,
+                ),
+                total=len(parms),
                 leave=False,
                 ncols=80,
-                disable=is_debug(),
+                desc="Chunks processed",
             )
+        )
+    else:
+        p = Pool(p_threads, initializer, (ref_lengths,))
+        data = list(
+            tqdm.tqdm(
+                p.imap_unordered(
+                    partial(
+                        process_alignments,
+                        percid=min_read_ani,
+                        min_read_length=min_read_length,
+                        max_read_length=max_read_length,
+                        match_reward=match_reward,
+                        mismatch_penalty=mismatch_penalty,
+                        gap_open_penalty=gap_open_penalty,
+                        gap_extension_penalty=gap_extension_penalty,
+                        threads=s_threads,
+                        tmpdir=out_files["tmp_dir"],
+                    ),
+                    parms,
+                    chunksize=1,
+                ),
+                total=len(parms),
+                leave=False,
+                ncols=80,
+                desc="Chunks processed",
+            )
+        )
 
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    result = future.result()
-                    data.append(result)
-                    progress_bar.update(1)
-                except Exception as exc:
-                    log.error(f"Chunk processing generated an exception: {exc}")
-
-            progress_bar.close()
+        p.close()
+        p.join()
 
     dt.options.progress.enabled = True
     dt.options.progress.clear_on_success = True
@@ -1176,23 +1199,21 @@ def reassign_reads(
 
     for i in tqdm.tqdm(range(len(data)), total=len(data), leave=False, ncols=80):
         empty_df += data[i][1]
-        if data[i][0] is not None:  # Check if the first element is not None
-            df = dt.fread(data[i][0])
-            data[i] = df
-            query_ids = df[:, "queryId"].to_list()[0]
-            subject_ids = df[:, "subjectId"].to_list()[0]
+        df = dt.fread(data[i][0])
+        data[i] = df
+        query_ids = df[:, "queryId"].to_list()[0]
+        subject_ids = df[:, "subjectId"].to_list()[0]
 
-            reads.update(query_ids)
-            refs.update(subject_ids)
+        reads.update(query_ids)
+        refs.update(subject_ids)
 
-            del df
-        else:
-            data[i] = None
+        del df
 
-    # Remove None values from data
-    data = [item for item in data if item is not None]
+    reads = list(reads)
+    refs = list(refs)
 
-    # ...rest of the function remains the same...
+    log.info(f"::: ::: Removed {empty_df:,} references without alignments")
+
     log.info("::: Indexing references...")
     refs = dt.Frame(list(set(refs)))
     refs.names = ["subjectId"]
