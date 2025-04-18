@@ -882,7 +882,7 @@ def get_arguments(argv=None):
         default=defaults["reassign_gap_open_penalty"],
         metavar="INT",
         dest="gap_open_penalty",
-        help=help_msg["gap_open_penalty"],
+        help=help_msg["reassign_gap_open_penalty"],
     )
     reassign_optional_args.add_argument(
         "--gap-extension-penalty",
@@ -894,7 +894,7 @@ def get_arguments(argv=None):
         default=defaults["reassign_gap_extension_penalty"],
         metavar="INT",
         dest="gap_extension_penalty",
-        help=help_msg["gap_extension_penalty"],
+        help=help_msg["reassign_gap_extension_penalty"],
     )
     reassign_optional_args.add_argument(
         "--squarem-min-improvement",
