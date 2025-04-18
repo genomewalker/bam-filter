@@ -1151,69 +1151,53 @@ def reassign_reads(
     log.info("::: Extracting reads from BAM file...")
     data = []
     try:
-        if is_debug():
-            # Debug mode: process sequentially
-            data = []
-            for chunk in tqdm.tqdm(
-                ref_chunks,
-                total=len(ref_chunks),
-                leave=False,
-                ncols=80,
-                desc="Chunks processed (debug)"
-            ):
-                result = process_references_thread(
-                    references=chunk,
-                    samfile=samfile,
-                    ref_lengths=ref_lengths,
-                    percid=min_read_ani,
-                    min_read_length=min_read_length,
-                    max_read_length=max_read_length,
-                    match_reward=match_reward,
-                    mismatch_penalty=mismatch_penalty,
-                    gap_open_penalty=gap_open_penalty,
-                    gap_extension_penalty=gap_extension_penalty,
-                    tmpdir=out_files["tmp_dir"],
-                )
-                data.append(result)
-        else:
-            # Production mode: process in parallel with ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=p_threads) as executor:
-                # Submit tasks - passing the same samfile to all threads
-                futures = []
-                for chunk in ref_chunks:
-                    future = executor.submit(
-                        process_references_thread,
-                        references=chunk,
-                        samfile=samfile,
-                        ref_lengths=ref_lengths,
-                        percid=min_read_ani,
-                        min_read_length=min_read_length,
-                        max_read_length=max_read_length,
-                        match_reward=match_reward,
-                        mismatch_penalty=mismatch_penalty,
-                        gap_open_penalty=gap_open_penalty,
-                        gap_extension_penalty=gap_extension_penalty,
-                        tmpdir=out_files["tmp_dir"],
+        with pysam.AlignmentFile(bam, "rb", threads=s_threads) as samfile:
+            if is_debug():
+                for chunk in tqdm.tqdm(ref_chunks, total=len(ref_chunks), leave=False, ncols=80, desc="Chunks (debug)"):
+                    data.append(
+                        process_references_thread(
+                            chunk, samfile, ref_lengths,
+                            percid=min_read_ani,
+                            min_read_length=min_read_length,
+                            max_read_length=max_read_length,
+                            match_reward=match_reward,
+                            mismatch_penalty=mismatch_penalty,
+                            gap_open_penalty=gap_open_penalty,
+                            gap_extension_penalty=gap_extension_penalty,
+                            tmpdir=out_files["tmp_dir"],
+                        )
                     )
-                    futures.append(future)
-
-                # Collect results as they complete
-                for future in tqdm.tqdm(
-                    concurrent.futures.as_completed(futures),
-                    total=len(futures),
-                    leave=False,
-                    ncols=80,
-                    desc="Chunks processed",
-                ):
-                    try:
-                        result = future.result()
-                        data.append(result)
-                    except Exception as exc:
-                        log.error(f'Thread generated an exception: {exc}')
-
+            else:
+                with ThreadPoolExecutor(max_workers=p_threads) as executor:
+                    futures = [
+                        executor.submit(
+                            process_references_thread,
+                            chunk,
+                            samfile,
+                            ref_lengths,
+                            min_read_ani,
+                            min_read_length,
+                            max_read_length,
+                            match_reward,
+                            mismatch_penalty,
+                            gap_open_penalty,
+                            gap_extension_penalty,
+                            out_files["tmp_dir"],
+                        )
+                        for chunk in ref_chunks
+                    ]
+                    for future in tqdm.tqdm(concurrent.futures.as_completed(futures),
+                                            total=len(futures), leave=False, ncols=80, desc="Chunks"):
+                        try:
+                            data.append(future.result())
+                        except Exception as exc:
+                            log.error(f"Thread error: {exc}")
     except KeyboardInterrupt:
-        log.warning("::: User interrupted execution during alignment processing.")
+        log.warning("User interrupted during fetch.")
         sys.exit(1)
+
+    # drop empty results
+    data = [d for d in data if d[0] is not None]
 
     dt.options.progress.enabled = True
     dt.options.progress.clear_on_success = True
@@ -1223,24 +1207,15 @@ def reassign_reads(
         dt.options.nthreads = 1
 
     log.info("::: Collecting results...")
-    reads = set()
-    refs = set()
-    empty_df = 0
-
-    for i in tqdm.tqdm(range(len(data)), total=len(data), leave=False, ncols=80):
-        empty_df += data[i][1]
-        df = dt.fread(data[i][0])
-        data[i] = df
-        query_ids = df[:, "queryId"].to_list()[0]
-        subject_ids = df[:, "subjectId"].to_list()[0]
-
-        reads.update(query_ids)
-        refs.update(subject_ids)
-
-        del df
-
-    reads = list(reads)
-    refs = list(refs)
+    reads, refs, empty_df = set(), set(), 0
+    tables = []
+    with tqdm.tqdm(total=len(data), leave=False, ncols=80, desc="Reading tables") as pbar:
+        for path, count in data:
+            empty_df += count
+            df = dt.fread(path)
+            tables.append(df)
+            pbar.update(1)
+    data = tables
 
     log.info(f"::: ::: Removed {empty_df:,} references without alignments")
 
@@ -1542,3 +1517,4 @@ def reassign(args):
             log.info(f"Temporary files were stored in user-specified directory: {tmp_dir_obj}. Manual cleanup may be required.")
         else:
             log.info("No temporary directory was created or managed.")
+``` 
