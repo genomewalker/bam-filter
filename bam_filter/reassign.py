@@ -1460,19 +1460,23 @@ def reassign(args):
 
     # Temporary directory management
     tmp_dir_obj = None
+    tmp_dir_path = None
     try:
         if args.tmp_dir:
             os.makedirs(args.tmp_dir, exist_ok=True)
             tmp_dir_obj = args.tmp_dir
+            tmp_dir_path = args.tmp_dir  # Store path as a string
             log.info(f"Using specified temporary directory: {tmp_dir_obj}")
         else:
             tmp_dir_obj = tempfile.TemporaryDirectory(prefix="bamfilter_reassign_")
-            log.info(f"Created temporary directory: {tmp_dir_obj.name}")
+            tmp_dir_path = tmp_dir_obj.name  # Get path from TemporaryDirectory object
+            log.info(f"Created temporary directory: {tmp_dir_path}")
 
+        # Always pass the string path, not the object
         out_files = create_output_files(
             prefix=args.prefix,
             bam=args.bam,
-            tmp_dir=tmp_dir_obj.name if isinstance(tmp_dir_obj, tempfile.TemporaryDirectory) else tmp_dir_obj,
+            tmp_dir=tmp_dir_path,
             mode="reassign",
             bam_reassigned=args.bam_reassigned,
         )
