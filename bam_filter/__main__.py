@@ -17,6 +17,7 @@ import logging
 from bam_filter.reassign import reassign
 from bam_filter.filter import filter_references
 from bam_filter.lca import do_lca
+from bam_filter.convert import convert_files
 from bam_filter.utils import (
     get_arguments,
 )
@@ -43,6 +44,8 @@ def main():
         filter_references(args)
     elif args.action == "lca":
         do_lca(args)
+    elif args.action == "convert":
+        convert_files(args)
 
 
 if __name__ == "__main__":
