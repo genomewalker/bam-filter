@@ -13,13 +13,12 @@ class DatabaseManager:
 
     def __init__(
         self,
-        database=":memory:",
+        database=None,
         temp_dir=None,
         threads=None,
         memory_limit=None,
         max_memory_pct=80,
         enable_progress=True,
-        max_temp_size="500GB",
     ):
         """
         Initialize a new DatabaseManager.
@@ -31,11 +30,8 @@ class DatabaseManager:
             memory_limit (str): Memory limit with units like "4GB" (None = auto-detect)
             max_memory_pct (int): Percentage of system memory to use when auto-detecting
             enable_progress (bool): Enable progress bar
-            max_temp_size (str): Maximum temporary directory size (with units like "500GB")
         """
-        self.database = database
-
-        # Handle temporary directory
+        # Handle temporary directory first
         if temp_dir is None:
             self.temp_dir = tempfile.gettempdir()
         else:
@@ -57,6 +53,46 @@ class DatabaseManager:
             self.temp_dir = tempfile.gettempdir()
             log.info(f"Using system temp directory instead: {self.temp_dir}")
 
+        # Always use a file-based database (never pure in‐memory)
+        if database is None or database == ":memory:":
+            # Create a temporary .db file in temp_dir
+            # --- Add check and delete before creating ---
+            try:
+                tmp_db = tempfile.NamedTemporaryFile(
+                    delete=False, suffix=".db", dir=self.temp_dir
+                )
+                tmp_db_path = tmp_db.name
+                tmp_db.close()  # Close the file handle immediately
+
+                # Now, ensure the file does not exist before DuckDB tries to use it
+                if os.path.exists(tmp_db_path):
+                    log.debug(
+                        f"Deleting potentially pre-existing temp db file: {tmp_db_path}"
+                    )
+                    os.unlink(tmp_db_path)
+
+                self.database = tmp_db_path  # Use the generated path
+                self._temp_db_created = True
+
+            except Exception as e:
+                log.error(f"Failed to create or manage temporary database file: {e}")
+                raise  # Re-raise the exception as this is critical
+
+            # --- End check and delete ---
+
+            if database == ":memory:":
+                log.info(
+                    f"Using temporary file-based database instead of in-memory: {self.database}"
+                )
+            else:
+                log.info(
+                    f"No database specified, created temporary file: {self.database}"
+                )
+        else:
+            self.database = database
+            self._temp_db_created = False
+            log.info(f"Using specified database file: {self.database}")
+
         self.threads = threads if threads else max(4, os.cpu_count())
 
         # Auto-configure memory limit if not specified
@@ -73,7 +109,6 @@ class DatabaseManager:
             log.info(f"Using specified memory limit: {self.memory_limit}")
 
         self.enable_progress = enable_progress
-        self.max_temp_size = max_temp_size
         self.con = None
 
     def __enter__(self):
@@ -84,7 +119,22 @@ class DatabaseManager:
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit point that closes the database connection."""
         if self.con:
+            # Force checkpoint before closing to ensure data is saved
+            try:
+                self.con.execute("CHECKPOINT")
+            except Exception as e:
+                log.debug(f"Could not checkpoint database before closing: {e}")
             self.close()
+
+        # Remove temporary DB file if we created it
+        if getattr(self, "_temp_db_created", False):
+            try:
+                log.debug(f"Cleaning up temporary database file: {self.database}")
+                os.unlink(self.database)
+            except Exception as e:
+                log.warning(
+                    f"Could not remove temporary database file {self.database}: {e}"
+                )
 
     def connect(self):
         """Establish and configure DuckDB connection."""
@@ -93,7 +143,26 @@ class DatabaseManager:
             return self.con
 
         log.debug(f"Connecting to DuckDB database: {self.database}")
-        self.con = duckdb.connect(database=self.database)
+        # Pass enable_external_access directly in the config
+        # This is the primary way to enable it, must be done at connection time.
+        config = {"enable_external_access": True}
+        try:
+            self.con = duckdb.connect(database=self.database, config=config)
+            log.info("Successfully connected with external access enabled via config.")
+        except Exception as connect_e:
+            log.error(f"Failed to connect to database {self.database}: {connect_e}")
+            # Try connecting without the config if it fails (older versions might not support it)
+            try:
+                log.warning(
+                    "Retrying connection without external_access in config (external features may be limited)..."
+                )
+                self.con = duckdb.connect(database=self.database)
+                log.warning(
+                    "Connected without explicit external access. PROGRAM feature might not work."
+                )
+            except Exception as retry_e:
+                log.error(f"Failed to connect to database on retry: {retry_e}")
+                raise  # Re-raise the final connection error
 
         # Configure connection parameters
         self._configure_connection()
@@ -102,62 +171,68 @@ class DatabaseManager:
     def _configure_connection(self):
         """Apply configuration settings to the connection."""
         try:
+            # Set critical settings first
+            self.con.execute(f"SET threads TO {self.threads}")
+            self.con.execute(f"SET memory_limit='{self.memory_limit}'")
+            self.con.execute("PRAGMA enable_profiling")
+
+            # Remove problematic settings seen in logs
+            # These were causing "unrecognized configuration parameter" errors:
+            # - batch_size
+            # - auto_vacuum
+            # - enable_filesystem_cache
+            # - checkpoint_on_shutdown
+            # - temp_directory_compression
+            # - enable_worker_parallelism
+
+            # Enable progress bar if requested
             if self.enable_progress:
-                self.con.execute("PRAGMA enable_progress_bar=true")
+                try:
+                    self.con.execute(
+                        "SET progress_bar_time=1000"
+                    )  # Update every second
+                    self.con.execute("SET enable_progress_bar=true")
+                    log.info("Enabled progress bar for long-running queries")
+                except Exception as e:
+                    log.debug(f"Could not enable progress bar: {e}")
 
             # Set temp directory - critical for large dataset processing
             if self.temp_dir:
                 log.info(f"Setting DuckDB temp directory to: {self.temp_dir}")
-                self.con.execute(f"SET temp_directory='{self.temp_dir}'")
+                safe_temp_dir = str(Path(self.temp_dir).resolve()).replace("'", "''")
+                self.con.execute(f"SET temp_directory='{safe_temp_dir}'")
 
-            # Set thread count
-            log.info(f"Setting DuckDB thread count to: {self.threads}")
-            self.con.execute(f"SET threads TO {self.threads}")
+            # Apply performance optimizations that work across versions
+            self.con.execute("SET preserve_insertion_order=false")
 
-            # Set memory limit
-            log.info(f"Setting DuckDB memory limit to: {self.memory_limit}")
-            self.con.execute(f"SET memory_limit='{self.memory_limit}'")
-
-            # Set maximum temp directory size
-            log.info(f"Setting DuckDB max temp directory size to: {self.max_temp_size}")
-            self.con.execute(f"PRAGMA max_temp_directory_size='{self.max_temp_size}'")
-
-            # Add temp file specific optimizations
+            # Try a small set of known compatible optimizations
             try:
-                # Enable compression for temporary data when spilling to disk
-                self.con.execute("PRAGMA temp_directory_compression='zstd'")
-
-                # Try to minimize disk usage by doing more work in memory
-                self.con.execute("PRAGMA memory_limit_affinity='disk_to_memory'")
-
-                # Clean up temp files more aggressively
-                self.con.execute("PRAGMA cleanup_on_close=true")
-
-                # Reduce materialization of intermediate results where possible
-                self.con.execute("PRAGMA enable_intermediate_materialization=false")
-
-                # Use compressed execution where possible
-                self.con.execute("PRAGMA optimize_compressed_materialization=true")
-
-                log.info(
-                    "Configured temp storage with optimizations for reduced disk usage"
-                )
+                self.con.execute("SET checkpoint_threshold='128MB'")
+                log.debug("Set checkpoint_threshold to 128MB")
             except Exception as e:
-                log.debug(f"Some temp storage optimizations not supported: {e}")
+                log.debug(f"Could not set checkpoint_threshold: {e}")
 
-            # Optimize for performance
             try:
-                self.con.execute("PRAGMA preserve_insertion_order=false")
-                self.con.execute("PRAGMA enable_object_cache")
-                self.con.execute("PRAGMA enable_profiling")
-                self.con.execute("PRAGMA memory_limit_affinity='memory_to_disk'")
+                self.con.execute("SET allocator_flush_threshold='256MB'")
+                log.debug("Set allocator_flush_threshold to 256MB")
             except Exception as e:
-                log.debug(
-                    f"Some optimizations not supported in this DuckDB version: {e}"
-                )
+                log.debug(f"Could not set allocator_flush_threshold: {e}")
+
+            try:
+                self.con.execute("SET streaming_buffer_size='16MB'")
+                log.debug("Set streaming_buffer_size to 16MB")
+            except Exception as e:
+                log.debug(f"Could not set streaming_buffer_size: {e}")
+
+            # Try object cache which should work in most versions
+            try:
+                self.con.execute("SET enable_object_cache=true")
+                log.debug("Enabled object cache")
+            except Exception as e:
+                log.debug(f"Could not enable object cache: {e}")
 
         except Exception as e:
-            log.error(f"Error configuring DuckDB connection: {e}")
+            log.error(f"Error during basic DuckDB configuration: {e}")
             raise
 
     def close(self):
@@ -183,6 +258,94 @@ class DatabaseManager:
                 log.debug(f"Parameters: {params}")
             raise
 
+    def inspect_table_storage(self, table_name, sample_rows=10):
+        """
+        Inspects the storage information for a given table using pragma_storage_info.
+
+        Args:
+            table_name (str): The name of the table to inspect.
+            sample_rows (int): The number of rows to sample for the pragma.
+
+        Returns:
+            list: A list of tuples containing the storage information, or None if an error occurs.
+        """
+        if not self.con:
+            self.connect()
+
+        # Ensure table_name is properly quoted to prevent SQL injection if it comes from unsafe sources,
+        # though typically table names are controlled. For pragma_storage_info, it needs to be a string literal.
+        # DuckDB's Python API handles parameterization for values, but not for identifiers like table names in pragmas directly.
+        # So, we construct the string carefully.
+        if (
+            not table_name.isalnum() and "_" not in table_name
+        ):  # Basic check for valid table name characters
+            log.error(f"Invalid table name for inspect_table_storage: {table_name}")
+            return None
+
+        query = f"""
+        SELECT * EXCLUDE (column_path, segment_id, start, stats, persistent, block_id, block_offset, has_updates)
+        FROM pragma_storage_info('{table_name}')
+        USING SAMPLE {sample_rows} ROWS
+        ORDER BY row_group_id;
+        """
+        log.debug(
+            f"Executing storage inspection query for table '{table_name}':\n{query}"
+        )
+        try:
+            result = self.con.execute(query).fetchall()
+            return result
+        except Exception as e:
+            log.error(f"Error inspecting storage for table {table_name}: {e}")
+            return None
+
+    def inspect_all_managed_tables_storage(self, sample_rows=10):
+        """
+        Inspects and logs storage information for all standard managed tables.
+        Standard tables are: 'alignments', 'reads', 'refs', 'header'.
+
+        Args:
+            sample_rows (int): The number of rows to sample for the pragma.
+        """
+        if not self.con:
+            self.connect()
+
+        managed_tables = ["alignments", "reads", "refs", "header"]
+        log.info("--- Table Storage Inspection Start ---")
+        for table_name in managed_tables:
+            try:
+                # Check if table exists before trying to inspect
+                # No special quoting needed for 'refs' as it's not a keyword.
+                query_table_name = table_name
+
+                # Try to execute a query that would fail if the table doesn't exist
+                # Using DESCRIBE is a common way to check for table existence and schema
+                self.con.execute(f"DESCRIBE {query_table_name};").fetchall()
+                # If DESCRIBE succeeds, the table exists.
+
+                log.info(f"Inspecting storage for table: '{table_name}'")
+                # The inspect_table_storage method itself passes table_name as a string literal to pragma_storage_info,
+                # so no special quoting is needed for that call.
+                storage_info = self.inspect_table_storage(table_name, sample_rows)
+                if storage_info:
+                    log.info(f"Storage information for '{table_name}':")
+                    for row in storage_info:
+                        log.info(f"  {row}")
+                elif (
+                    storage_info is None
+                ):  # inspect_table_storage returned None due to an error within that method
+                    log.warning(
+                        f"Could not retrieve storage info for table '{table_name}' due to an error during its specific inspection."
+                    )
+                else:  # inspect_table_storage returned empty list
+                    log.info(
+                        f"No storage information returned by pragma for table '{table_name}'. It might be empty or not yet optimized for storage info."
+                    )
+
+            except Exception as e:
+                # This catch is for errors like table not existing if DESCRIBE fails
+                log.warning(f"Could not inspect storage for table '{table_name}': {e}")
+        log.info("--- Table Storage Inspection End ---")
+
     def create_persistent_database(self, output_path, source_tables=None):
         """
         Create a persistent DuckDB database from the current in-memory database.
@@ -194,32 +357,135 @@ class DatabaseManager:
         if not self.con:
             raise ValueError("No active connection to copy from")
 
+        # Remove the check for in-memory database since we always use file-based now
         log.info(f"Creating persistent database at {output_path}")
-        out_db = duckdb.connect(database=str(output_path))
+        # Ensure output path is absolute for ATTACH
+        abs_output_path = str(Path(output_path).resolve())
+        # Ensure source path is absolute for ATTACH
+        abs_source_path = str(Path(self.database).resolve())
 
-        # If no specific tables are provided, get all tables from the current connection
-        if source_tables is None:
-            tables_result = self.con.execute("SHOW TABLES").fetchall()
-            source_tables = [row[0] for row in tables_result]
+        # --- Delete existing target database file before creating ---
+        if os.path.exists(abs_output_path):
+            try:
+                os.unlink(abs_output_path)
+                log.debug(f"Deleted existing target database file: {abs_output_path}")
+            except OSError as e:
+                log.error(
+                    f"Could not delete existing database file {abs_output_path}: {e}"
+                )
+                raise  # Re-raise error if deletion fails
+        # --- End deletion ---
 
-        # Copy each table and create indexes
-        for table in source_tables:
-            log.info(f"Copying table {table} to persistent database")
-            out_db.execute(f"CREATE TABLE {table} AS SELECT * FROM con.{table}")
+        # Connect to the target database (or create it)
+        out_db = duckdb.connect(database=abs_output_path)
 
-            # Create typical indexes based on table name patterns
-            if table == "alignments":
-                out_db.execute(f"CREATE INDEX idx_{table}_qname ON {table}(qname)")
-                out_db.execute(f"CREATE INDEX idx_{table}_rname ON {table}(rname)")
-            elif table == "qname_index":
-                out_db.execute(f"CREATE INDEX idx_qname ON {table}(qname)")
-            elif table == "rname_index":
-                out_db.execute(f"CREATE INDEX idx_rname ON {table}(rname)")
+        # Configure the output database for optimal writing performance - using try/except for each setting
+        try:
+            out_db.execute(f"SET threads = {self.threads}")
+        except Exception as e:
+            log.debug(f"Could not set threads for output db: {e}")
 
-        out_db.close()
-        log.info(f"Persistent database created at {output_path}")
+        try:
+            out_db.execute("SET preserve_insertion_order=false")
+        except Exception as e:
+            log.debug(f"Could not set preserve_insertion_order for output db: {e}")
 
-        return output_path
+        try:
+            out_db.execute("SET enable_object_cache=true")
+        except Exception as e:
+            log.debug(f"Could not set enable_object_cache for output db: {e}")
+
+        try:
+            out_db.execute("SET checkpoint_on_shutdown=true")
+        except Exception as e:
+            log.debug(f"Could not set checkpoint_on_shutdown for output db: {e}")
+
+        source_db_alias = "source_db"
+        try:
+            # Attach the source database (current connection's file) to the target connection
+            log.debug(
+                f"Attaching source database '{abs_source_path}' as '{source_db_alias}'"
+            )
+            out_db.execute(
+                f"ATTACH '{abs_source_path}' AS {source_db_alias} (READ_ONLY)"
+            )
+
+            # If no specific tables are provided, get all tables from the source database
+            if source_tables is None:
+                tables_result = out_db.execute(
+                    f"SELECT name FROM {source_db_alias}.sqlite_master WHERE type='table'"
+                ).fetchall()
+                # Filter out internal/sqlite tables if necessary, though DuckDB usually handles this
+                source_tables = [
+                    row[0] for row in tables_result if not row[0].startswith("sqlite_")
+                ]
+                log.debug(f"Auto-detected tables to copy: {source_tables}")
+
+            # Copy each table and create indexes
+            for table in source_tables:
+                log.info(f"Copying table {table} to persistent database")
+                quoted_target_table = f'"{table}"'
+
+                # Use faster COPY approach for large tables
+                if table in ["alignments", "alignment_references"]:
+                    # For large tables, use a more optimized approach
+                    out_db.execute(
+                        f"CREATE TABLE {quoted_target_table} AS SELECT * FROM {source_db_alias}.{table} LIMIT 0"
+                    )
+                    out_db.execute(
+                        f"INSERT INTO {quoted_target_table} SELECT * FROM {source_db_alias}.{table}"
+                    )
+                else:
+                    # For smaller tables, use the simpler CREATE TABLE AS approach
+                    out_db.execute(
+                        f"CREATE TABLE {quoted_target_table} AS SELECT * FROM {source_db_alias}.{table}"
+                    )
+
+                # Create typical indexes based on table name patterns
+                self._create_indexes_for_table(out_db, table)
+
+                # Force intermediate checkpoint for large tables
+                if table in ["alignments", "alignment_references"]:
+                    out_db.execute("CHECKPOINT")
+
+        except Exception as e:
+            log.error(f"Error during persistent database creation: {e}")
+            raise
+        finally:
+            # Detach the source database and close the target connection
+            try:
+                log.debug(f"Detaching source database '{source_db_alias}'")
+                out_db.execute(f"DETACH {source_db_alias}")
+            except Exception as detach_e:
+                log.warning(
+                    f"Could not detach database '{source_db_alias}': {detach_e}"
+                )
+            finally:
+                out_db.close()
+
+        log.info(f"Persistent database created at {abs_output_path}")
+        return abs_output_path
+
+    def _create_indexes_for_table(self, con_target, table_name):
+        """Internal helper to create standard indexes for a given table."""
+        # Most indexes are now unnecessary as DuckDB can auto-optimize
+        # Only create special-case indexes for specific query patterns
+        log.debug(f"Analyzing table {table_name} for query optimization")
+        try:
+            quoted_table = f'"{table_name}"'  # Ensure table name is quoted for safety, though 'refs' doesn't strictly need it.
+
+            # Run ANALYZE to collect statistics for better query planning
+            con_target.execute(f"ANALYZE {quoted_table}")
+
+            # Only create special indexes for very specific access patterns
+            # that DuckDB might not optimize automatically
+            if table_name == "refs":
+                # The ref_name column is frequently used for joining/filtering
+                con_target.execute(
+                    f"CREATE INDEX IF NOT EXISTS idx_ref_name ON {quoted_table}(ref_name)"
+                )
+        except Exception as index_e:
+            log.warning(f"Could not analyze table {table_name}: {index_e}")
 
     def add_temp_management_methods(self):
         """Add a method to explain temp file usage"""
@@ -247,33 +513,146 @@ Optimization Tips:
 """
         return temp_usage_info
 
-    def cleanup_temp_files(self):
-        """Force cleanup of temporary files"""
+    def set_max_memory(self, memory_gb):
+        """Update memory limit during runtime"""
         if self.con:
             try:
-                self.con.execute("PRAGMA force_cleanup()")
-                log.info("Forced cleanup of temporary DuckDB files")
-            except:
-                log.warning(
-                    "Could not force cleanup - may not be supported in this version"
-                )
+                self.con.execute(f"SET memory_limit='{memory_gb}GB'")
+                self.memory_limit = f"{memory_gb}GB"
+                log.info(f"Updated memory limit to {memory_gb}GB")
+                return True
+            except Exception as e:
+                log.error(f"Failed to update memory limit: {e}")
+                return False
+        return False
 
+    def export_temp_filtered_header(self, output_path):
+        """Export the temp_filtered_header table to a Parquet file."""
+        try:
+            self.con.execute(
+                f"COPY temp_filtered_header TO '{output_path}/header.parquet' "
+                f"(FORMAT PARQUET, COMPRESSION zstd, ROW_GROUP_SIZE 100000)"
+            )
+            log.info(f"Exported temp_filtered_header to {output_path}/header.parquet")
+        except Exception as e:
+            log.error(f"Failed to export temp_filtered_header: {e}")
+            raise
 
-# Example usage patterns:
+    def export_optimized_table(self, table_name, output_path, compression_level=11):
+        """
+        Export a table with optimized settings based on its type.
 
-# Single query execution:
-# db = DatabaseManager(temp_dir="/tmp")
-# result = db.execute("SELECT 1")
-# db.close()
+        Args:
+            table_name (str): Table to export ('alignments', 'reads', 'refs', 'header')
+            output_path (str): Directory to save the Parquet file
+            compression_level (int): zstd compression level (1-22, higher = smaller but slower)
 
-# Multiple operations with context manager:
-# with DatabaseManager(threads=4) as db:
-#     db.execute("CREATE TABLE test (id INTEGER, name VARCHAR)")
-#     db.execute("INSERT INTO test VALUES (1, 'test')")
-#     result = db.execute("SELECT * FROM test").fetchall()
+        Returns:
+            bool: True if export successful, False otherwise
+        """
+        from bam_filter.sam_utils_db import export_optimized_table
 
-# Creating a persistent database:
-# with DatabaseManager() as db:
-#     db.execute("CREATE TABLE data (id INTEGER)")
-#     db.execute("INSERT INTO data SELECT * FROM range(1000)")
-#     db.create_persistent_database("output.db", ["data"])
+        return export_optimized_table(
+            self.con, table_name, output_path, compression_level
+        )
+
+    def get_top_alignments(
+        self, min_ani=0.9, min_read_length=50, max_read_length=None, limit=1000
+    ):
+        """
+        Get top alignments based on shifted score.
+
+        Args:
+            min_ani (float): Minimum ANI (Average Nucleotide Identity) threshold (0-1)
+            min_read_length (int): Minimum read length to consider
+            max_read_length (int, optional): Maximum read length to consider
+            limit (int): Maximum number of results to return
+
+        Returns:
+            List[Dict]: List of alignment dictionaries with top scores
+        """
+        if not self.con:
+            self.connect()
+
+        query_conditions = [f"ani >= {min_ani}", f"query_length >= {min_read_length}"]
+
+        if max_read_length:
+            query_conditions.append(f"query_length <= {max_read_length}")
+
+        where_clause = " AND ".join(query_conditions)
+
+        query = f"""
+        WITH top_alignments AS (
+            SELECT
+                qname,
+                rname,
+                query_length,
+                alignment_score,
+                shifted_score,
+                ani,
+                ROW_NUMBER() OVER (PARTITION BY qname ORDER BY shifted_score DESC) as rank
+            FROM
+                alignments
+            WHERE
+                {where_clause}
+        )
+        SELECT
+            qname,
+            rname,
+            query_length,
+            alignment_score,
+            shifted_score,
+            ani
+        FROM
+            top_alignments
+        WHERE
+            rank = 1
+        ORDER BY
+            shifted_score DESC
+        LIMIT {limit};
+        """
+
+        try:
+            results = self.con.execute(query).fetchall()
+            return [
+                {
+                    "query_id": row[0],
+                    "subject_id": row[1],
+                    "query_length": row[2],
+                    "alignment_score": row[3],
+                    "shifted_score": row[4],
+                    "ani": row[5],
+                }
+                for row in results
+            ]
+        except Exception as e:
+            log.error(f"Error retrieving top alignments: {e}")
+            return []
+
+    def cleanup_temp_files(self):
+        """Clean up temporary files that might have been created during database operations."""
+        log.debug("Cleaning up any temporary files from database operations...")
+        try:
+            # Force a checkpoint to ensure data is persisted
+            if self.con:
+                self.con.execute("CHECKPOINT")
+                log.debug("Checkpoint executed to persist data")
+
+            # Set temp_directory may have created temp files that need special cleanup
+            if hasattr(self, "temp_dir") and self.temp_dir:
+                log.debug(f"Using temp dir for cleanup check: {self.temp_dir}")
+                # We can't directly delete temp files as they may still be in use
+                # Just log that we're ensuring proper release of resources
+
+            return True
+        except Exception as e:
+            log.warning(f"Error during temp file cleanup: {e}")
+            return False
+
+    def export_optimized_alignments(self, output_dir_str, compression_level=11):
+        """Export alignments table with optimized settings specifically for it."""
+        from .sam_utils_db import export_optimized_table
+
+        return export_optimized_table(
+            self.con, "alignments", output_dir_str, compression_level
+        )

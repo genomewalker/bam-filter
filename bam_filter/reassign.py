@@ -13,7 +13,6 @@ from bam_filter.utils import (
     check_tmp_dir_exists,
     handle_warning,
     create_output_files,
-    allocate_threads,
 )
 from bam_filter.bam_utils import (
     write_to_file,

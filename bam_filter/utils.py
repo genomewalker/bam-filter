@@ -18,6 +18,7 @@ from pathlib import Path
 import pysam
 import tempfile
 from difflib import get_close_matches
+import duckdb
 
 log = logging.getLogger("my_logger")
 log.setLevel(logging.INFO)
@@ -470,6 +471,12 @@ defaults = {
     "lca_summary": None,
     "squarem_min_improvement": 1e-4,
     "squarem_max_step_factor": 4.0,
+    "match_reward": 1,
+    "mismatch_penalty": -2,
+    "gap_open_penalty": 5,
+    "gap_extension_penalty": 2,
+    "keep_unused_references": False,
+    "compression_level": 11,  # Add default for compression level
 }
 
 help_msg = {
@@ -486,7 +493,7 @@ help_msg = {
     "min_expected_breadth_ratio": "Minimum expected breadth ratio",
     "min_norm_entropy": "Minimum normalized entropy",
     "min_norm_gini": "Minimum normalized Gini coefficient",
-    "min_read_ani": "Minimum read ANI to keep a read",
+    "min_read_ani": "Minimum read ANI (1 - NM / query_length) to keep a read",
     "min_avg_read_ani": "Minimum average read ANI",
     "min_coverage_evenness": "Minimum coverage evenness",
     "min_coeff_var": "Minimum coverage evenness calculated as SD/MEAN",
@@ -533,6 +540,14 @@ help_msg = {
     "max_memory": "Maximum memory to use for the EM algorithm",
     "squarem_min_improvement": "Minimum relative improvement for SQUAREM convergence",
     "squarem_max_step_factor": "Maximum step size multiplier for SQUAREM stability",
+    "match_reward": "Match reward for alignment score calculation during conversion",
+    "mismatch_penalty": "Mismatch penalty for alignment score calculation during conversion",
+    "gap_open_penalty": "Gap open penalty for alignment score calculation during conversion",
+    "gap_extension_penalty": "Gap extension penalty for alignment score calculation during conversion",
+    "enable_profiling": "Enable DuckDB query profiling for the convert command.",
+    "profile_output_dir": "Directory to save profiling output files (defaults to ./fb-convert-profiling in the current directory).",
+    "keep_unused_references": "Keep all references from the header, even if they have no alignments.",
+    "compression_level": "Compression level for Parquet output (e.g., zstd: 1-22). Higher means smaller but slower.",  # Add help message
 }
 
 from difflib import get_close_matches, SequenceMatcher
@@ -751,15 +766,22 @@ def get_arguments(argv=None):
     )
 
     convert_required = parser_convert.add_argument_group("required arguments")
-    convert_optional = parser_convert.add_argument_group("optional arguments")
 
-    convert_required.add_argument(
+    # Create a mutually exclusive group for input options
+    input_group = convert_required.add_mutually_exclusive_group(required=True)
+    input_group.add_argument(
         "-i",
         "--input",
-        required=True,
         type=lambda x: is_valid_file(parser, x, "input"),
         help="Input file (BAM or Parquet)",
     )
+    input_group.add_argument(
+        "--file-list",
+        type=lambda x: is_valid_file(parser, x, "file-list"),
+        help="Text file containing a list of input files (one per line) to be combined",
+    )
+
+    convert_optional = parser_convert.add_argument_group("optional arguments")
 
     convert_optional.add_argument(
         "-o",
@@ -783,9 +805,18 @@ def get_arguments(argv=None):
     convert_optional.add_argument(
         "--compression",
         type=str,
-        default="snappy",
+        default="zstd",
         choices=["snappy", "gzip", "brotli", "zstd"],
         help="Compression algorithm for Parquet output",
+    )
+
+    # Add compression level argument
+    convert_optional.add_argument(
+        "--compression-level",
+        type=int,
+        default=11,  # Set default compression level to 11
+        metavar="INT",
+        help="Compression level for Parquet output (e.g., zstd: 1-22). Higher means smaller but slower.",
     )
 
     convert_optional.add_argument(
@@ -839,6 +870,58 @@ def get_arguments(argv=None):
         choices=["duckdb", "parquet"],
         default="duckdb",
         help="Output format when converting from BAM/SAM (default: duckdb)",
+    )
+
+    convert_optional.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Overwrite existing output files/directories.",
+    )
+
+    convert_optional.add_argument(
+        "--match-reward",
+        type=int,
+        default=defaults["match_reward"],
+        help=help_msg["match_reward"],
+    )
+    convert_optional.add_argument(
+        "--mismatch-penalty",
+        type=int,
+        default=defaults["mismatch_penalty"],
+        help=help_msg["mismatch_penalty"],
+    )
+    convert_optional.add_argument(
+        "--gap-open-penalty",
+        type=int,
+        default=defaults["gap_open_penalty"],
+        help=help_msg["gap_open_penalty"],
+    )
+    convert_optional.add_argument(
+        "--gap-extension-penalty",
+        type=int,
+        default=defaults["gap_extension_penalty"],
+        help=help_msg["gap_extension_penalty"],
+    )
+
+    # Add profiling arguments back
+    convert_optional.add_argument(
+        "--enable-profiling",
+        action="store_true",
+        help=help_msg["enable_profiling"],
+    )
+    convert_optional.add_argument(
+        "--profile-output-dir",
+        type=str,
+        default=None,
+        metavar="DIR",
+        help=help_msg["profile_output_dir"],
+    )
+    # Add keep unused references argument
+    convert_optional.add_argument(
+        "--keep-unused-references",
+        action="store_true",
+        default=defaults["keep_unused_references"],
+        help=help_msg["keep_unused_references"],
     )
 
     reassign_optional_args = parser_reassign.add_argument_group(
@@ -1224,6 +1307,17 @@ def get_arguments(argv=None):
         required=False,
         help=help_msg["lca_stats"],
     )
+    reassign_optional_args.add_argument(
+        "-A",
+        "--min-read-ani",
+        type=lambda x: float(
+            check_values(x, minval=0, maxval=100, parser=parser, var="--min-read-ani")
+        ),
+        metavar="FLOAT",
+        default=defaults["min_read_ani"],
+        dest="min_read_ani",
+        help=help_msg["min_read_ani"] + " (used during initial processing)",
+    )
     if argv is None:
         argv = sys.argv[1:]
 
@@ -1314,105 +1408,87 @@ def create_output_files(
     lca_summary="",
 ):
     if prefix is None:
-        prefix = Path(bam).with_suffix("").name
+        prefix = Path(bam).stem
 
     if tmp_dir is not None:
-        tmp_dir = tmp_dir.name
+        tmp_dir = Path(tmp_dir)
     else:
-        tmp_dir = check_tmp_dir_exists(tmp_dir).name
+        tmp_dir = Path(tempfile.mkdtemp(dir=os.getcwd()))
+
+    out_files = {}
 
     if stats == "" or stats is None:
-        stats = f"{prefix}_stats.tsv.gz"
+        out_files["stats"] = f"{prefix}.stats.tsv"
+    else:
+        out_files["stats"] = stats
     if stats_filtered == "" or stats_filtered is None:
-        stats_filtered = f"{prefix}_stats-filtered.tsv.gz"
+        out_files["stats_filtered"] = f"{prefix}.stats.filtered.tsv"
+    else:
+        out_files["stats_filtered"] = stats_filtered
     if bam_filtered == "" or bam_filtered is None:
-        bam_filtered = f"{prefix}.filtered.bam"
+        out_files["bam_filtered"] = f"{prefix}.filtered.bam"
+    else:
+        out_files["bam_filtered"] = bam_filtered
     if bam_reassigned == "" or bam_reassigned is None:
-        bam_reassigned = f"{prefix}.reassigned.bam"
+        out_files["bam_reassigned"] = f"{prefix}.reassigned.bam"
+    else:
+        out_files["bam_reassigned"] = bam_reassigned
     if read_length_freqs == "" or read_length_freqs is None:
-        read_length_freqs = f"{prefix}_read-length-freqs.json"
+        out_files["read_length_freqs"] = f"{prefix}.read_length_freqs.json"
+    else:
+        out_files["read_length_freqs"] = read_length_freqs
     if read_hits_count == "" or read_hits_count is None:
-        read_hits_count = f"{prefix}_read-hits-count.tsv.gz"
+        out_files["read_hits_count"] = f"{prefix}.read_hits_count.tsv"
+    else:
+        out_files["read_hits_count"] = read_hits_count
     if knee_plot == "" or knee_plot is None:
-        knee_plot = f"{prefix}_knee-plot.png"
+        out_files["knee_plot"] = f"{prefix}.knee_plot.pdf"
+    else:
+        out_files["knee_plot"] = knee_plot
     if coverage_plots == "" or coverage_plots is None:
-        coverage_plots = f"{prefix}_coverage-plots"
+        out_files["coverage_plots"] = f"{prefix}.coverage_plots"
+    else:
+        out_files["coverage_plots"] = coverage_plots
     if lca_summary == "" or lca_summary is None:
-        lca_summary = f"{prefix}_lca-summary.tsv.gz"
+        out_files["lca_summary"] = f"{prefix}.lca_summary.tsv"
+    else:
+        out_files["lca_summary"] = lca_summary
 
     # create output files
     if mode == "filter":
-        out_files = {
-            "stats": stats,
-            "stats_filtered": stats_filtered,
-            "bam_filtered_tmp": f"{tmp_dir}/{prefix}.filtered.tmp.bam",
-            "bam_filtered": bam_filtered,
-            "read_length_freqs": read_length_freqs,
-            "read_hits_count": read_hits_count,
-            "knee_plot": knee_plot,
-            "coverage_plot_dir": coverage_plots,
-            "bam_tmp": f"{tmp_dir}/{prefix}.tmp.bam",
-            "bam_tmp_sorted": f"{tmp_dir}/{prefix}.tmp.sorted.bam",
-        }
+        create_empty_output_files(
+            {
+                "stats": out_files["stats"],
+                "stats_filtered": out_files["stats_filtered"],
+                "read_length_freqs": out_files["read_length_freqs"],
+                "read_hits_count": out_files["read_hits_count"],
+            }
+        )
+        if out_files["bam_filtered"] is not None:
+            create_empty_bam(out_files["bam_filtered"])
+        if out_files["coverage_plots"] is not None:
+            os.makedirs(out_files["coverage_plots"], exist_ok=True)
     elif mode == "reassign":
-        out_files = {
-            "bam_reassigned_tmp": f"{tmp_dir}/{prefix}.reassigned.tmp.bam",
-            "bam_reassigned_sorted": f"{tmp_dir}/{prefix}.reassigned.sorted.bam",
-            "bam_reassigned": bam_reassigned,
-        }
+        create_empty_output_files(
+            {
+                "stats": out_files["stats"],
+            }
+        )
+        if out_files["bam_reassigned"] is not None:
+            create_empty_bam(out_files["bam_reassigned"])
     elif mode == "lca":
-        out_files = {
-            "lca_summary": lca_summary,
-        }
+        create_empty_output_files(
+            {
+                "lca_summary": out_files["lca_summary"],
+            }
+        )
     else:
-        log.error("Mode not recognized")
-        exit(1)
+        pass
     out_files["tmp_dir"] = tmp_dir
     out_files["sorted_bam"] = f"{tmp_dir}/{prefix}.bf-sorted.bam"
 
     # check that read_length_freqs is a json file
     if read_length_freqs is not None:
-        if not read_length_freqs.endswith(".json"):
-            log.error("--read-length-freqs must be a JSON file")
-            exit(1)
+        if not out_files["read_length_freqs"].endswith(".json"):
+            raise ValueError("read_length_freqs file must end with .json")
     return out_files
-
-
-def allocate_threads(total_threads, min_io_processes, max_io_processes):
-    """
-    Allocates threads between CPU-bound workers and I/O-bound processes based on total threads and
-    desired range of I/O processes. Selects the best compromise to maximize CPU-bound workers.
-
-    Parameters:
-        total_threads (int): Total number of available threads.
-        min_io_processes (int): Minimum desired I/O-bound processes.
-        max_io_processes (int): Maximum desired I/O-bound processes.
-
-    Returns:
-        tuple: (Number of workers, Number of I/O processes)
-    """
-    if min_io_processes > max_io_processes:
-        raise ValueError(
-            "Minimum I/O processes cannot be greater than maximum I/O processes."
-        )
-    if min_io_processes <= 0 or max_io_processes <= 0:
-        raise ValueError("I/O processes must be positive integers.")
-
-    best_allocation = (
-        1,
-        total_threads,
-    )  # Start with all threads assigned to 1 worker if no better found
-    max_workers = 0
-
-    for io_processes in range(min_io_processes, max_io_processes + 1):
-        if (
-            total_threads >= io_processes
-        ):  # Ensure there are enough threads to allocate at least these many I/O processes
-            workers = total_threads // io_processes
-            if (
-                workers > max_workers
-            ):  # Find the configuration with the maximum number of CPU workers
-                max_workers = workers
-                best_allocation = (workers, io_processes)
-
-    return best_allocation

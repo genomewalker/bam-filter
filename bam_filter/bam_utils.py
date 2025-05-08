@@ -9,7 +9,6 @@ from multiprocessing import Process, Queue, Pool, Manager
 from bam_filter.utils import (
     is_debug,
     create_empty_output_files,
-    allocate_threads,
     sort_keys_by_approx_weight,
 )
 import concurrent.futures
