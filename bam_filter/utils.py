@@ -838,6 +838,28 @@ def get_arguments(argv=None):
         help="Temporary directory for processing",
     )
 
+    convert_optional.add_argument(
+        "--keep-db",
+        action="store_true",
+        help="Save the DuckDB database alongside Parquet files for future queries",
+    )
+
+    convert_optional.add_argument(
+        "--db-path",
+        type=str,
+        default=None,
+        metavar="FILE",
+        help="Path where to save the DuckDB database if --keep-db is used (defaults to output path with .db extension)",
+    )
+
+    convert_optional.add_argument(
+        "--db-options",
+        type=str,
+        default="",
+        metavar="OPTIONS",
+        help="Additional options for DuckDB database persistence (comma-separated key=value pairs)",
+    )
+
     # Add memory management options
     convert_optional.add_argument(
         "--memory-limit",
@@ -1406,6 +1428,8 @@ def create_output_files(
     knee_plot="",
     coverage_plots="",
     lca_summary="",
+    keep_db=False,
+    db_path=None,
 ):
     if prefix is None:
         prefix = Path(bam).stem

@@ -119,11 +119,6 @@ class DatabaseManager:
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit point that closes the database connection."""
         if self.con:
-            # Force checkpoint before closing to ensure data is saved
-            try:
-                self.con.execute("CHECKPOINT")
-            except Exception as e:
-                log.debug(f"Could not checkpoint database before closing: {e}")
             self.close()
 
         # Remove temporary DB file if we created it
@@ -176,14 +171,18 @@ class DatabaseManager:
             self.con.execute(f"SET memory_limit='{self.memory_limit}'")
             self.con.execute("PRAGMA enable_profiling")
 
-            # Remove problematic settings seen in logs
-            # These were causing "unrecognized configuration parameter" errors:
-            # - batch_size
-            # - auto_vacuum
-            # - enable_filesystem_cache
-            # - checkpoint_on_shutdown
-            # - temp_directory_compression
-            # - enable_worker_parallelism
+            # Add optimizations for batch processing
+            self.con.execute(
+                "SET prefer_range_joins=true"
+            )  # Prefer range joins when possible
+            self.con.execute("SET explain_output='all'")  # Detailed execution plans
+            self.con.execute(
+                "SET force_compression='none'"
+            )  # Disable compression during processing
+            self.con.execute("SET preserve_insertion_order=false")
+            self.con.execute(
+                "SET immediate_transaction_mode=true"
+            )  # Speed up transactions
 
             # Enable progress bar if requested
             if self.enable_progress:
@@ -203,24 +202,21 @@ class DatabaseManager:
                 self.con.execute(f"SET temp_directory='{safe_temp_dir}'")
 
             # Apply performance optimizations that work across versions
-            self.con.execute("SET preserve_insertion_order=false")
-
-            # Try a small set of known compatible optimizations
             try:
-                self.con.execute("SET checkpoint_threshold='128MB'")
-                log.debug("Set checkpoint_threshold to 128MB")
+                self.con.execute("SET checkpoint_threshold='1GB'")
+                log.debug("Set checkpoint_threshold to 1GB")
             except Exception as e:
                 log.debug(f"Could not set checkpoint_threshold: {e}")
 
             try:
-                self.con.execute("SET allocator_flush_threshold='256MB'")
-                log.debug("Set allocator_flush_threshold to 256MB")
+                self.con.execute("SET allocator_flush_threshold='1GB'")
+                log.debug("Set allocator_flush_threshold to 1GB")
             except Exception as e:
                 log.debug(f"Could not set allocator_flush_threshold: {e}")
 
             try:
-                self.con.execute("SET streaming_buffer_size='16MB'")
-                log.debug("Set streaming_buffer_size to 16MB")
+                self.con.execute("SET streaming_buffer_size='128MB'")
+                log.debug("Set streaming_buffer_size to 128MB")
             except Exception as e:
                 log.debug(f"Could not set streaming_buffer_size: {e}")
 
@@ -633,10 +629,9 @@ Optimization Tips:
         """Clean up temporary files that might have been created during database operations."""
         log.debug("Cleaning up any temporary files from database operations...")
         try:
-            # Force a checkpoint to ensure data is persisted
+            # Remove checkpoint call, just check connection
             if self.con:
-                self.con.execute("CHECKPOINT")
-                log.debug("Checkpoint executed to persist data")
+                log.debug("Connected database ready for cleanup")
 
             # Set temp_directory may have created temp files that need special cleanup
             if hasattr(self, "temp_dir") and self.temp_dir:
@@ -656,3 +651,42 @@ Optimization Tips:
         return export_optimized_table(
             self.con, "alignments", output_dir_str, compression_level
         )
+
+    def table_exists(self, table_name):
+        """Check if a table exists in the database.
+
+        Args:
+            table_name (str): Name of the table to check
+
+        Returns:
+            bool: True if the table exists, False otherwise
+        """
+        try:
+            result = self.con.execute(
+                f"SELECT COUNT(1) FROM information_schema.tables WHERE table_name='{table_name}'"
+            ).fetchone()
+            return result[0] > 0
+        except Exception as e:
+            self.log.debug(f"Error checking if table '{table_name}' exists: {e}")
+            # Alternative approach if the above fails
+            try:
+                self.con.execute(f"SELECT * FROM {table_name} LIMIT 0")
+                return True
+            except Exception:
+                return False
+
+    def get_table_columns(self, table_name):
+        """Get the column names for a table.
+
+        Args:
+            table_name (str): Name of the table
+
+        Returns:
+            list: List of column names
+        """
+        try:
+            columns = self.con.execute(f"PRAGMA table_info('{table_name}')").fetchall()
+            return [col[1] for col in columns]
+        except Exception as e:
+            self.log.debug(f"Error getting columns for table '{table_name}': {e}")
+            return []
