@@ -948,7 +948,7 @@ def load_sam_file_optimized(
                 alignment_partition_id AS partition_id,
                 -- Calculate ANI
                 CASE WHEN query_length > 0
-                    THEN ((1.0 - (COALESCE(nm_tag,0)::FLOAT / query_length)) * 100)::FLOAT
+                    THEN CAST(((1.0 - (COALESCE(nm_tag,0)::FLOAT / query_length)) * 100) AS INTEGER)
                     ELSE NULL
                 END AS tag_ZA,
                 -- Calculate shifted score
