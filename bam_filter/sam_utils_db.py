@@ -123,8 +123,9 @@ def export_optimized_table(con, table_name, output_dir_str, compression_level=11
         # This path will become the base for Hive partitioning.
         export_path = output_dir / table_name
         # Check if partition_id column exists before attempting to partition
+        col_info = [] # Initialize col_info here, before the try block
         try:
-            col_info = con.execute(f"DESCRIBE {table_name}").fetchall()
+            col_info = con.execute(f"DESCRIBE {table_name}").fetchall() # Reinstate DESCRIBE
             if any(col[0] == "partition_id" for col in col_info):
                 partition_options = ", PARTITION_BY (partition_id)"
                 log.info(
@@ -151,8 +152,9 @@ def export_optimized_table(con, table_name, output_dir_str, compression_level=11
             output_dir.mkdir(parents=True, exist_ok=True)
 
         # OPTIMIZATION: Calculate appropriate row group size
+        table_schema = [] # Initialize table_schema here (already correctly placed before its try block)
         try:
-            table_schema = con.execute(f"DESCRIBE {table_name}").fetchall()
+            table_schema = con.execute(f"DESCRIBE {table_name}").fetchall() # Reinstate DESCRIBE
             columns_info_dict = {}
             for col in table_schema:
                 col_name = col[0]
@@ -217,12 +219,6 @@ def export_optimized_table(con, table_name, output_dir_str, compression_level=11
             log.info(f"Exporting tags table without tag_hash and tag_bitmap columns")
         else:
             select_statement = f'SELECT * FROM "{table_name}"'
-
-        # Skip sorting for faster export performance
-        if table_name == "alignments":
-            log.info(f"Skipping sorting for '{table_name}' table to improve export speed")
-        elif table_name in {"refs", "reads", "cigars", "tags"}:
-            log.info(f"Skipping sorting for '{table_name}' table to improve export speed")
 
         # Create export query with ZSTD compression
         copy_query = f"""
@@ -622,9 +618,9 @@ def load_sam_file_optimized(
                 qual,
                 raw_tags,
                 query_length,
-                REGEXP_EXTRACT(raw_tags, 'NM:i:([0-9]+)', 1)::INTEGER as nm_tag,
-                REGEXP_EXTRACT(raw_tags, 'XO:i:([0-9]+)', 1)::INTEGER as xo_tag,
-                REGEXP_EXTRACT(raw_tags, 'XG:i:([0-9]+)', 1)::INTEGER as xg_tag
+                NULLIF(REGEXP_EXTRACT(raw_tags, 'NM:i:([0-9]+)', 1), '')::INTEGER as nm_tag,
+                NULLIF(REGEXP_EXTRACT(raw_tags, 'XO:i:([0-9]+)', 1), '')::INTEGER as xo_tag,
+                NULLIF(REGEXP_EXTRACT(raw_tags, 'XG:i:([0-9]+)', 1), '')::INTEGER as xg_tag
             FROM extracted_fields;
             """
             con.execute(direct_load_query)
@@ -722,14 +718,14 @@ def load_sam_file_optimized(
         max_partitions = 100
         actual_partitions = min(estimated_partitions_needed, max_partitions)
         
-        log.info(f"Data requires approximately {estimated_partitions_needed:,} partitions of 256MB each")
+        log.info(f"Data requires approximately {estimated_partitions_needed:,} partitions of 256MB each.")
         
         # If we need more than max_partitions, adjust rows_per_partition
         if estimated_partitions_needed > max_partitions:
             rows_per_partition = (total_alns + max_partitions - 1) // max_partitions
-            log.info(f"Limiting to {max_partitions} partitions with ~{rows_per_partition:,} rows per partition")
+            log.info(f"Limiting to {max_partitions} partitions with ~{rows_per_partition:,} rows per partition.")
         else:
-            log.info(f"Using {actual_partitions} partitions with ~{rows_per_partition:,} rows per partition")
+            log.info(f"Using {actual_partitions} partitions with ~{rows_per_partition:,} rows per partition.")
         
         # Assign partitions based on accumulated row counts with INTEGER partition IDs
         con.execute(
@@ -772,21 +768,8 @@ def load_sam_file_optimized(
         )
         
         # Log partition statistics
-        log.info("Partition statistics:")
-        partition_stats = con.execute("""
-            SELECT 
-                partition_id, 
-                COUNT(*) AS num_refs, 
-                SUM(aln_count) AS total_alns,
-                ROUND(SUM(aln_count) * 100.0 / (SELECT SUM(aln_count) FROM ref_partition_map), 2) AS pct_of_total
-            FROM ref_partition_map
-            GROUP BY partition_id
-            ORDER BY partition_id ASC
-            LIMIT 10
-        """).fetchall()
-        
-        for stat in partition_stats:
-            log.info(f"Partition {stat[0]}: {stat[1]} refs, {stat[2]:,} alns ({stat[3]}% of total)")
+        log.info("Calculated partition assignments for references.")
+        # Removed detailed partition statistics logging for brevity
 
         # --- Creating refs table with partition info ---
         log.info("Creating refs table using size-based partition assignments...")
@@ -873,7 +856,7 @@ def load_sam_file_optimized(
         log.info("Creating optimized tags table using bitmap fingerprinting...")
         con.execute(
             """
-            -- Create tags with optimized bloom filter-like fingerprinting
+            -- Create tags with simplified ordering
             CREATE TABLE tags AS
             WITH tag_extraction AS (
                 SELECT DISTINCT raw_tags
@@ -884,25 +867,18 @@ def load_sam_file_optimized(
                 SELECT
                     raw_tags,
                     hash(raw_tags) AS tag_hash,
-                    LENGTH(raw_tags) AS tag_length,
-                    -- Create a bitmap signature from the tag content
-                    (CASE WHEN raw_tags LIKE '%NM:i:%' THEN 1 ELSE 0 END) |
-                    (CASE WHEN raw_tags LIKE '%AS:i:%' THEN 2 ELSE 0 END) |
-                    (CASE WHEN raw_tags LIKE '%MD:Z:%' THEN 8 ELSE 0 END) |
-                    (CASE WHEN raw_tags LIKE '%XS:i:%' THEN 16 ELSE 0 END) |
-                    (CASE WHEN raw_tags LIKE '%ZA:%' THEN 128 ELSE 0 END) |
-                    (CASE WHEN raw_tags LIKE '%ZS:%' THEN 256 ELSE 0 END) AS tag_bitmap
+                    LENGTH(raw_tags) AS tag_length
+                    -- tag_bitmap calculation removed
                 FROM tag_extraction
             )
             SELECT 
-                ROW_NUMBER() OVER (ORDER BY tag_bitmap, tag_length, tag_hash) AS tag_id,
+                ROW_NUMBER() OVER (ORDER BY tag_length, tag_hash) AS tag_id, -- Order by length and hash
                 raw_tags,
                 tag_hash,
-                tag_length,
-                tag_bitmap
+                tag_length
+                -- tag_bitmap removed from select list
             FROM tag_classification
-            -- Smart ordering for alignment with memory access patterns
-            ORDER BY tag_bitmap, tag_length, tag_hash;
+            ORDER BY tag_length, tag_hash; -- Order by length and hash
 
             """
         )
@@ -936,13 +912,8 @@ def load_sam_file_optimized(
                 rf.partition_id AS alignment_partition_id,
                 c.cigar_id,
                 -- Direct lookup with fallback
-                COALESCE(tl.tag_id, 1) AS alignment_tag_id,
-                -- Skip density class calculation which was expensive and rarely used
-                CASE 
-                    WHEN (SELECT COUNT(*) FROM raw_input WHERE rname = p.rname) > 1000000 THEN 'high_density'
-                    WHEN (SELECT COUNT(*) FROM raw_input WHERE rname = p.rname) > 100000 THEN 'medium_density'  
-                    ELSE 'low_density'
-                END AS density_class
+                COALESCE(tl.tag_id, 1) AS alignment_tag_id
+                -- Removed density_class calculation
             FROM raw_input p
             JOIN reads r ON p.qname = r.qname
             JOIN refs rf ON p.rname = rf.rname
