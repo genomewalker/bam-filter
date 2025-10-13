@@ -3,9 +3,9 @@ import sys
 import gzip
 import os
 import shutil
-import logging
 import pandas as pd
 from multiprocessing import Pool
+from bam_filter import logging as bf_logging
 from functools import partial
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from os import devnull
@@ -18,10 +18,35 @@ from pathlib import Path
 import pysam
 import tempfile
 from difflib import get_close_matches
+from typing import Optional
 
-log = logging.getLogger("my_logger")
-log.setLevel(logging.INFO)
-timestr = time.strftime("%Y%m%d-%H%M%S")
+LOG_TAG = "UTILS"
+
+_VERBOSITY_NAME_TO_LEVEL = {
+    "quiet": bf_logging.LogLevel.QUIET,
+    "summary": bf_logging.LogLevel.SUMMARY,
+    "info": bf_logging.LogLevel.INFO,
+    "debug": bf_logging.LogLevel.DEBUG,
+    "trace": bf_logging.LogLevel.TRACE,
+}
+
+_VERBOSITY_COUNT_TO_LEVEL = {
+    0: bf_logging.LogLevel.SUMMARY,
+    1: bf_logging.LogLevel.INFO,
+    2: bf_logging.LogLevel.DEBUG,
+}
+
+
+def _info(message: str) -> None:
+    bf_logging.log(LOG_TAG, message)
+
+
+def _warn(message: str) -> None:
+    bf_logging.warn(f"{LOG_TAG}: {message}")
+
+
+def _error(message: str) -> None:
+    bf_logging.error(f"{LOG_TAG}: {message}")
 
 
 def handle_warning(message, category, filename, lineno, file=None, line=None):
@@ -46,18 +71,30 @@ def check_tmp_dir_exists(tmpdir):
         tmpdir = tempfile.TemporaryDirectory(dir=os.getcwd())
     else:
         if not os.path.exists(tmpdir):
-            log.error(f"Temporary directory {tmpdir} does not exist")
+            _error(f"Temporary directory {tmpdir} does not exist")
             exit(1)
         tmpdir = tempfile.TemporaryDirectory(dir=os.path.abspath(tmpdir))
         # Check if tmpdir has more than 107 characters
         if len(tmpdir.name) > 107:
-            log.error(f"Temporary directory {tmpdir.name} has more than 107 characters")
+            _error(f"Temporary directory {tmpdir.name} has more than 107 characters")
             exit(1)
     return tmpdir
 
 
 def is_debug():
-    return logging.getLogger("my_logger").getEffectiveLevel() == logging.DEBUG
+    return bf_logging.should_log(bf_logging.LogLevel.DEBUG)
+
+
+def _resolve_verbosity_level(verbose_count: int, verbose_level: Optional[str]) -> bf_logging.LogLevel:
+    if verbose_level:
+        return _VERBOSITY_NAME_TO_LEVEL.get(verbose_level, bf_logging.LogLevel.SUMMARY)
+
+    if verbose_count in _VERBOSITY_COUNT_TO_LEVEL:
+        return _VERBOSITY_COUNT_TO_LEVEL[verbose_count]
+
+    if verbose_count <= 0:
+        return bf_logging.LogLevel.SUMMARY
+    return bf_logging.LogLevel.TRACE
 
 
 # def refine_chunks(chunks, input_dict, target_weight):
@@ -207,89 +244,66 @@ def sort_keys_by_approx_weight(
     if scale == 0:
         raise ValueError("Scale cannot be zero.")
 
-    num_cores = scale * num_cores
-
-    # Calculate the total weight of all keys so we can refine the max_entries_per_chunk
-    # if the total weight is greater than the max_entries_per_chunk use the number of cores to
-    # find a better value
-
+    num_cores = int(scale * num_cores)
     total_weight = sum(input_dict.values())
-    if max_entries_per_chunk > total_weight:
-        max_entries_per_chunk = total_weight // num_cores
+    if (
+        max_entries_per_chunk is not None
+        and max_entries_per_chunk > 0
+        and max_entries_per_chunk < total_weight
+    ):
+        target_weight = max_entries_per_chunk
+    else:
+        target_weight = scale * max(input_dict.values())
 
     if mode == "weight":
-        target_weight = max(input_dict.values())
-        total_weight = sum(input_dict.values())
-        target_weight = max(
-            scale * max(input_dict.values()), max_entries_per_chunk or 0
-        )
-        num_chunks = max(num_cores, (total_weight // target_weight) + 1)
+        num_chunks = max(num_cores, int((total_weight // target_weight) + 1))
     else:  # mode == "entries"
         total_entries = len(input_dict)
-        num_chunks = max(num_cores, (total_entries // num_entries) + 1)
+        num_chunks = max(num_cores, int((total_entries // num_entries) + 1))
         num_chunks = min(num_chunks, 100)  # Cap at 100 chunks
 
-    # Sort items differently based on whether positions are available
+    # Sort items by position and weight if available, else by weight
     if ref_positions is not None:
-        # Sort by position and weight if positions are available
         sorted_items = sorted(
             ((k, v, ref_positions.get(k, float("inf"))) for k, v in input_dict.items()),
-            key=lambda x: (
-                x[2],
-                -x[1],
-            ),  # Sort by position first, then by weight descending
+            key=lambda x: (x[2], -x[1]),
         )
-        # Extract just the key and weight for further processing
         sorted_items = [(item[0], item[1]) for item in sorted_items]
     else:
-        # Sort only by weight if no positions are available
-        sorted_items = sorted(
-            input_dict.items(),
-            key=lambda x: x[1],
-            reverse=True,  # Sort by weight descending
-        )
+        sorted_items = sorted(input_dict.items(), key=lambda x: x[1], reverse=True)
 
-    # Initialize chunks
+    # Greedy bin-packing: assign each key to the chunk with the lowest current weight
     chunks = [[] for _ in range(num_chunks)]
     chunk_weights = [0] * num_chunks
+    for key, weight in sorted_items:
+        idx = chunk_weights.index(min(chunk_weights))
+        chunks[idx].append(key)
+        chunk_weights[idx] += weight
 
-    # Initial distribution - modified to work without position information
-    for i, (key, weight) in enumerate(sorted_items):
-        chunk_idx = i % num_chunks
-        chunks[chunk_idx].append(key)
-        chunk_weights[chunk_idx] += weight
-
-    # Refinement steps
-    if refinement_steps > 0:
-        # Sort chunks by weight for balancing
-        chunk_info = [(i, w, c) for i, (w, c) in enumerate(zip(chunk_weights, chunks))]
-        chunk_info.sort(key=lambda x: x[1], reverse=True)  # Sort by weight
-
-        # Try to balance the heaviest with the lightest
-        for i in range(len(chunk_info) // 2):
-            heavy_idx = i
-            light_idx = -(i + 1)
-
-            heavy_chunk = chunk_info[heavy_idx]
-            light_chunk = chunk_info[light_idx]
-
-            # Try to move the smallest item from heavy to light that improves balance
-            if heavy_chunk[1] > light_chunk[1] * 1.1:  # Only if significant imbalance
-                heavy_items = [(k, input_dict[k]) for k in chunks[heavy_chunk[0]]]
-                heavy_items.sort(key=lambda x: x[1])  # Sort by weight
-
-                for key, weight in heavy_items:
-                    if heavy_chunk[1] - weight > light_chunk[1] + weight:
-                        # Move item
-                        chunks[heavy_chunk[0]].remove(key)
-                        chunks[light_chunk[0]].append(key)
-                        chunk_weights[heavy_chunk[0]] -= weight
-                        chunk_weights[light_chunk[0]] += weight
-                        break
+    # Refinement: move heaviest item from heaviest to lightest chunk if it improves balance
+    for _ in range(refinement_steps):
+        max_idx = chunk_weights.index(max(chunk_weights))
+        min_idx = chunk_weights.index(min(chunk_weights))
+        if max_idx == min_idx:
+            break
+        # Find the heaviest item in the heaviest chunk
+        if not chunks[max_idx]:
+            break
+        heaviest_key = max(chunks[max_idx], key=lambda k: input_dict[k])
+        heaviest_weight = input_dict[heaviest_key]
+        # Only move if it improves balance
+        if (
+            chunk_weights[max_idx] - heaviest_weight
+            < chunk_weights[min_idx] + heaviest_weight
+        ):
+            break
+        chunks[max_idx].remove(heaviest_key)
+        chunks[min_idx].append(heaviest_key)
+        chunk_weights[max_idx] -= heaviest_weight
+        chunk_weights[min_idx] += heaviest_weight
 
     if verbose:
         print_chunk_stats(chunks, input_dict)
-        # Only print position stats if positions are available
         if ref_positions is not None:
             print("\nBAM position stats:")
             for i, chunk in enumerate(chunks):
@@ -549,8 +563,8 @@ def check_lca_ranks(val, parser, var):
 
 defaults = {
     "min_read_length": 30,
-    "max_read_length": np.inf,
-    "min_read_count": 3,
+    "max_read_length": 10000,  # ✓ SYNCED: concrete value instead of 0x7fffffff
+    "min_read_count": 1,  # ✓ SYNCED: changed from 3 to 1
     "min_expected_breadth_ratio": 0,
     "min_norm_entropy": 0,
     "min_norm_gini": 1.0,
@@ -574,16 +588,29 @@ defaults = {
     "read_length_freqs": None,
     "read_hits_count": None,
     "tmp_dir": None,
-    "reassign_iters": 25,
-    "reassign_scale": 0.9,
-    "reassign_match_reward": 1,
-    "reassign_mismatch_penalty": -2,
-    "reassign_gap_open_penalty": 5,
-    "reassign_gap_extension_penalty": 2,
+    "max_em_iterations": 50,
+    "em_tolerance": 1e-6,
+    "min_probability": 1e-6,
+    "prob_fraction": 0,
+    "prior_weight": 0.01,
+    "use_squarem_acceleration": True,
+    "enable_globalization": True,
+    "squarem_start_iter": 2,
+    "backtrack_factor": 0.5,
+    "max_backtrack_steps": 5,
+    "steplength_scheme": 3,
+    "calculate_pmd": True,
     "rank_lca": "species",
     "lca_summary": None,
-    "squarem_min_improvement": 1e-4,
-    "squarem_max_step_factor": 4.0,
+    "reference_stats_tsv": None,
+    "information_threshold": -999.0,  # -999.0 = disabled (no filtering)
+    # Graph construction parameters (cluster-aware filtering always enabled)
+    "graph_min_edge_weight": 0,  # Minimum edge weight (shared reads) to keep in graph (0=auto, -1=no filtering)
+    # Leiden clustering parameters
+    "clustering_algorithm": "leiden",  # "leiden" | "union-find" (simple connected components)
+    "leiden_resolution": 1.0,  # Resolution parameter for community detection
+    "leiden_max_iterations": 10,  # Maximum iterations for convergence
+    "leiden_parallel": False,  # Enable parallel move phase
 }
 
 help_msg = {
@@ -621,19 +648,13 @@ help_msg = {
     "chunk_size": "Chunk size for parallel processing",
     "tmp_dir": "Temporary directory",
     "help": "Help message",
-    "debug": "Print debug messages",
+    "verbose": "Increase logging verbosity (-v for info, -vv for debug, -vvv for trace) or use --verbose LEVEL",
     "reference_lengths": "File with references lengths",
     "low_memory": "Activate the low memory mode",
     "reassign": "Run an EM algorithm to reassign reads to references",
     "reassign_method": "Method for the EM algorithm",
     "reassign_iters": "Number of iterations for the EM algorithm",
-    "reassign_scale": "Scale to select the best weithing alignments",
-    "reassign_match_reward": "Match reward for the alignment score ",
-    "reassign_mismatch_penalty": "Mismatch penalty for the alignment score ",
-    "reassign_gap_open_penalty": "Gap open penalty for alignment score computation",
-    "reassign_gap_extension_penalty": "Gap extension penalty for the alignment score",
-    "reassign_e_step_wl": "Scores are weighted by the reference length during the E-step",
-    "lca": "Calculate LCA for each read and estimate abundances",
+    "rank_lca": "Calculate LCA for each read and estimate abundances",
     "names": "Names dmp file from taxonomy",
     "nodes": "Nodes dmp file from taxonomy",
     "acc2taxid": "acc2taxid file from taxonomy",
@@ -643,9 +664,31 @@ help_msg = {
     "lca_stats": "A TSV file from the filter subcommand",
     "custom": "Use custom taxdump files",
     "version": "Print program version",
-    "max_memory": "Maximum memory to use for the EM algorithm",
-    "squarem_min_improvement": "Minimum relative improvement for SQUAREM convergence",
-    "squarem_max_step_factor": "Maximum step size multiplier for SQUAREM stability",
+    # ✓ SYNCED: Updated EM algorithm help messages
+    "max_em_iterations": "Maximum number of EM iterations",
+    "em_tolerance": "EM convergence tolerance (||F(θ)-θ|| <= ε)",
+    "min_probability": "Minimum probability threshold for keeping alignments",
+    "prob_fraction": "Relative probability threshold for post-EM filtering",
+    "prior_weight": "Prior weight (regularization) for EM algorithm",
+    "use_squarem_acceleration": "Enable SQUAREM acceleration for EM algorithm",
+    # ✓ NEW: PAPER-SPECIFIC SQUAREM help messages
+    "enable_globalization": "Enable gSQUAREM with likelihood monotonicity (backtracking)",
+    "squarem_start_iter": "EM iteration to start SQUAREM acceleration",
+    "backtrack_factor": "Factor for backtracking α toward -1 (0.1-0.9)",
+    "max_backtrack_steps": "Maximum number of backtracking iterations",
+    "steplength_scheme": "SQUAREM steplength scheme: 1=S1, 2=S2, 3=S3 (recommended)",
+    "output_bam": "Output BAM file with reassigned reads",
+    "disable_pmd": "Disable PMD (Post-Mortem Damage) calculation (PMD enabled by default)",
+    "single_stranded": "Single-stranded library type (default: false)",
+    "reference_stats_tsv": "Save per-reference statistics (TSV). Includes clustering/community columns when clustering is enabled.",
+    "information_threshold": "Informativeness score threshold for filtering references. Default (no flag)=disabled (calculate scores only, no filtering). When set: keeps references with score ≥ threshold. Examples: 0.0=informative only (S≥0), 0.5=moderate, 1.0=strict, -0.1=lenient",
+    # Graph construction parameters (cluster-aware filtering always enabled)
+    "graph_min_edge_weight": "Minimum edge weight (shared reads between references) to keep edges in graph. 0=auto (default), -1=no filtering, >0=use value. Lower values keep more edges (more connected), higher values prune weak connections (fewer components).",
+    # Leiden clustering help messages
+    "clustering_algorithm": "Clustering algorithm for community detection: 'leiden' (high-quality modularity optimization, default) or 'union-find' (fast, simple connected components)",
+    "leiden_resolution": "Resolution parameter for Leiden clustering (0.5-2.0). Lower=larger communities (0.5=family level), 1.0=default (species level), higher=smaller communities (2.0=strain level)",
+    "leiden_max_iterations": "Maximum iterations for Leiden clustering convergence (3-20, default=10)",
+    "leiden_parallel": "Enable parallel processing in Leiden move phase for speed (experimental)",
 }
 
 from difflib import get_close_matches, SequenceMatcher
@@ -751,9 +794,20 @@ def get_arguments(argv=None):
     # Create the base parent parser for common arguments
     parent_parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
 
-    # Add debug to parent parser
+    # Add verbosity controls to parent parser
     parent_parser.add_argument(
-        "--debug", dest="debug", action="store_true", help=help_msg["debug"]
+        "-v",
+        dest="verbose_count",
+        action="count",
+        default=0,
+        help=help_msg["verbose"],
+    )
+    parent_parser.add_argument(
+        "--verbose",
+        dest="verbose_level",
+        choices=tuple(_VERBOSITY_NAME_TO_LEVEL.keys()),
+        metavar="LEVEL",
+        help="Explicit verbosity level (quiet, summary, info, debug, trace)",
     )
 
     # Create the main parser
@@ -800,7 +854,7 @@ def get_arguments(argv=None):
         type=lambda x: is_valid_file(parser, x, "reference_lengths"),
         metavar="FILE",
         default=defaults["reference_lengths"],
-        dest="reference_lengths",
+        dest="reference_lengths_tsv",
         help=help_msg["reference_lengths"],
     )
     optional.add_argument(
@@ -869,49 +923,85 @@ def get_arguments(argv=None):
     # lca_args = parser.add_argument_group("lca arguments")
     misc_filter_args = parser_filter.add_argument_group("miscellaneous arguments")
     out_filter_args = parser_filter.add_argument_group("output arguments")
-    # parser.add_argument(
-    #     "--bam",
-    #     required=True,
-    #     dest="bam",
-    #     type=lambda x: is_valid_file(parser, x, "bam"),
-    #     help=help_msg["bam"],
-    # )
-    # parser.add_argument(
-    #     "-t",
-    #     "--threads",
-    #     type=lambda x: int(
-    #         check_values(x, minval=1, maxval=1000, parser=parser, var="--threads")
-    #     ),
-    #     dest="threads",
-    #     metavar="INT",
-    #     default=1,
-    #     help=help_msg["threads"],
-    # )
 
     reassign_optional_args.add_argument(
         "-i",
-        "--iters",
+        "--max-em-iterations",  # ✓ SYNCED: was "--iters"
         type=lambda x: int(
             check_values(
-                x, minval=0, maxval=100000, parser=parser, var="--reassign-n-iters"
+                x, minval=1, maxval=1000, parser=parser, var="--max-em-iterations"
             )
         ),
         metavar="INT",
-        default=defaults["reassign_iters"],
-        dest="reassign_iters",
-        help=help_msg["reassign_iters"],
+        default=defaults["max_em_iterations"],  # ✓ SYNCED: new parameter name
+        dest="max_em_iterations",  # ✓ SYNCED: new dest name
+        help=help_msg["max_em_iterations"],
     )
+
     reassign_optional_args.add_argument(
-        "-s",
-        "--scale",
+        "--em-tolerance",
         type=lambda x: float(
-            check_values(x, minval=0, maxval=1, parser=parser, var="--scale")
+            check_values(
+                x, minval=1e-12, maxval=1.0, parser=parser, var="--em-tolerance"
+            )
         ),
         metavar="FLOAT",
-        default=defaults["reassign_scale"],
-        dest="reassign_scale",
-        help=help_msg["reassign_scale"],
+        default=defaults["em_tolerance"],
+        dest="em_tolerance",
+        help=help_msg["em_tolerance"],
     )
+
+    reassign_optional_args.add_argument(
+        "--min-probability",  # ✓ SYNCED: was "--min-prob"
+        type=lambda x: float(
+            check_values(
+                x, minval=1e-12, maxval=1.0, parser=parser, var="--min-probability"
+            )
+        ),
+        default=defaults["min_probability"],  # ✓ SYNCED: new parameter name
+        metavar="FLOAT",
+        dest="min_probability",  # ✓ SYNCED: new dest name
+        help=help_msg["min_probability"],
+    )
+
+    reassign_optional_args.add_argument(
+        "--prob-fraction",
+        type=lambda x: float(
+            check_values(x, minval=0, maxval=1, parser=parser, var="--prob-fraction")
+        ),
+        default=defaults["prob_fraction"],
+        metavar="FLOAT",
+        dest="prob_fraction",
+        help=help_msg["prob_fraction"],
+    )
+
+    reassign_optional_args.add_argument(
+        "--prior-weight",
+        type=lambda x: float(
+            check_values(
+                x, minval=1e-12, maxval=1.0, parser=parser, var="--prior-weight"
+            )
+        ),
+        metavar="FLOAT",
+        default=defaults["prior_weight"],
+        dest="prior_weight",
+        help=help_msg["prior_weight"],
+    )
+
+    reassign_optional_args.add_argument(
+        "--init-prior-strength",
+        type=lambda x: float(
+            check_values(
+                x, minval=1e-12, maxval=10.0, parser=parser, var="--init-prior-strength"
+            )
+        ),
+        metavar="FLOAT",
+        default=0.1,
+        dest="init_prior_strength",
+        help="Dirichlet prior strength for EM initialization (alpha parameter)",
+    )
+
+    # ✓ SYNCED: Read Filtering Parameters
     reassign_optional_args.add_argument(
         "-A",
         "--min-read-ani",
@@ -923,6 +1013,7 @@ def get_arguments(argv=None):
         dest="min_read_ani",
         help=help_msg["min_read_ani"],
     )
+
     reassign_optional_args.add_argument(
         "-l",
         "--min-read-length",
@@ -936,19 +1027,25 @@ def get_arguments(argv=None):
         dest="min_read_length",
         help=help_msg["min_read_length"],
     )
+
     reassign_optional_args.add_argument(
         "-L",
         "--max-read-length",
         type=lambda x: int(
             check_values(
-                x, minval=1, maxval=np.inf, parser=parser, var="--max-read-length"
+                x,
+                minval=1,
+                maxval=100000,
+                parser=parser,
+                var="--max-read-length",  # ✓ SYNCED: concrete max
             )
         ),
-        default=defaults["max_read_length"],
+        default=defaults["max_read_length"],  # ✓ SYNCED: now 10000
         metavar="INT",
         dest="max_read_length",
         help=help_msg["max_read_length"],
     )
+
     reassign_optional_args.add_argument(
         "-n",
         "--min-read-count",
@@ -957,148 +1054,185 @@ def get_arguments(argv=None):
                 x, minval=1, maxval=np.inf, parser=parser, var="--min-read-count"
             )
         ),
-        default=defaults["min_read_count"],
+        default=defaults["min_read_count"],  # ✓ SYNCED: now 1
         metavar="INT",
         dest="min_read_count",
         help=help_msg["min_read_count"],
     )
+
     reassign_optional_args.add_argument(
-        "--match-reward",
-        type=lambda x: int(
-            check_values(
-                x, minval=0, maxval=np.inf, parser=parser, var="--match-reward"
-            )
-        ),
-        default=defaults["reassign_match_reward"],
-        metavar="INT",
-        dest="match_reward",
-        help=help_msg["reassign_match_reward"],
-    )
-    reassign_optional_args.add_argument(
-        "--mismatch-penalty",
-        type=lambda x: int(
-            check_values(
-                x, minval=-np.inf, maxval=0, parser=parser, var="--mismatch-penalty"
-            )
-        ),
-        default=defaults["reassign_mismatch_penalty"],
-        metavar="INT",
-        dest="mismatch_penalty",
-        help=help_msg["reassign_mismatch_penalty"],
-    )
-    reassign_optional_args.add_argument(
-        "--gap-open-penalty",
-        type=lambda x: int(
-            check_values(
-                x, minval=0, maxval=np.inf, parser=parser, var="--gap-open-penalty"
-            )
-        ),
-        default=defaults["reassign_gap_open_penalty"],
-        metavar="INT",
-        dest="gap_open_penalty",
-        help=help_msg["reassign_gap_open_penalty"],
-    )
-    reassign_optional_args.add_argument(
-        "--gap-extension-penalty",
-        type=lambda x: int(
-            check_values(
-                x, minval=0, maxval=np.inf, parser=parser, var="--gap-extension-penalty"
-            )
-        ),
-        default=defaults["reassign_gap_extension_penalty"],
-        metavar="INT",
-        dest="gap_extension_penalty",
-        help=help_msg["reassign_gap_extension_penalty"],
-    )
-    reassign_optional_args.add_argument(
-        "--squarem-min-improvement",
-        type=lambda x: float(
-            check_values(
-                x,
-                minval=1e-10,
-                maxval=1.0,
-                parser=parser,
-                var="--squarem-min-improvement",
-            )
-        ),
-        default=defaults["squarem_min_improvement"],
-        metavar="FLOAT",
-        dest="squarem_min_improvement",
-        help=help_msg["squarem_min_improvement"],
+        "--disable-squarem",
+        dest="use_squarem_acceleration",
+        action="store_false",
+        default=True,  # Enabled by default
+        help="Disable SQUAREM acceleration (use standard EM instead)",
     )
 
     reassign_optional_args.add_argument(
-        "--squarem-max-step-factor",
-        type=lambda x: float(
+        "--disable-globalization",
+        dest="enable_globalization",
+        action="store_false",
+        default=True,  # Enabled by default
+        help="Disable gSQUAREM globalization (use non-monotone SQUAREM)",
+    )
+
+    reassign_optional_args.add_argument(
+        "--squarem-start-iter",  # ✓ NEW: when to start SQUAREM
+        type=lambda x: int(
             check_values(
-                x,
-                minval=1.0,
-                maxval=10.0,
-                parser=parser,
-                var="--squarem-max-step-factor",
+                x, minval=1, maxval=50, parser=parser, var="--squarem-start-iter"
             )
         ),
-        default=defaults["squarem_max_step_factor"],
-        metavar="FLOAT",
-        dest="squarem_max_step_factor",
-        help=help_msg["squarem_max_step_factor"],
+        default=defaults["squarem_start_iter"],
+        metavar="INT",
+        dest="squarem_start_iter",
+        help=help_msg["squarem_start_iter"],
     )
+
     reassign_optional_args.add_argument(
-        "--e-step-wl",
-        dest="e_step_wl",
-        action="store_true",
-        help=help_msg["reassign_e_step_wl"],
+        "--backtrack-factor",  # ✓ NEW: backtracking control
+        type=lambda x: float(
+            check_values(
+                x, minval=0.1, maxval=0.9, parser=parser, var="--backtrack-factor"
+            )
+        ),
+        default=defaults["backtrack_factor"],
+        metavar="FLOAT",
+        dest="backtrack_factor",
+        help=help_msg["backtrack_factor"],
     )
+
+    reassign_optional_args.add_argument(
+        "--max-backtrack-steps",  # ✓ NEW: backtracking limit
+        type=lambda x: int(
+            check_values(
+                x, minval=1, maxval=20, parser=parser, var="--max-backtrack-steps"
+            )
+        ),
+        default=defaults["max_backtrack_steps"],
+        metavar="INT",
+        dest="max_backtrack_steps",
+        help=help_msg["max_backtrack_steps"],
+    )
+
+    reassign_optional_args.add_argument(
+        "--steplength-scheme",  # ✓ NEW: S1/S2/S3 selection
+        type=lambda x: int(
+            check_values(
+                x, minval=1, maxval=3, parser=parser, var="--steplength-scheme"
+            )
+        ),
+        default=defaults["steplength_scheme"],
+        metavar="INT",
+        dest="steplength_scheme",
+        help=help_msg["steplength_scheme"],
+    )
+
+    # ✓ SYNCED: Output Parameters
     reassign_optional_args.add_argument(
         "-o",
-        "--out-bam",
-        dest="bam_reassigned",
+        "--output-bam",  # ✓ SYNCED: was "--out-bam"
+        dest="output_bam",  # ✓ SYNCED: new dest name
         default=defaults["bam_reassigned"],
         metavar="FILE",
         type=str,
         nargs="?",
         const="",
-        help=help_msg["bam_reassigned"],
+        help=help_msg["output_bam"],
     )
     reassign_optional_args.add_argument(
-        "-m",
-        "--sort-memory",
-        type=lambda x: check_suffix(x, parser=parser, var="--sort-memory"),
-        default=defaults["sort_memory"],
-        metavar="STR",
-        dest="sort_memory",
-        help=help_msg["sort_memory"],
-    )
-    reassign_optional_args.add_argument(
-        "-M",
-        "--max-memory",
-        type=lambda x: check_suffix(x, parser=parser, var="--max-memory"),
-        default=None,
-        metavar="INT",
-        dest="max_memory",
-        help=help_msg["max_memory"],
-    )
-    reassign_optional_args.add_argument(
-        "-N",
-        "--sort-by-name",
-        dest="sort_by_name",
+        "--disable-pmd",
+        dest="disable_pmd",
         action="store_true",
-        help=help_msg["sort_by_name"],
+        default=False,  # PMD enabled by default
+        help=help_msg["disable_pmd"],
     )
     reassign_optional_args.add_argument(
-        "--tmp-dir",
+        "-S",
+        "--reference-stats",
+        dest="reference_stats_tsv",
+        default=defaults["reference_stats_tsv"],
+        metavar="FILE",
         type=str,
-        default=defaults["tmp_dir"],
-        metavar="DIR",
-        dest="tmp_dir",
-        help=help_msg["tmp_dir"],
+        nargs="?",
+        const="",
+        help=help_msg["reference_stats_tsv"],
     )
-    misc_reassign_args.add_argument(
-        "--disable-sort",
-        dest="disable_sort",
+    reassign_optional_args.add_argument(
+        "--information-threshold",
+        dest="information_threshold",
+        type=float,
+        default=defaults["information_threshold"],
+        metavar="FLOAT",
+        help=help_msg["information_threshold"],
+    )
+
+    # Graph construction arguments (cluster-aware filtering always enabled)
+    reassign_optional_args.add_argument(
+        "--graph-min-edge-weight",
+        dest="graph_min_edge_weight",
+        type=lambda x: (
+            int(x)
+            if int(x) >= -1
+            else parser.error(
+                f"argument --graph-min-edge-weight: Invalid value {x}. Must be -1 (no filtering), 0 (auto), or positive integer."
+            )
+        ),
+        default=defaults["graph_min_edge_weight"],
+        metavar="INT",
+        help=help_msg["graph_min_edge_weight"],
+    )
+
+    reassign_optional_args.add_argument(
+        "--graph-auto-tol",
+        dest="graph_auto_tol",
+        type=lambda x: float(
+            check_values(
+                x, minval=0.0, maxval=1.0, parser=parser, var="--graph-auto-tol"
+            )
+        ),
+        default=0.10,
+        metavar="FLOAT",
+        help="Tolerance fraction for broken-stick auto threshold (0.0-1.0). Default: 0.10",
+    )
+
+    # Clustering flags
+    reassign_optional_args.add_argument(
+        "--clustering",
+        dest="clustering",
         action="store_true",
-        help=help_msg["disable_sort"],
+        default=False,
+        help="Enable clustering / community detection (requires --reference-stats)",
     )
+    # Keep Leiden tuning parameters (resolution / max iterations) but do not expose
+    # clustering algorithm selection or parallel flag via CLI to simplify the interface.
+    reassign_optional_args.add_argument(
+        "--leiden-resolution",
+        dest="leiden_resolution",
+        type=float,
+        default=defaults["leiden_resolution"],
+        metavar="FLOAT",
+        help=help_msg["leiden_resolution"],
+    )
+    reassign_optional_args.add_argument(
+        "--leiden-max-iterations",
+        dest="leiden_max_iterations",
+        type=int,
+        default=defaults["leiden_max_iterations"],
+        metavar="INT",
+        help=help_msg["leiden_max_iterations"],
+    )
+
+    reassign_optional_args.add_argument(
+        "--graph-export",
+        dest="graph_export",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Export graph to GraphML format for visualization (Cytoscape, igraph, etc.). "
+             "Includes node attributes (reference name, community, CC, read counts) and edge weights.",
+    )
+
     misc_filter_args.add_argument(
         "--reference-trim-length",
         type=lambda x: int(
@@ -1315,19 +1449,9 @@ def get_arguments(argv=None):
         metavar="STR",
         help=help_msg["scale"],
     )
-    # reference_lengths
-    # filter_optional_args.add_argument(
-    #     "-r",
-    #     "--reference-lengths",
-    #     type=lambda x: is_valid_file(parser, x, "reference_lengths"),
-    #     metavar="FILE",
-    #     default=defaults["reference_lengths"],
-    #     dest="reference_lengths",
-    #     help=help_msg["reference_lengths"],
-    # )
     filter_required_args.add_argument(
         "--stats",
-        dest="stats",
+        dest="output",
         default=defaults["stats"],
         type=str,
         metavar="FILE",
@@ -1338,7 +1462,7 @@ def get_arguments(argv=None):
     )
     out_filter_args.add_argument(
         "--stats-filtered",
-        dest="stats_filtered",
+        dest="filtered_output",
         default=defaults["stats_filtered"],
         type=str,
         metavar="FILE",
@@ -1348,53 +1472,13 @@ def get_arguments(argv=None):
     )
     out_filter_args.add_argument(
         "--bam-filtered",
-        dest="bam_filtered",
+        dest="filtered_bam",
         default=defaults["bam_filtered"],
         metavar="FILE",
         type=str,
         nargs="?",
         const="",
         help=help_msg["bam_filtered"],
-    )
-    out_filter_args.add_argument(
-        "--read-length-freqs",
-        dest="read_length_freqs",
-        default=defaults["read_length_freqs"],
-        metavar="FILE",
-        type=str,
-        nargs="?",
-        const="",
-        help=help_msg["read_length_freqs"],
-    )
-    out_filter_args.add_argument(
-        "--read-hits-count",
-        dest="read_hits_count",
-        default=defaults["read_hits_count"],
-        metavar="FILE",
-        type=str,
-        nargs="?",
-        const="",
-        help=help_msg["read_hits_count"],
-    )
-    out_filter_args.add_argument(
-        "--knee-plot",
-        dest="knee_plot",
-        default=defaults["knee_plot"],
-        metavar="FILE",
-        type=str,
-        nargs="?",
-        const="",
-        help=help_msg["knee_plot"],
-    )
-    out_filter_args.add_argument(
-        "--coverage-plots",
-        dest="coverage_plots",
-        metavar="FILE",
-        default=defaults["coverage_plots"],
-        type=str,
-        nargs="?",
-        const="",
-        help=help_msg["coverage_plots"],
     )
     # parser.add_argument(
     #     "--chunk-size",
@@ -1406,20 +1490,6 @@ def get_arguments(argv=None):
     #     dest="chunk_size",
     #     help=help_msg["chunk_size"],
     # )
-    misc_filter_args.add_argument(
-        "--tmp-dir",
-        type=str,
-        default=defaults["tmp_dir"],
-        metavar="DIR",
-        dest="tmp_dir",
-        help=help_msg["tmp_dir"],
-    )
-    misc_filter_args.add_argument(
-        "--low-memory",
-        dest="low_memory",
-        action="store_true",
-        help=help_msg["low_memory"],
-    )
 
     lca_optional_args.add_argument(
         "--names",
@@ -1503,8 +1573,33 @@ def get_arguments(argv=None):
 
     args = parser.parse_args(argv)
 
-    if args.debug:
-        logging.getLogger("my_logger").setLevel(logging.DEBUG)
+    verbosity_level = _resolve_verbosity_level(
+        getattr(args, "verbose_count", 0), getattr(args, "verbose_level", None)
+    )
+    args.verbosity = verbosity_level
+    args.verbose = verbosity_level >= bf_logging.LogLevel.INFO
+    args.debug = verbosity_level >= bf_logging.LogLevel.DEBUG
+    bf_logging.set_level(verbosity_level)
+
+    # Enforce that clustering requires graph-analysis TSV output
+    if getattr(args, "clustering", False) and not getattr(
+        args, "reference_stats_tsv", None
+    ):
+        parser.error("--clustering requires --reference-stats to be set")
+
+    # Print chosen graph edge-weight mode early so users see whether auto/none/value was selected
+    try:
+        gm = getattr(args, "graph_min_edge_weight", None)
+        if gm is not None and args.verbosity >= bf_logging.LogLevel.INFO:
+            if gm == -1:
+                bf_logging.log("GRAPH", "Mode: none (no filtering). CLI value=%s", gm)
+            elif gm == 0:
+                bf_logging.log("GRAPH", "Mode: auto (will choose threshold later). CLI value=%s", gm)
+            else:
+                bf_logging.log("GRAPH", "Mode: explicit value. CLI value=%s", gm)
+    except Exception:
+        # Fail silently if args structure unexpected
+        pass
 
     return args
 
@@ -1551,8 +1646,7 @@ def initializer(init_data):
 
 def clean_up(keep, temp_dir):
     if keep:
-        logging.info("Cleaning up temporary files")
-        logging.shutdown()
+        _info("Cleaning up temporary files")
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 
@@ -1700,7 +1794,7 @@ def create_output_files(
             "lca_summary": lca_summary,
         }
     else:
-        log.error("Mode not recognized")
+        _error("Mode not recognized")
         exit(1)
     out_files["tmp_dir"] = tmp_dir
     out_files["sorted_bam"] = f"{tmp_dir}/{prefix}.bf-sorted.bam"
@@ -1708,7 +1802,7 @@ def create_output_files(
     # check that read_length_freqs is a json file
     if read_length_freqs is not None:
         if not read_length_freqs.endswith(".json"):
-            log.error("--read-length-freqs must be a JSON file")
+            _error("--read-length-freqs must be a JSON file")
             exit(1)
     return out_files
 

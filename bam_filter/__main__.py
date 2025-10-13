@@ -12,8 +12,6 @@ You should have received a copy of the GNU General Public License along with thi
 see <https://www.gnu.org/licenses/>.
 """
 
-import logging
-
 from bam_filter.reassign import reassign
 from bam_filter.filter import filter_references
 from bam_filter.lca import do_lca
@@ -21,22 +19,13 @@ from bam_filter.utils import (
     get_arguments,
 )
 from bam_filter import __version__
-
-log = logging.getLogger("my_logger")
+from bam_filter import logging as bf_logging
 
 
 def main():
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(levelname)s ::: %(asctime)s ::: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-    logging.getLogger("urllib3").setLevel(logging.WARNING)
     args = get_arguments()
-    logging.getLogger("my_logger").setLevel(
-        logging.DEBUG if args.debug else logging.INFO
-    )
-    log.info(f"Using filterBAM version: {__version__}")
+    bf_logging.set_level(getattr(args, "verbosity", bf_logging.get_level()))
+    bf_logging.log("CLI", f"Using filterBAM version: {__version__}")
     if args.action == "reassign":
         reassign(args)
     elif args.action == "filter":

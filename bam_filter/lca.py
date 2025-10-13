@@ -29,10 +29,39 @@ debug = is_debug()
 
 
 def calculate_path_likelihood(path, graph):
-    likelihood = 1.0
+    """
+    Bayesian log-probability path likelihood:
+    - Transition probabilities are normalized outgoing edge weights.
+    - Prior is based on reference coverage if available, else uniform.
+    - Returns log-posterior (higher is better).
+    """
+    import math
+    log_likelihood = 0.0
+    # Compute prior: use coverage/abundance if available, else uniform
+    # Assume prior is on the last node (reference) in the path
+    prior = 1.0
+    last_node = path[-1]
+    # Try to use coverage/abundance as prior if present
+    prior_val = None
+    if hasattr(graph, 'nodes') and 'coverage' in graph.nodes[last_node]:
+        prior_val = graph.nodes[last_node]['coverage']
+    elif hasattr(graph, 'nodes') and 'abundance' in graph.nodes[last_node]:
+        prior_val = graph.nodes[last_node]['abundance']
+    if prior_val is not None and prior_val > 0:
+        prior = prior_val
+    else:
+        # Uniform prior (will be normalized later if needed)
+        prior = 1.0
+    log_likelihood += math.log(prior if prior > 0 else 1e-10)
+    # Now sum log transition probabilities along the path
     for u, v in zip(path[:-1], path[1:]):
-        likelihood *= graph[u][v]["cum_weight"]
-    return likelihood
+        # Normalize outgoing edge weights from u
+        out_edges = list(graph.out_edges(u, data=True))
+        total = sum(e[2].get("cum_weight", 0) for e in out_edges)
+        w = graph[u][v].get("cum_weight", 1e-10)
+        prob = w / total if total > 0 else 1e-10
+        log_likelihood += math.log(prob if prob > 0 else 1e-10)
+    return log_likelihood
 
 
 def find_most_likely_continuation_worker(partial_path_end, full_graph, index):
@@ -67,12 +96,18 @@ def find_most_likely_continuation_worker(partial_path_end, full_graph, index):
             },
         )
 
-    for continuation in descendants:
-        full_path = list(
-            nx.all_simple_paths(
-                full_graph, source=partial_path_end, target=continuation
-            )
-        )[0]
+    # Only consider tips (leaves) as valid continuations
+    tips = [n for n in descendants if full_graph.out_degree(n) == 0]
+    if not tips:
+        # fallback: if no tips, use all descendants (should be rare)
+        tips = descendants
+
+    for continuation in tips:
+        # There may be multiple simple paths, take the shortest
+        try:
+            full_path = nx.shortest_path(full_graph, source=partial_path_end, target=continuation)
+        except nx.NetworkXNoPath:
+            continue
         likelihood = calculate_path_likelihood(full_path, full_graph)
         results.append((full_path, likelihood))
 
@@ -179,7 +214,7 @@ def create_lca_df(tax_path, weight):
 
 def get_ref2read(params, dat, threads=1):
     bam, references = params
-    samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
+    samfile = pysam.AlignmentFile(bam, "rb", threads=threads, index_filename=None, require_index=None)
     results = defaultdict(set)
     for reference in references:
         if reference not in dat:
@@ -331,23 +366,27 @@ def do_lca(args):
         create_empty_output_files(out_files)
         sys.exit(1)
 
-    samfile = pysam.AlignmentFile(bam, "rb", threads=threads)
+    samfile = pysam.AlignmentFile(bam, "rb", threads=threads, index_filename=None, require_index=None)
     references = samfile.references
     references_m = {
         chrom.contig: chrom.mapped for chrom in samfile.get_index_statistics()
     }
 
     if reference_lengths is not None:
-        ref_lengths = pd.read_csv(
+        ref_lengths_df = pd.read_csv(
             reference_lengths, sep="\t", index_col=False, names=["reference", "length"]
         )
-        ref_lengths = dict(zip(ref_lengths["reference"], ref_lengths["length"]))
-        # check if the dataframe contains all the References in the BAM file
-        if not set(references).issubset(set(ref_lengths.keys())):
-            logging.error(
-                "The BAM file contains references not found in the reference lengths file"
+        ref_lengths = dict(zip(ref_lengths_df["reference"], ref_lengths_df["length"]))
+        missing_refs = set(references) - set(ref_lengths.keys())
+        if missing_refs:
+            # Use BAM file lengths for missing references
+            for ref in missing_refs:
+                ref_lengths[ref] = samfile.get_reference_length(ref)
+            missing_refs_list = list(missing_refs)
+            logging.warning(
+                f"{len(missing_refs)} references not found in the reference lengths file. "
+                f"Using BAM file lengths for these references. Example accessions: {missing_refs_list[:5]}"
             )
-            sys.exit(1)
     else:
         ref_lengths = {x: samfile.get_reference_length(x) for x in references}
 
@@ -597,8 +636,28 @@ def do_lca(args):
             if v["reference"] is None:
                 res.iloc[-1, res.columns.get_loc("norm_weight")] = df1_d[k]
             else:
+                # remove S__ from the reference name
+                ref = v["reference"].replace("S__", "")
+                # Use clade-specific median length if ref not found
+                if ref in ref_lengths:
+                    length = ref_lengths[ref]
+                else:
+                    # Find all tips (leaves) in the clade rooted at k that are present in ref_lengths
+                    import numpy as np
+                    # G is the original taxonomic graph (not reversed)
+                    # Find descendants of k in G
+                    clade_descendants = nx.descendants(G, k)
+                    # Tips in clade: out_degree == 0 and present in ref_lengths
+                    clade_tips = [n for n in clade_descendants if G.out_degree(n) == 0 and n in ref_lengths]
+                    if len(clade_tips) == 0:
+                        # fallback to global median
+                        length = int(np.median(list(ref_lengths.values())))
+                        # log.warning(f"Reference '{ref}' not found in ref_lengths, and no clade tips found for '{k}', using global median length {length}.")
+                    else:
+                        length = int(np.median([ref_lengths[n] for n in clade_tips]))
+                        # log.warning(f"Reference '{ref}' not found in ref_lengths, using clade-specific median length {length} for clade rooted at '{k}'.")
                 res.iloc[-1, res.columns.get_loc("norm_weight")] = round(
-                    scale * df1_d[k] / ref_lengths[v["reference"]]
+                    scale * df1_d[k] / length
                 )
             lca_dfs.append(res)
         log.info("Adding LCA nodes to the taxonomic graph")
