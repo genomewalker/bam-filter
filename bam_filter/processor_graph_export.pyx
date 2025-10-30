@@ -33,11 +33,7 @@ from bam_filter.processor_igraph cimport (
 cdef extern from "bam_filter/c_logging.h":
     void bf_nogil_logf_notime(const char* tag, const char* fmt, ...) nogil
 
-cdef extern from "htslib/sam.h":
-    ctypedef struct sam_hdr_t:
-        int32_t n_targets
-    const char* sam_hdr_tid2name(sam_hdr_t* header, int tid) nogil
-    int64_t sam_hdr_tid2len(sam_hdr_t* header, int tid) nogil
+from bam_filter.processor cimport sam_hdr_t, sam_hdr_tid2name, sam_hdr_tid2len
 
 cdef extern from "igraph.h":
     ctypedef bint igraph_bool_t
@@ -110,7 +106,8 @@ cdef int export_graph_graphml(
     ReferencePattern* pattern_data,
     ReferenceStats* ref_stats,
     const char* output_path,
-    bint verbose
+    bint verbose,
+    bint export_only_used_stats
 ) noexcept nogil:
     """Export graph to GraphML format with comprehensive node and edge attributes.
 
@@ -152,9 +149,17 @@ cdef int export_graph_graphml(
     cdef uint32_t component_id, community_id
     cdef float community_cc, individual_cc, cc_threshold
     cdef char keep_flag
+    cdef float anomaly_score
+    cdef float betweenness
+    cdef uint32_t node_degree
+    cdef uint32_t connected_neighbors
+    cdef double avg_co_mappings
+    cdef uint32_t max_co_map
+    cdef double neighbor_mm_rate
     cdef uint32_t total_reads, unique_reads, repeat_reads, shared_reads
     cdef uint64_t total_alignments
-    cdef double multimap_pct, edge_weight
+    cdef double multimap_pct
+    cdef double edge_weight
     cdef igraph_integer_t num_edges, edge_idx, from_node, to_node
     cdef igraph_vector_t* weights_vec = NULL
 
@@ -201,12 +206,20 @@ cdef int export_graph_graphml(
     fprintf(f, b"  <key id=\"individual_cc\" for=\"node\" attr.name=\"individual_cc\" attr.type=\"double\"/>\n")
     fprintf(f, b"  <key id=\"cc_threshold\" for=\"node\" attr.name=\"cc_threshold\" attr.type=\"double\"/>\n")
     fprintf(f, b"  <key id=\"keep_status\" for=\"node\" attr.name=\"keep_status\" attr.type=\"string\"/>\n")
-    fprintf(f, b"  <key id=\"total_reads\" for=\"node\" attr.name=\"total_reads\" attr.type=\"int\"/>\n")
-    fprintf(f, b"  <key id=\"unique_reads\" for=\"node\" attr.name=\"unique_reads\" attr.type=\"int\"/>\n")
-    fprintf(f, b"  <key id=\"repeat_reads\" for=\"node\" attr.name=\"repeat_reads\" attr.type=\"int\"/>\n")
-    fprintf(f, b"  <key id=\"shared_reads\" for=\"node\" attr.name=\"shared_reads\" attr.type=\"int\"/>\n")
-    fprintf(f, b"  <key id=\"total_alignments\" for=\"node\" attr.name=\"total_alignments\" attr.type=\"long\"/>\n")
-    fprintf(f, b"  <key id=\"multimap_pct\" for=\"node\" attr.name=\"multimap_pct\" attr.type=\"double\"/>\n\n")
+    fprintf(f, b"  <key id=\"anomaly_score\" for=\"node\" attr.name=\"anomaly_score\" attr.type=\"double\"/>\n")
+    if not export_only_used_stats:
+        fprintf(f, b"  <key id=\"betweenness_centrality\" for=\"node\" attr.name=\"betweenness_centrality\" attr.type=\"double\"/>\n")
+        fprintf(f, b"  <key id=\"node_degree\" for=\"node\" attr.name=\"node_degree\" attr.type=\"int\"/>\n")
+        fprintf(f, b"  <key id=\"connected_neighbors\" for=\"node\" attr.name=\"connected_neighbors\" attr.type=\"int\"/>\n")
+        fprintf(f, b"  <key id=\"avg_co_mappings_per_read\" for=\"node\" attr.name=\"avg_co_mappings_per_read\" attr.type=\"double\"/>\n")
+        fprintf(f, b"  <key id=\"max_co_mappings_observed\" for=\"node\" attr.name=\"max_co_mappings_observed\" attr.type=\"long\"/>\n")
+        fprintf(f, b"  <key id=\"neighbor_multimap_rate\" for=\"node\" attr.name=\"neighbor_multimap_rate\" attr.type=\"double\"/>\n")
+        fprintf(f, b"  <key id=\"total_reads\" for=\"node\" attr.name=\"total_reads\" attr.type=\"int\"/>\n")
+        fprintf(f, b"  <key id=\"unique_reads\" for=\"node\" attr.name=\"unique_reads\" attr.type=\"int\"/>\n")
+        fprintf(f, b"  <key id=\"repeat_reads\" for=\"node\" attr.name=\"repeat_reads\" attr.type=\"int\"/>\n")
+        fprintf(f, b"  <key id=\"shared_reads\" for=\"node\" attr.name=\"shared_reads\" attr.type=\"int\"/>\n")
+        fprintf(f, b"  <key id=\"total_alignments\" for=\"node\" attr.name=\"total_alignments\" attr.type=\"long\"/>\n")
+        fprintf(f, b"  <key id=\"multimap_pct\" for=\"node\" attr.name=\"multimap_pct\" attr.type=\"double\"/>\n\n")
 
     fprintf(f, b"  <!-- Edge attributes -->\n")
     fprintf(f, b"  <key id=\"weight\" for=\"edge\" attr.name=\"weight\" attr.type=\"double\"/>\n\n")
@@ -258,6 +271,44 @@ cdef int export_graph_graphml(
         individual_cc = pattern_data[node_idx].leiden_individual_cc
         cc_threshold = pattern_data[node_idx].leiden_cc_threshold
         keep_flag = pattern_data[node_idx].leiden_keep_flag
+        anomaly_score = pattern_data[node_idx].leiden_anomaly_score
+        betweenness = pattern_data[node_idx].betweenness_centrality
+        node_degree = pattern_data[node_idx].node_degree
+        connected_neighbors = pattern_data[node_idx].graph.connection_count
+        avg_co_mappings = pattern_data[node_idx].graph.avg_comappings_per_read
+        max_co_map = pattern_data[node_idx].graph.max_comappings
+        neighbor_mm_rate = pattern_data[node_idx].graph.neighbor_avg_multimap
+
+        total_reads = 0
+        unique_reads = 0
+        repeat_reads = 0
+        shared_reads = 0
+        total_alignments = <uint64_t>0
+        multimap_pct = <double>0.0
+
+        if ref_stats and node_idx < pool.reference_count:
+            total_reads = ref_stats[node_idx].total_reads
+            unique_reads = ref_stats[node_idx].unique_reads
+            repeat_reads = ref_stats[node_idx].repeat_reads
+            shared_reads = ref_stats[node_idx].shared_reads
+            total_alignments = ref_stats[node_idx].alignment_count
+
+            if total_reads > 0:
+                multimap_pct = 100.0 * <double>(repeat_reads + shared_reads) / <double>total_reads
+
+        component_id = pattern_data[node_idx].component_id
+        community_id = pattern_data[node_idx].leiden_community_id
+        community_cc = pattern_data[node_idx].leiden_community_cc
+        individual_cc = pattern_data[node_idx].leiden_individual_cc
+        cc_threshold = pattern_data[node_idx].leiden_cc_threshold
+        keep_flag = pattern_data[node_idx].leiden_keep_flag
+        anomaly_score = pattern_data[node_idx].leiden_anomaly_score
+        betweenness = pattern_data[node_idx].betweenness_centrality
+        node_degree = pattern_data[node_idx].node_degree
+        connected_neighbors = pattern_data[node_idx].graph.connection_count
+        avg_co_mappings = pattern_data[node_idx].graph.avg_comappings_per_read
+        max_co_map = pattern_data[node_idx].graph.max_comappings
+        neighbor_mm_rate = pattern_data[node_idx].graph.neighbor_avg_multimap
 
         total_reads = 0
         unique_reads = 0
@@ -266,7 +317,7 @@ cdef int export_graph_graphml(
         total_alignments = 0
         multimap_pct = 0.0
 
-        if ref_stats and node_idx < pool.reference_count:
+        if ref_stats != NULL and node_idx < pool.reference_count:
             total_reads = ref_stats[node_idx].total_reads
             unique_reads = ref_stats[node_idx].unique_reads
             repeat_reads = ref_stats[node_idx].repeat_reads
@@ -291,12 +342,20 @@ cdef int export_graph_graphml(
             fprintf(f, b"      <data key=\"keep_status\">kept</data>\n")
         else:
             fprintf(f, b"      <data key=\"keep_status\">removed</data>\n")
-        fprintf(f, b"      <data key=\"total_reads\">%u</data>\n", total_reads)
-        fprintf(f, b"      <data key=\"unique_reads\">%u</data>\n", unique_reads)
-        fprintf(f, b"      <data key=\"repeat_reads\">%u</data>\n", repeat_reads)
-        fprintf(f, b"      <data key=\"shared_reads\">%u</data>\n", shared_reads)
-        fprintf(f, b"      <data key=\"total_alignments\">%lu</data>\n", total_alignments)
-        fprintf(f, b"      <data key=\"multimap_pct\">%.2f</data>\n", multimap_pct)
+        fprintf(f, b"      <data key=\"anomaly_score\">%.6f</data>\n", anomaly_score)
+        if not export_only_used_stats:
+            fprintf(f, b"      <data key=\"betweenness_centrality\">%.6f</data>\n", betweenness)
+            fprintf(f, b"      <data key=\"node_degree\">%u</data>\n", node_degree)
+            fprintf(f, b"      <data key=\"connected_neighbors\">%u</data>\n", connected_neighbors)
+            fprintf(f, b"      <data key=\"avg_co_mappings_per_read\">%.6f</data>\n", avg_co_mappings)
+            fprintf(f, b"      <data key=\"max_co_mappings_observed\">%lu</data>\n", max_co_map)
+            fprintf(f, b"      <data key=\"neighbor_multimap_rate\">%.6f</data>\n", neighbor_mm_rate)
+            fprintf(f, b"      <data key=\"total_reads\">%u</data>\n", total_reads)
+            fprintf(f, b"      <data key=\"unique_reads\">%u</data>\n", unique_reads)
+            fprintf(f, b"      <data key=\"repeat_reads\">%u</data>\n", repeat_reads)
+            fprintf(f, b"      <data key=\"shared_reads\">%u</data>\n", shared_reads)
+            fprintf(f, b"      <data key=\"total_alignments\">%lu</data>\n", total_alignments)
+            fprintf(f, b"      <data key=\"multimap_pct\">%.2f</data>\n", multimap_pct)
         fprintf(f, b"    </node>\n")
 
         exported_nodes += 1

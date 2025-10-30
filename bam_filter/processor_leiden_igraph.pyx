@@ -41,6 +41,23 @@ from bam_filter.processor_graph cimport ReferenceStats
 from bam_filter.processor_graph_ops cimport WeightedGraph
 from bam_filter.processor_igraph cimport *
 
+# Import new multi-metric outlier detection module
+from bam_filter.processor_outlier_detection cimport (
+    ReferenceFeatures,
+    OutlierDetectionResult,
+    OutlierMethod,
+    OUTLIER_MAD,
+    OUTLIER_IQR,
+    OUTLIER_IFOREST,
+    OUTLIER_LOF,
+    OUTLIER_ZSCORE,
+    detect_outliers_multivariate_c,
+    detect_outliers_iforest_c,
+    detect_outliers_lof_c,
+    free_outlier_result,
+    extract_features_from_graph_metrics,
+)
+
 cdef extern from "bam_filter/c_logging.h":
     void bf_nogil_logf_notime(const char* tag, const char* fmt, ...) nogil
     int bf_should_log(int level) nogil
@@ -134,7 +151,22 @@ cdef int process_single_community_global(
     float* out_threshold,
     uint32_t* out_node_degrees,
     uint32_t comm_id,
-    bint verbose
+    bint verbose,
+    int outlier_method,  # 0 = MAD (default), 1 = IQR, 2 = IFOREST, 3 = LOF, 4 = ZSCORE
+    int32_t iforest_n_trees,
+    uint32_t iforest_subsample_size,
+    double iforest_contamination,
+    uint32_t iforest_random_seed,
+    uint32_t lof_k,
+    double lof_contamination,
+    double zscore_threshold,
+    ReferenceStats* ref_stats,  # Per-reference statistics for multi-metric outlier detection
+    float* out_anomaly_scores,  # Output anomaly scores for each reference (for multi-metric methods)
+    uint32_t* exact_connection_counts,  # Real graph metric: exact number of connected neighbors
+    double* co_mapping_averages,         # Real graph metric: average co-mapping intensity per read
+    uint64_t* max_co_mappings,           # Real graph metric: maximum co-mapping intensity
+    double* neighbor_multimap_avg,       # Real graph metric: average multimap rate of neighbors
+    float* betweenness_centrality        # Real graph metric: betweenness centrality from igraph
 ) nogil:
     """
     Compute Barrat clustering coefficients for a community (given as a member_list
@@ -255,10 +287,115 @@ cdef int process_single_community_global(
     igraph_destroy(&subgraph)
     igraph_vector_destroy(&sub_weights)
 
-    # Calculate adaptive percentile threshold for CC values
-    # Uses 5th or 10th percentile based on distribution characteristics (conservative)
+    # Calculate statistical outlier threshold for CC values
+    # Supports multiple methods: MAD, IQR (univariate), or IFOREST/LOF (multivariate)
     # INTERPRETATION: CC >= threshold → KEEP (cohesive), CC < threshold → REMOVE (hub/contamination)
-    threshold = calculate_broken_stick_threshold(comm_clustering, n_members, (verbose and bf_should_log(BF_LOG_LEVEL_TRACE)) and n_members > 50)
+
+    cdef OutlierDetectionResult* outlier_result = NULL
+    cdef ReferenceFeatures* features = NULL
+    cdef uint32_t i_member
+    cdef bint* is_outlier_flags = NULL
+
+    # For multi-metric methods (IFOREST, LOF), use the new outlier detection module
+    if outlier_method >= 2:  # IFOREST (2), LOF (3), or ZSCORE (4)
+        # Allocate feature vectors for community members
+        features = <ReferenceFeatures*>malloc(n_members * sizeof(ReferenceFeatures))
+        if features == NULL:
+            threshold = -1.0e10  # Fallback: keep everything
+        else:
+            # Extract features from ref_stats for each community member
+            for i_member in range(n_members):
+                ref_idx = member_list[i_member]
+                features[i_member].reference_idx = ref_idx
+                features[i_member].clustering_coefficient = <double>comm_clustering[i_member]
+                features[i_member].node_degree = <double>out_node_degrees[ref_idx]
+
+                # Extract additional metrics - use REAL graph metrics instead of approximations
+                if ref_stats != NULL:
+                    features[i_member].multimap_percentage = (
+                        <double>ref_stats[ref_idx].repeat_reads / <double>ref_stats[ref_idx].total_reads * 100.0
+                        if ref_stats[ref_idx].total_reads > 0 else 0.0
+                    )
+                else:
+                    features[i_member].multimap_percentage = 0.0
+
+                # Use REAL graph metrics (passed as function parameters)
+                if exact_connection_counts != NULL:
+                    features[i_member].connected_neighbors = <double>exact_connection_counts[ref_idx]
+                else:
+                    features[i_member].connected_neighbors = 0.0
+
+                if max_co_mappings != NULL:
+                    features[i_member].max_comappings = <double>max_co_mappings[ref_idx]
+                else:
+                    features[i_member].max_comappings = 0.0
+
+                if co_mapping_averages != NULL:
+                    features[i_member].avg_comappings_per_read = co_mapping_averages[ref_idx]
+                else:
+                    features[i_member].avg_comappings_per_read = 0.0
+
+                if neighbor_multimap_avg != NULL:
+                    features[i_member].neighbor_multimap_rate = neighbor_multimap_avg[ref_idx] * 100.0
+                else:
+                    features[i_member].neighbor_multimap_rate = 0.0
+
+                # Use betweenness centrality from igraph
+                if betweenness_centrality != NULL:
+                    features[i_member].betweenness_centrality = <double>betweenness_centrality[ref_idx]
+                else:
+                    features[i_member].betweenness_centrality = 0.0
+
+            # Run multi-metric outlier detection
+            if outlier_method == OUTLIER_IFOREST:
+                outlier_result = detect_outliers_iforest_c(
+                    features,
+                    n_members,
+                    <uint32_t>iforest_n_trees,
+                    iforest_subsample_size,
+                    iforest_contamination,
+                    iforest_random_seed
+                )
+            elif outlier_method == OUTLIER_LOF:
+                outlier_result = detect_outliers_lof_c(
+                    features,
+                    n_members,
+                    lof_k,
+                    lof_contamination
+                )
+            else:
+                outlier_result = detect_outliers_multivariate_c(
+                    features,
+                    n_members,
+                    <OutlierMethod>outlier_method,
+                    iforest_contamination,
+                    iforest_random_seed
+                )
+
+            if outlier_result != NULL:
+                # Use outlier flags to set keep_flag
+                is_outlier_flags = outlier_result.is_outlier
+                threshold = <float>outlier_result.threshold
+
+                # Store anomaly scores for all community members (for TSV export)
+                if out_anomaly_scores != NULL:
+                    for i_member in range(n_members):
+                        ref_idx = member_list[i_member]
+                        out_anomaly_scores[ref_idx] = <float>outlier_result.anomaly_scores[i_member]
+            else:
+                # Fallback to MAD if multi-metric detection fails
+                threshold = calculate_statistical_outlier_threshold_mad(
+                    comm_clustering, n_members,
+                    (verbose and bf_should_log(BF_LOG_LEVEL_TRACE)) and n_members > 50
+                )
+
+            free(features)
+    elif outlier_method == 1:
+        # IQR method (univariate on CC only)
+        threshold = calculate_statistical_outlier_threshold_iqr(comm_clustering, n_members, (verbose and bf_should_log(BF_LOG_LEVEL_TRACE)) and n_members > 50)
+    else:
+        # MAD method (default, outlier_method == 0, univariate on CC only)
+        threshold = calculate_statistical_outlier_threshold_mad(comm_clustering, n_members, (verbose and bf_should_log(BF_LOG_LEVEL_TRACE)) and n_members > 50)
 
     # Audit logging: report per-community chosen threshold and community size.
     # printf is safe to call in nogil contexts.
@@ -273,11 +410,20 @@ cdef int process_single_community_global(
 
     # Apply threshold: KEEP references with CC >= threshold (cohesive/informative)
     # REMOVE references with CC < threshold (hub/star pattern, likely contamination)
+    # For multi-metric methods, use outlier flags instead of threshold
     kept_in_community = 0
-    for i in range(n_members):
-        if comm_clustering[i] >= threshold:
-            keep_flag[member_list[i]] = 1
-            kept_in_community += 1
+    if is_outlier_flags != NULL:
+        # Multi-metric method: use outlier flags (outlier=TRUE means REMOVE, inlier=FALSE means KEEP)
+        for i in range(n_members):
+            if not is_outlier_flags[i]:  # is_outlier[i] == FALSE → inlier → KEEP
+                keep_flag[member_list[i]] = 1
+                kept_in_community += 1
+    else:
+        # Univariate method: use threshold on clustering coefficient
+        for i in range(n_members):
+            if comm_clustering[i] >= threshold:
+                keep_flag[member_list[i]] = 1
+                kept_in_community += 1
 
     if kept_in_community == 0:
         # Safety: ensure at least one reference kept (highest CC = most cohesive)
@@ -318,6 +464,10 @@ cdef int process_single_community_global(
     # Export threshold value for all members of this community
     if out_threshold is not NULL:
         out_threshold[0] = threshold
+
+    # Cleanup multi-metric outlier detection result
+    if outlier_result != NULL:
+        free_outlier_result(outlier_result)
 
     free(comm_clustering)
     return 0
@@ -419,30 +569,27 @@ cdef int _float_compare_ascending(const void* a, const void* b) noexcept nogil:
         return 0
 
 
-cdef float calculate_broken_stick_threshold(float* values, uint32_t n, bint verbose) nogil:
+cdef float calculate_statistical_outlier_threshold_mad(float* values, uint32_t n, bint verbose) nogil:
     """
-    Calculate threshold for identifying low-CC hubs using adaptive percentile selection.
+    Calculate threshold for identifying low-CC hubs using Modified Z-Score (MAD method).
 
     APPROACH:
-    Unlike edge weight filtering (which uses tail-focused broken stick on heavily skewed
-    distributions), CC values are bounded [0,1] and more balanced. We use adaptive percentile
-    thresholds based on distribution characteristics:
-    - Default: 5th percentile (removes bottom 5%, VERY conservative)
-    - Long lower tail with outliers: 10th percentile (removes bottom 10%)
-    - Wide distribution: 5th percentile (conservative)
+    Uses Median Absolute Deviation (MAD) for robust outlier detection.
+    The modified z-score is: 0.6745 * (x - median) / MAD
+    Values with |modified_z_score| > 3.5 are considered outliers.
 
     FILTERING INTERPRETATION:
     - CC >= threshold → cohesive/well-connected → informative reference → KEEP
-    - CC < threshold → hub/star pattern → promiscuous/contamination → REMOVE
+    - CC < threshold → hub/star pattern (statistical outlier) → promiscuous/contamination → REMOVE
 
     High CC means the reference's neighbors are also connected to each other (clique/triangle).
     Low CC means the reference connects otherwise unrelated references (hub/star, likely contaminant).
 
-    RATIONALE FOR NOT USING BROKEN STICK:
-    - CC distributions are not as skewed as edge weights (no massive weight=1 pile)
-    - Broken stick expects deviations from uniform; CC distributions can be multimodal
-    - Simple percentile thresholds are more robust and interpretable for CC
-    - Conservative 5th percentile removes only clear outliers
+    ADVANTAGES:
+    - Only removes TRUE statistical outliers (may remove 0 references if data is clean!)
+    - Robust to extreme outliers (unlike standard deviation)
+    - Non-parametric (doesn't assume normal distribution)
+    - Well-established in statistics literature
 
     Args:
         values: Array of clustering coefficients (range [0,1])
@@ -452,122 +599,223 @@ cdef float calculate_broken_stick_threshold(float* values, uint32_t n, bint verb
     Returns:
         Threshold value (REMOVE if CC < threshold, KEEP if CC >= threshold)
     """
-    cdef uint32_t i, j
+    cdef uint32_t i
     cdef float* sorted_values = <float*>malloc(n * sizeof(float))
+    cdef float* abs_deviations = NULL
     cdef float threshold
-    cdef float n_float = <float>n
-    cdef uint32_t cutoff_rank
-
-    # CC-specific parameters (different from edge weight filtering)
-    # For CC values, we want to identify unusually LOW values (hubs/stars)
-    # Strategy: Use simple percentile-based threshold with adaptive selection
-    # This is more appropriate for CC distributions which are bounded [0,1] and balanced
-    cdef float iqr, lower_spread
-    cdef uint32_t threshold_idx
+    cdef float median_cc, mad, modified_z_threshold
+    cdef uint32_t median_idx
+    cdef uint32_t num_outliers
 
     if not sorted_values:
-        return 0.05  # Very conservative fallback (5th percentile)
+        return 0.0  # No filtering if allocation fails
 
-    # Copy and sort values ascending (lowest first)
+    # Copy and sort values ascending
     for i in range(n):
         sorted_values[i] = values[i]
     qsort(sorted_values, n, sizeof(float), _float_compare_ascending)
 
-    # Calculate key percentiles for diagnostics and threshold selection
-    cdef float median_cc, q05, q10, q15, q20, q25, q75, q90
-    cdef uint32_t median_idx = n / 2
-    cdef uint32_t q05_idx = <uint32_t>(n * 0.05)
-    cdef uint32_t q10_idx = <uint32_t>(n * 0.10)
-    cdef uint32_t q15_idx = <uint32_t>(n * 0.15)
-    cdef uint32_t q20_idx = <uint32_t>(n * 0.20)
+    # Calculate median
+    median_idx = n / 2
+    if n % 2 == 0 and n > 1:
+        median_cc = (sorted_values[median_idx - 1] + sorted_values[median_idx]) / 2.0
+    else:
+        median_cc = sorted_values[median_idx]
+
+    # Calculate absolute deviations from median
+    abs_deviations = <float*>malloc(n * sizeof(float))
+    if not abs_deviations:
+        free(sorted_values)
+        return 0.0
+
+    for i in range(n):
+        abs_deviations[i] = sorted_values[i] - median_cc
+        if abs_deviations[i] < 0:
+            abs_deviations[i] = -abs_deviations[i]
+
+    # Sort absolute deviations to find MAD
+    qsort(abs_deviations, n, sizeof(float), _float_compare_ascending)
+
+    # MAD is the median of absolute deviations
+    if n % 2 == 0 and n > 1:
+        mad = (abs_deviations[median_idx - 1] + abs_deviations[median_idx]) / 2.0
+    else:
+        mad = abs_deviations[median_idx]
+
+    free(abs_deviations)
+
+    # Calculate key percentiles for diagnostics
+    cdef float q25, q75, iqr
     cdef uint32_t q25_idx = n / 4
     cdef uint32_t q75_idx = 3 * n / 4
-    cdef uint32_t q90_idx = <uint32_t>(n * 0.90)
-
-    median_cc = sorted_values[median_idx]
-    q05 = sorted_values[q05_idx]
-    q10 = sorted_values[q10_idx]
-    q15 = sorted_values[q15_idx]
-    q20 = sorted_values[q20_idx]
     q25 = sorted_values[q25_idx]
     q75 = sorted_values[q75_idx]
-    q90 = sorted_values[q90_idx]
+    iqr = q75 - q25
 
     if verbose:
         bf_nogil_logf_notime(
             b"LEIDEN",
-            "    CC distribution: Q05=%.3f, Q10=%.3f, Q15=%.3f, Q20=%.3f, Q25=%.3f, Median=%.3f, Q75=%.3f, Q90=%.3f\n",
-            q05,
-            q10,
-            q15,
-            q20,
+            "    CC distribution: Q25=%.3f, Median=%.3f, Q75=%.3f, IQR=%.3f, MAD=%.3f\n",
             q25,
             median_cc,
             q75,
-            q90,
+            iqr,
+            mad,
         )
         bf_nogil_logf_notime(b"LEIDEN", "    Sample size: %u\n", n)
 
-    # ADAPTIVE PERCENTILE THRESHOLD SELECTION
-    # Choose threshold based on distribution characteristics to remove low-CC outliers
-    # while preserving the bulk of the distribution
-    iqr = q75 - q25
-    lower_spread = q25 - q05  # How spread out is the lower tail?
+    # Modified Z-score threshold: 3.5 is standard for outlier detection
+    # We want to find LOW outliers (hubs), so we look at the lower tail
+    # threshold = median - 3.5 * MAD / 0.6745
+    if mad > 0.0:
+        modified_z_threshold = 3.5
+        threshold = median_cc - (modified_z_threshold * mad / 0.6745)
 
-    # Decision logic:
-    # - If lower tail is very spread (many low-CC outliers): use 10th percentile
-    # - If distribution is tight (most values similar): use 5th percentile (conservative)
-    # - Default: use 5th percentile (remove only bottom 5%, very conservative)
+        # Ensure threshold is in valid range [0, 1]
+        if threshold < 0.0:
+            threshold = 0.0
+        if threshold > median_cc:
+            threshold = median_cc
 
-    if lower_spread > iqr * 0.5 and q10 < 0.3:
-        # Long lower tail with many low-CC values below 0.3 → use 10th percentile
-        threshold_idx = q10_idx
-        threshold = q10
+        # Count how many values fall below threshold (outliers)
+        num_outliers = 0
+        for i in range(n):
+            if sorted_values[i] < threshold:
+                num_outliers += 1
+
         if verbose:
             bf_nogil_logf_notime(
                 b"LEIDEN",
-                "    [ADAPTIVE] Long lower tail detected (spread=%.3f > 0.5*IQR), using Q10=%.3f\n",
-                lower_spread,
+                "    [MAD] Outlier threshold: %.6f (MAD-based, modified_z > 3.5)\n",
                 threshold,
             )
-    elif iqr > 0.3:
-        # Very spread distribution → use 5th percentile (conservative)
-        threshold_idx = q05_idx
-        threshold = q05
-        if verbose:
             bf_nogil_logf_notime(
                 b"LEIDEN",
-                "    [ADAPTIVE] Wide distribution (IQR=%.3f > 0.3), using Q05=%.3f (conservative)\n",
-                iqr,
-                threshold,
+                "    [MAD] Will REMOVE %u outliers (%.1f%% of community)\n",
+                num_outliers,
+                100.0 * <float>num_outliers / <float>n,
             )
     else:
-        # Default: use 5th percentile (removes only clear outliers, bottom 5%)
-        threshold_idx = q05_idx
-        threshold = q05
+        # MAD is 0 (all values identical) - no outliers to remove
+        threshold = median_cc
         if verbose:
             bf_nogil_logf_notime(
                 b"LEIDEN",
-                "    [ADAPTIVE] Normal distribution, using Q05=%.3f (default, removes bottom 5%%)\n",
-                threshold,
+                "    [MAD] MAD=0 (all values identical), no outliers to remove\n",
             )
 
-    # Safety: ensure threshold is in valid range [0, 1]
+    free(sorted_values)
+    return threshold
+
+
+cdef float calculate_statistical_outlier_threshold_iqr(float* values, uint32_t n, bint verbose) nogil:
+    """
+    Calculate threshold for identifying low-CC hubs using IQR method.
+
+    APPROACH:
+    Uses Interquartile Range (IQR) for outlier detection.
+    Lower bound = Q1 - 1.5 * IQR
+    Upper bound = Q3 + 1.5 * IQR (not used here, we only care about low outliers)
+
+    FILTERING INTERPRETATION:
+    - CC >= threshold → cohesive/well-connected → informative reference → KEEP
+    - CC < threshold → hub/star pattern (statistical outlier) → promiscuous/contamination → REMOVE
+
+    ADVANTAGES:
+    - Only removes TRUE statistical outliers (may remove 0 references if data is clean!)
+    - Standard boxplot outlier method
+    - Non-parametric (doesn't assume normal distribution)
+    - Simple and interpretable
+
+    Args:
+        values: Array of clustering coefficients (range [0,1])
+        n: Number of values
+        verbose: Print diagnostic info
+
+    Returns:
+        Threshold value (REMOVE if CC < threshold, KEEP if CC >= threshold)
+    """
+    cdef uint32_t i
+    cdef float* sorted_values = <float*>malloc(n * sizeof(float))
+    cdef float threshold
+    cdef float q25, q75, iqr, lower_bound
+    cdef uint32_t q25_idx, q75_idx, median_idx
+    cdef float median_cc
+    cdef uint32_t num_outliers
+
+    if not sorted_values:
+        return 0.0  # No filtering if allocation fails
+
+    # Copy and sort values ascending
+    for i in range(n):
+        sorted_values[i] = values[i]
+    qsort(sorted_values, n, sizeof(float), _float_compare_ascending)
+
+    # Calculate quartiles
+    q25_idx = n / 4
+    q75_idx = 3 * n / 4
+    median_idx = n / 2
+
+    q25 = sorted_values[q25_idx]
+    q75 = sorted_values[q75_idx]
+    median_cc = sorted_values[median_idx]
+    iqr = q75 - q25
+
+    # Lower outlier bound: Q1 - 1.5 * IQR
+    lower_bound = q25 - 1.5 * iqr
+
+    # Ensure threshold is in valid range [0, 1]
+    threshold = lower_bound
     if threshold < 0.0:
         threshold = 0.0
     if threshold > 1.0:
         threshold = 1.0
 
+    # Count how many values fall below threshold (outliers)
+    num_outliers = 0
+    for i in range(n):
+        if sorted_values[i] < threshold:
+            num_outliers += 1
+
     if verbose:
         bf_nogil_logf_notime(
             b"LEIDEN",
-            "    [BROKEN-STICK] Fallback threshold: %.6f (will REMOVE %.0f%% with CC < threshold)\n",
+            "    CC distribution: Q25=%.3f, Median=%.3f, Q75=%.3f, IQR=%.3f\n",
+            q25,
+            median_cc,
+            q75,
+            iqr,
+        )
+        bf_nogil_logf_notime(b"LEIDEN", "    Sample size: %u\n", n)
+        bf_nogil_logf_notime(
+            b"LEIDEN",
+            "    [IQR] Outlier threshold: %.6f (Q1 - 1.5*IQR = %.3f - 1.5*%.3f)\n",
             threshold,
-            10.0,
+            q25,
+            iqr,
+        )
+        bf_nogil_logf_notime(
+            b"LEIDEN",
+            "    [IQR] Will REMOVE %u outliers (%.1f%% of community)\n",
+            num_outliers,
+            100.0 * <float>num_outliers / <float>n,
         )
 
     free(sorted_values)
     return threshold
+
+
+cdef float calculate_broken_stick_threshold(float* values, uint32_t n, bint verbose) nogil:
+    """
+    Statistical outlier detection using MAD (Median Absolute Deviation).
+
+    Uses Modified Z-Score with MAD for robust outlier detection.
+    Only removes TRUE statistical outliers (may remove 0 references if data is clean).
+
+    This function maintains the old name for backward compatibility but uses
+    the new MAD-based statistical approach instead of percentiles.
+    """
+    return calculate_statistical_outlier_threshold_mad(values, n, verbose)
 
 
 # ==============================================================================
@@ -597,6 +845,8 @@ cdef struct LeidenResults:
     float* community_cc_values  # Average CC value for the community each reference belongs to
     float* individual_cc_values  # Individual CC value for each reference (Barrat's method)
     float* cc_threshold_values  # Broken-stick threshold used for each reference's community
+    float* anomaly_scores  # Anomaly score for each reference (for multi-metric methods like Isolation Forest)
+    uint32_t* node_degree  # Node degree (number of edges) - already in ReferencePattern, kept here for convenience
 
 
 # ==============================================================================
@@ -608,7 +858,20 @@ cdef LeidenResults* leiden_clustering(WeightedGraph* graph,
                              double resolution,
                              int32_t max_iterations,
                              bint verbose,
-                             int32_t thread_count) except NULL nogil:
+                             int32_t thread_count,
+                             int outlier_method,
+                             int32_t iforest_n_trees,
+                             uint32_t iforest_subsample_size,
+                             double iforest_contamination,
+                             uint32_t iforest_random_seed,
+                             uint32_t lof_k,
+                             double lof_contamination,
+                             double zscore_threshold,
+                             uint32_t* exact_connection_counts,
+                             double* co_mapping_averages,
+                             uint64_t* max_co_mappings,
+                             double* neighbor_multimap_avg,
+                             uint32_t array_size) except NULL nogil:
     """
     Run Leiden clustering with clustering coefficient filtering.
     
@@ -827,7 +1090,36 @@ cdef LeidenResults* leiden_clustering(WeightedGraph* graph,
         igraph_vector_int_destroy(&component_sizes)
         bf_nogil_logf_notime(b"LEIDEN", "ERROR: Failed to allocate cc_threshold_values\n")
         return NULL
-    
+
+    # Allocate anomaly scores array (for multi-metric methods like Isolation Forest)
+    results.anomaly_scores = <float*>calloc(graph.num_nodes, sizeof(float))
+    if not results.anomaly_scores:
+        free(results.cc_threshold_values)
+        free(results.individual_cc_values)
+        free(results.community_cc_values)
+        free(results.community_membership)
+        free(results.keep_flag)
+        free(results)
+        igraph_vector_int_destroy(&component_membership)
+        igraph_vector_int_destroy(&component_sizes)
+        bf_nogil_logf_notime(b"LEIDEN", "ERROR: Failed to allocate anomaly_scores\n")
+        return NULL
+
+    # Allocate betweenness centrality array
+    results.betweenness_centrality = <float*>calloc(graph.num_nodes, sizeof(float))
+    if not results.betweenness_centrality:
+        free(results.anomaly_scores)
+        free(results.cc_threshold_values)
+        free(results.individual_cc_values)
+        free(results.community_cc_values)
+        free(results.community_membership)
+        free(results.keep_flag)
+        free(results)
+        igraph_vector_int_destroy(&component_membership)
+        igraph_vector_int_destroy(&component_sizes)
+        bf_nogil_logf_notime(b"LEIDEN", "ERROR: Failed to allocate anomaly_scores\n")
+        return NULL
+
     # Copy component membership from igraph vector to results
     for ref_idx in range(graph.num_nodes):
         results.component_membership[ref_idx] = <uint32_t>get_vector_int_element(&component_membership, ref_idx)
@@ -836,6 +1128,40 @@ cdef LeidenResults* leiden_clustering(WeightedGraph* graph,
     # Node degrees will be calculated from community subgraphs, not the full graph
     for ref_idx in range(graph.num_nodes):
         results.node_degree[ref_idx] = 0
+
+    # Calculate betweenness centrality for all nodes using igraph
+    # This is a global graph metric (not community-specific)
+    if verbose:
+        bf_nogil_logf_notime(b"LEIDEN", "Calculating betweenness centrality...\n")
+
+    cdef igraph_vector_t betweenness_vec
+    cdef igraph_vs_t vs_all
+    ret = igraph_vector_init(&betweenness_vec, 0)
+    if ret == IGRAPH_SUCCESS:
+        ret = igraph_vs_all(&vs_all)
+        if ret == IGRAPH_SUCCESS:
+            # Calculate betweenness centrality (directed=False, weights=ig_weights)
+            ret = igraph_betweenness(ig_graph, &betweenness_vec, vs_all, 0, ig_weights)
+            igraph_vs_destroy(&vs_all)
+
+            if ret == IGRAPH_SUCCESS:
+                # Copy betweenness values to results
+                for ref_idx in range(graph.num_nodes):
+                    results.betweenness_centrality[ref_idx] = <float>VECTOR(betweenness_vec)[ref_idx]
+
+                if verbose:
+                    bf_nogil_logf_notime(b"LEIDEN", "  Betweenness centrality calculated for %u nodes\n", graph.num_nodes)
+            else:
+                if verbose:
+                    bf_nogil_logf_notime(b"LEIDEN", "[WARNING] Betweenness calculation failed, using zeros\n")
+
+            igraph_vector_destroy(&betweenness_vec)
+        else:
+            if verbose:
+                bf_nogil_logf_notime(b"LEIDEN", "[WARNING] Failed to create vertex selector for betweenness\n")
+    else:
+        if verbose:
+            bf_nogil_logf_notime(b"LEIDEN", "[WARNING] Failed to initialize betweenness vector\n")
 
     # Count members per component and identify singletons
     component_counts = <uint32_t*>calloc(num_components, sizeof(uint32_t))
@@ -1221,7 +1547,22 @@ cdef LeidenResults* leiden_clustering(WeightedGraph* graph,
                                         &per_comm_thresholds[comm_idx],
                                         results.node_degree,
                                         comm_idx,
-                                        verbose)
+                                        verbose,
+                                        outlier_method,
+                                        iforest_n_trees,
+                                        iforest_subsample_size,
+                                        iforest_contamination,
+                                        iforest_random_seed,
+                                        lof_k,
+                                        lof_contamination,
+                                        zscore_threshold,
+                                        ref_stats,
+                                        results.anomaly_scores,
+                                        exact_connection_counts,
+                                        co_mapping_averages,
+                                        max_co_mappings,
+                                        neighbor_multimap_avg,
+                                        results.betweenness_centrality)
 
     # Populate results.community_cc_values and cc_threshold_values from per_comm buffers
     for comm_idx in range(num_communities):

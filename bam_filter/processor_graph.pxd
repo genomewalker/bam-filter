@@ -58,6 +58,14 @@ cdef struct ReferencePattern:
     float leiden_individual_cc         # Individual clustering coefficient for this reference (Barrat's method)
     float leiden_cc_threshold          # Broken-stick threshold used for filtering this reference's community
     char leiden_keep_flag              # 1=keep, 0=remove from Leiden filtering
+    float leiden_anomaly_score         # Anomaly score from multi-metric outlier detection (0=normal, 1=anomalous)
+    float betweenness_centrality       # Betweenness centrality (bridge-ness metric from igraph)
+
+    # Taxonomy information
+    int32_t taxid                      # Taxonomy ID from accession mapping (-1 if not found)
+    int32_t taxid_rank_id              # Rank ID of this taxid (for quick comparisons)
+    int32_t taxid_depth                # Depth in taxonomy tree
+    char taxonomy_flag                 # Flag indicating taxonomy-based anomaly: 0=normal, 1=potential_contamination, 2=cross_domain, 3=kingdom_mismatch
 
 
 cdef struct DatasetSummaryStats:
@@ -239,7 +247,7 @@ cdef int write_graph_tsv(MemoryPool* pool, sam_hdr_t* bam_header,
                         double* neighbor_multimap_avg, double* neighbor_connections_avg,
                         uint32_t* neighbor_counts, uint32_t array_size,
                         double dataset_median_connections, int32_t min_read_count,
-                        bint include_clustering, const char* tsv_path) noexcept nogil
+                        bint include_clustering, int outlier_method, const char* tsv_path) noexcept nogil
 
 
 cdef int _uint32_compare(const void* a, const void* b) noexcept nogil

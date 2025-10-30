@@ -406,7 +406,7 @@ cdef int write_filtered_bam(MemoryPool* pool,
 
 	cdef uint64_t alignments_written = 0
 	cdef uint64_t alignments_processed = 0
-	cdef uint32_t batch_size = 8192
+	cdef uint32_t batch_size = 65536
 	cdef int cache_size = 256 * 1024 * 1024
 	cdef int t
 

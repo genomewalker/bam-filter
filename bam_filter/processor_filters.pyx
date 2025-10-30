@@ -456,11 +456,19 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
                                        int leiden_max_iterations,
                                        uint32_t graph_min_edge_weight,
                                        int32_t thread_count,
+                                       int32_t iforest_n_trees,
+                                       uint32_t iforest_subsample_size,
+                                       double iforest_contamination,
+                                       uint32_t iforest_random_seed,
+                                       uint32_t lof_k,
+                                       double lof_contamination,
+                                       double zscore_threshold,
                                        WeightedGraph* existing_graph,
                                        sam_hdr_t* bam_header,
                                        ReferenceMapping* mapping,
                                        const char* tsv_export_path,
-                                       const char* graph_export_path) except -1 nogil:
+                                       const char* graph_export_path,
+                                       int outlier_method) except -1 nogil:
     """Apply cluster-aware filtering based on graph topology and Leiden clustering.
 
     Uses igraph for graph construction, component detection, Leiden clustering,
@@ -542,7 +550,20 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
         leiden_resolution,
         leiden_max_iterations,
         verbose,
-        thread_count
+        thread_count,
+        outlier_method,
+        iforest_n_trees,
+        iforest_subsample_size,
+        iforest_contamination,
+        iforest_random_seed,
+        lof_k,
+        lof_contamination,
+        zscore_threshold,
+        existing_graph.tsv_exact_connection_counts,
+        existing_graph.tsv_co_mapping_averages,
+        existing_graph.tsv_max_co_mappings,
+        existing_graph.tsv_neighbor_multimap_avg,
+        existing_graph.tsv_array_size
     )
 
     if not leiden_results:
@@ -567,6 +588,8 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
                     pattern_data[ref_idx_loop].leiden_individual_cc = leiden_results.individual_cc_values[ref_idx_loop]
                     pattern_data[ref_idx_loop].leiden_cc_threshold = leiden_results.cc_threshold_values[ref_idx_loop]
                     pattern_data[ref_idx_loop].leiden_keep_flag = leiden_results.keep_flag[ref_idx_loop]
+                    pattern_data[ref_idx_loop].leiden_anomaly_score = leiden_results.anomaly_scores[ref_idx_loop]
+                    pattern_data[ref_idx_loop].betweenness_centrality = leiden_results.betweenness_centrality[ref_idx_loop]
                 else:
                     pattern_data[ref_idx_loop].component_id = UINT32_MAX
                     pattern_data[ref_idx_loop].node_degree = 0
@@ -575,6 +598,8 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
                     pattern_data[ref_idx_loop].leiden_individual_cc = 0.0
                     pattern_data[ref_idx_loop].leiden_cc_threshold = 0.0
                     pattern_data[ref_idx_loop].leiden_keep_flag = 1
+                    pattern_data[ref_idx_loop].leiden_anomaly_score = 0.0
+                    pattern_data[ref_idx_loop].betweenness_centrality = 0.0
     cdef uint32_t ref_idx
     cdef int64_t refs_kept = 0, refs_removed = 0
     
@@ -675,7 +700,7 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
         if verbose:
             bf_nogil_logf_notime(b"CLUSTER", "Writing TSV with Leiden results to: %s\n", tsv_export_path)
 
-        if write_graph_tsv(pool, bam_header, mapping,
+    if write_graph_tsv(pool, bam_header, mapping,
                           pattern_data, ref_stats,
                           existing_graph.tsv_total_reads,
                           existing_graph.tsv_multimap_reads,
@@ -690,8 +715,9 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
                           existing_graph.tsv_array_size,
                           existing_graph.tsv_dataset_median_connections,
                           existing_graph.tsv_min_read_count,
-                          True,
-                          tsv_export_path) != 0:
+              True,
+              outlier_method,
+              tsv_export_path) != 0:
             bf_nogil_logf_notime(b"CLUSTER", "ERROR: Failed to write graph analysis TSV with Leiden results\n")
 
     if graph_export_path and existing_graph:
@@ -700,7 +726,7 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
 
         if export_graph_graphml(existing_graph, pool, bam_header, mapping,
                                pattern_data, ref_stats,
-                               graph_export_path, verbose) != 0:
+                               graph_export_path, verbose, outlier_method) != 0:
             bf_nogil_logf_notime(b"CLUSTER", "ERROR: Failed to export graph to GraphML\n")
 
     if leiden_results:
@@ -718,6 +744,10 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
             free(leiden_results.individual_cc_values)
         if leiden_results.cc_threshold_values:
             free(leiden_results.cc_threshold_values)
+        if leiden_results.anomaly_scores:
+            free(leiden_results.anomaly_scores)
+        if leiden_results.betweenness_centrality:
+            free(leiden_results.betweenness_centrality)
         free(leiden_results)
 
     return 0

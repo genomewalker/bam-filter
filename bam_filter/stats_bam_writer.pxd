@@ -2,13 +2,14 @@
 from libc.stdint cimport int32_t
 
 from bam_filter.stats cimport RefStats, FilterConditions
-from bam_filter.processor cimport samFile, sam_hdr_t
 
 # Use centralized htslib bindings
 from bam_filter.processor_types cimport (
     hts_idx_t,
     hts_itr_t,
     bam1_t,
+    samFile,
+    sam_hdr_t,
 )
 
 cdef struct ReferenceFilter:

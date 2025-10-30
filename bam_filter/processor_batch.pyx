@@ -737,7 +737,7 @@ cdef int populate_memory_pool_direct(MemoryPool* pool,
             if not batches[batch_idx]:
                 continue
             for local_idx in range(batches[batch_idx].actual_alignment_count):
-                if write_idx >= pool.alignment_count:
+                if write_idx >= pool.alignment_capacity:
                     return -1
                 src = &batches[batch_idx].batch_alignments[local_idx]
                 dst = &pool.alignments[write_idx]
@@ -759,7 +759,12 @@ cdef int populate_memory_pool_direct(MemoryPool* pool,
                 counts[batch_idx] = batches[batch_idx].actual_alignment_count
             total_count += counts[batch_idx]
 
-        if total_count > pool.alignment_count:
+        bf_nogil_logf_notime(b"BATCH", "memory_pool: total_count=%lld capacity=%lld",
+                             <long long>total_count, <long long>pool.alignment_capacity)
+
+        if total_count > pool.alignment_capacity:
+            bf_nogil_logf_notime(b"ERROR", "Insufficient capacity: need %lld but have %lld",
+                                <long long>total_count, <long long>pool.alignment_capacity)
             free(counts)
             return -1
 

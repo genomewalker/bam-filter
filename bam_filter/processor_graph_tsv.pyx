@@ -75,7 +75,7 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
                           double* neighbor_multimap_avg, double* neighbor_connections_avg,
                           uint32_t* neighbor_counts, uint32_t array_size,
                           double dataset_median_connections, int32_t min_read_count,
-                          bint include_clustering, const char* tsv_path) noexcept nogil:
+                          bint include_clustering, int outlier_method, const char* tsv_path) noexcept nogil:
     """
     Write a TSV (optionally gzipped) summarizing graph analysis results per
     reference.
@@ -183,6 +183,12 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
     cdef float individual_cc
     cdef float cc_threshold
     cdef char keep_flag
+    cdef float anomaly_score
+    cdef float betweenness
+    cdef int32_t taxid
+    cdef int32_t taxid_rank_id
+    cdef int32_t taxid_depth
+    cdef char taxonomy_flag
     cdef MultPairExtended* sorted_refs = NULL
     cdef uint32_t valid_count = 0
 
@@ -196,13 +202,13 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
         if gzfp == NULL:
             return -1
 
-        gzprintf(gzfp, b"reference_name\treference_length_bp\tcomponent_id\tnode_degree\tleiden_community_id\tleiden_community_cc\tleiden_individual_cc\tleiden_cc_threshold\tleiden_keep_status\ttotal_reads\tunique_reads\trepeat_reads\tshared_reads\ttotal_alignments\tmultimap_percentage\tconnected_neighbors\tavg_co_mappings_per_read\tmax_co_mappings_observed\tneighbor_multimap_rate\talignment_score_mean\talignment_score_std\talignment_score_min\talignment_score_max\tpmd_available\tpmd_score_mean\tpmd_score_std\tpmd_score_min\tpmd_score_max\tpmd_nonzero_percentage\n")
+        gzprintf(gzfp, b"reference_name\treference_length_bp\tcomponent_id\tnode_degree\tleiden_community_id\tleiden_community_cc\tleiden_individual_cc\tleiden_cc_threshold\tleiden_keep_status\tleiden_anomaly_score\tbetweenness_centrality\ttaxid\ttaxid_rank_id\ttaxid_depth\ttaxonomy_flag\ttotal_reads\tunique_reads\trepeat_reads\tshared_reads\ttotal_alignments\tmultimap_percentage\tconnected_neighbors\tavg_co_mappings_per_read\tmax_co_mappings_observed\tneighbor_multimap_rate\talignment_score_mean\talignment_score_std\talignment_score_min\talignment_score_max\tpmd_available\tpmd_score_mean\tpmd_score_std\tpmd_score_min\tpmd_score_max\tpmd_nonzero_percentage\n")
     else:
         f = fopen(tsv_path, b"w")
         if not f:
             return -1
 
-        fprintf(f, b"reference_name\treference_length_bp\tcomponent_id\tnode_degree\tleiden_community_id\tleiden_community_cc\tleiden_individual_cc\tleiden_cc_threshold\tleiden_keep_status\ttotal_reads\tunique_reads\trepeat_reads\tshared_reads\ttotal_alignments\tmultimap_percentage\tconnected_neighbors\tavg_co_mappings_per_read\tmax_co_mappings_observed\tneighbor_multimap_rate\talignment_score_mean\talignment_score_std\talignment_score_min\talignment_score_max\tpmd_available\tpmd_score_mean\tpmd_score_std\tpmd_score_min\tpmd_score_max\tpmd_nonzero_percentage\n")
+        fprintf(f, b"reference_name\treference_length_bp\tcomponent_id\tnode_degree\tleiden_community_id\tleiden_community_cc\tleiden_individual_cc\tleiden_cc_threshold\tleiden_keep_status\tleiden_anomaly_score\tbetweenness_centrality\ttaxid\ttaxid_rank_id\ttaxid_depth\ttaxonomy_flag\ttotal_reads\tunique_reads\trepeat_reads\tshared_reads\ttotal_alignments\tmultimap_percentage\tconnected_neighbors\tavg_co_mappings_per_read\tmax_co_mappings_observed\tneighbor_multimap_rate\talignment_score_mean\talignment_score_std\talignment_score_min\talignment_score_max\tpmd_available\tpmd_score_mean\tpmd_score_std\tpmd_score_min\tpmd_score_max\tpmd_nonzero_percentage\n")
 
     sorted_refs = <MultPairExtended*>malloc(pool.reference_count * sizeof(MultPairExtended))
     if not sorted_refs:
@@ -326,6 +332,12 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
         keep_flag = 0
 
         node_degree = 0
+        betweenness = 0.0
+        taxid = -1
+        taxid_rank_id = -1
+        taxid_depth = -1
+        taxonomy_flag = 0
+
         if pattern_data and ref_idx < pool.reference_count:
             component_id = pattern_data[ref_idx].component_id
             node_degree = pattern_data[ref_idx].node_degree
@@ -334,34 +346,48 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
             individual_cc = pattern_data[ref_idx].leiden_individual_cc
             cc_threshold = pattern_data[ref_idx].leiden_cc_threshold
             keep_flag = pattern_data[ref_idx].leiden_keep_flag
+            anomaly_score = pattern_data[ref_idx].leiden_anomaly_score
+            betweenness = pattern_data[ref_idx].betweenness_centrality
+            taxid = pattern_data[ref_idx].taxid
+            taxid_rank_id = pattern_data[ref_idx].taxid_rank_id
+            taxid_depth = pattern_data[ref_idx].taxid_depth
+            taxonomy_flag = pattern_data[ref_idx].taxonomy_flag
 
         if gzfp != NULL:
             if community_id == UINT32_MAX:
                 if keep_flag:
-                    gzprintf(gzfp, b"%s\t%ld\tcomp_%u\t%u\tsingleton\t%.6f\t%.6f\t%.6f\tkept\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\n",
+                    gzprintf(gzfp, b"%s\t%ld\tcomp_%u\t%u\tsingleton\t%.6f\t%.6f\t%.6f\tkept\t%.6f\t%.6f\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\n",
                         ref_name_c, ref_len, component_id, node_degree, community_cc, individual_cc, cc_threshold,
+                        anomaly_score, betweenness,
+                        taxid, taxid_rank_id, taxid_depth, <int>taxonomy_flag,
                         treads, unique_reads, repeat_reads, shared_reads, align_count, multimap_pct,
                         connected_neighbors, avg_co_mappings, max_co_map, neighbor_mm_rate,
                         score_mean, score_std, score_min, score_max, pmd_available,
                         pmd_mean, pmd_std, pmd_min, pmd_max, pmd_nonzero_pct)
                 else:
-                    gzprintf(gzfp, b"%s\t%ld\tcomp_%u\t%u\tsingleton\t%.6f\t%.6f\t%.6f\tremoved\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\n",
+                    gzprintf(gzfp, b"%s\t%ld\tcomp_%u\t%u\tsingleton\t%.6f\t%.6f\t%.6f\tremoved\t%.6f\t%.6f\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\n",
                         ref_name_c, ref_len, component_id, node_degree, community_cc, individual_cc, cc_threshold,
+                        anomaly_score, betweenness,
+                        taxid, taxid_rank_id, taxid_depth, <int>taxonomy_flag,
                         treads, unique_reads, repeat_reads, shared_reads, align_count, multimap_pct,
                         connected_neighbors, avg_co_mappings, max_co_map, neighbor_mm_rate,
                         score_mean, score_std, score_min, score_max, pmd_available,
                         pmd_mean, pmd_std, pmd_min, pmd_max, pmd_nonzero_pct)
             else:
                 if keep_flag:
-                    gzprintf(gzfp, b"%s\t%ld\tcomp_%u\t%u\tcomm_%u\t%.6f\t%.6f\t%.6f\tkept\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\n",
+                    gzprintf(gzfp, b"%s\t%ld\tcomp_%u\t%u\tcomm_%u\t%.6f\t%.6f\t%.6f\tkept\t%.6f\t%.6f\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\n",
                         ref_name_c, ref_len, component_id, node_degree, community_id, community_cc, individual_cc, cc_threshold,
+                        anomaly_score, betweenness,
+                        taxid, taxid_rank_id, taxid_depth, <int>taxonomy_flag,
                         treads, unique_reads, repeat_reads, shared_reads, align_count, multimap_pct,
                         connected_neighbors, avg_co_mappings, max_co_map, neighbor_mm_rate,
                         score_mean, score_std, score_min, score_max, pmd_available,
                         pmd_mean, pmd_std, pmd_min, pmd_max, pmd_nonzero_pct)
                 else:
-                    gzprintf(gzfp, b"%s\t%ld\tcomp_%u\t%u\tcomm_%u\t%.6f\t%.6f\t%.6f\tremoved\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\n",
+                    gzprintf(gzfp, b"%s\t%ld\tcomp_%u\t%u\tcomm_%u\t%.6f\t%.6f\t%.6f\tremoved\t%.6f\t%.6f\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\n",
                         ref_name_c, ref_len, component_id, node_degree, community_id, community_cc, individual_cc, cc_threshold,
+                        anomaly_score, betweenness,
+                        taxid, taxid_rank_id, taxid_depth, <int>taxonomy_flag,
                         treads, unique_reads, repeat_reads, shared_reads, align_count, multimap_pct,
                         connected_neighbors, avg_co_mappings, max_co_map, neighbor_mm_rate,
                         score_mean, score_std, score_min, score_max, pmd_available,
@@ -369,30 +395,38 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
         else:
             if community_id == UINT32_MAX:
                 if keep_flag:
-                    fprintf(f, b"%s\t%ld\tcomp_%u\t%u\tsingleton\t%.6f\t%.6f\t%.6f\tkept\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\n",
+                    fprintf(f, b"%s\t%ld\tcomp_%u\t%u\tsingleton\t%.6f\t%.6f\t%.6f\tkept\t%.6f\t%.6f\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\n",
                         ref_name_c, ref_len, component_id, node_degree, community_cc, individual_cc, cc_threshold,
+                        anomaly_score, betweenness,
+                        taxid, taxid_rank_id, taxid_depth, <int>taxonomy_flag,
                         treads, unique_reads, repeat_reads, shared_reads, align_count, multimap_pct,
                         connected_neighbors, avg_co_mappings, max_co_map, neighbor_mm_rate,
                         score_mean, score_std, score_min, score_max, pmd_available,
                         pmd_mean, pmd_std, pmd_min, pmd_max, pmd_nonzero_pct)
                 else:
-                    fprintf(f, b"%s\t%ld\tcomp_%u\t%u\tsingleton\t%.6f\t%.6f\t%.6f\tremoved\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\n",
+                    fprintf(f, b"%s\t%ld\tcomp_%u\t%u\tsingleton\t%.6f\t%.6f\t%.6f\tremoved\t%.6f\t%.6f\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\n",
                         ref_name_c, ref_len, component_id, node_degree, community_cc, individual_cc, cc_threshold,
+                        anomaly_score, betweenness,
+                        taxid, taxid_rank_id, taxid_depth, <int>taxonomy_flag,
                         treads, unique_reads, repeat_reads, shared_reads, align_count, multimap_pct,
                         connected_neighbors, avg_co_mappings, max_co_map, neighbor_mm_rate,
                         score_mean, score_std, score_min, score_max, pmd_available,
                         pmd_mean, pmd_std, pmd_min, pmd_max, pmd_nonzero_pct)
             else:
                 if keep_flag:
-                    fprintf(f, b"%s\t%ld\tcomp_%u\t%u\tcomm_%u\t%.6f\t%.6f\t%.6f\tkept\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\n",
+                    fprintf(f, b"%s\t%ld\tcomp_%u\t%u\tcomm_%u\t%.6f\t%.6f\t%.6f\tkept\t%.6f\t%.6f\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\n",
                         ref_name_c, ref_len, component_id, node_degree, community_id, community_cc, individual_cc, cc_threshold,
+                        anomaly_score, betweenness,
+                        taxid, taxid_rank_id, taxid_depth, <int>taxonomy_flag,
                         treads, unique_reads, repeat_reads, shared_reads, align_count, multimap_pct,
                         connected_neighbors, avg_co_mappings, max_co_map, neighbor_mm_rate,
                         score_mean, score_std, score_min, score_max, pmd_available,
                         pmd_mean, pmd_std, pmd_min, pmd_max, pmd_nonzero_pct)
                 else:
-                    fprintf(f, b"%s\t%ld\tcomp_%u\t%u\tcomm_%u\t%.6f\t%.6f\t%.6f\tremoved\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\n",
+                    fprintf(f, b"%s\t%ld\tcomp_%u\t%u\tcomm_%u\t%.6f\t%.6f\t%.6f\tremoved\t%.6f\t%.6f\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\n",
                         ref_name_c, ref_len, component_id, node_degree, community_id, community_cc, individual_cc, cc_threshold,
+                        anomaly_score, betweenness,
+                        taxid, taxid_rank_id, taxid_depth, <int>taxonomy_flag,
                         treads, unique_reads, repeat_reads, shared_reads, align_count, multimap_pct,
                         connected_neighbors, avg_co_mappings, max_co_map, neighbor_mm_rate,
                         score_mean, score_std, score_min, score_max, pmd_available,

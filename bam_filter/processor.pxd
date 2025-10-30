@@ -72,7 +72,8 @@ cdef struct MemoryPool:
 
     # Core alignment data (now includes PMD)
     Alignment* alignments
-    int64_t alignment_count
+    int64_t alignment_count          # Current number of alignments stored
+    int64_t alignment_capacity       # Allocated capacity for alignments array
     bint alignments_is_external
     int64_t original_alignment_count
 

@@ -2400,7 +2400,7 @@ cdef WeightedGraph* analyze_reference_graph(MemoryPool* pool, ReferencePattern* 
                                       co_mapping_averages, max_co_mappings, co_mapping_counts,
                                       neighbor_multimap_avg, neighbor_connections_avg,
                                       neighbor_counts, array_size, dataset_median_connections,
-                                      min_read_count, build_igraph, tsv_export_path) != 0:
+                                      min_read_count, build_igraph, 0, tsv_export_path) != 0:
                 bf_nogil_logf_notime(NULL, "ERROR: Failed to write graph analysis TSV\n")
         else:
             bf_nogil_logf_notime(NULL, "ERROR: Reference stats not calculated for TSV export\n")
@@ -2717,6 +2717,7 @@ cdef int write_graph_tsv(MemoryPool* pool, sam_hdr_t* bam_header,
                         double dataset_median_connections,
                         int32_t min_read_count,
                         bint include_clustering,
+                        int outlier_method,
                         const char* tsv_path) noexcept nogil:
     # Forwarder kept for ABI compatibility: call the implementation in the
     # separate processor_graph_tsv extension which contains the full logic.
@@ -2726,4 +2727,4 @@ cdef int write_graph_tsv(MemoryPool* pool, sam_hdr_t* bam_header,
                              max_co_mappings, co_mapping_counts,
                              neighbor_multimap_avg, neighbor_connections_avg,
                              neighbor_counts, array_size, dataset_median_connections,
-                             min_read_count, include_clustering, tsv_path)
+                             min_read_count, include_clustering, outlier_method, tsv_path)

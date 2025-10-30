@@ -307,9 +307,11 @@ cdef double calculate_adaptive_dominance_strength(MemoryPool* pool, EMAlgorithmC
     global _dominance_last_final_strength
     cdef double base_strength
     cdef double dataset_entropy = calculate_dataset_entropy(pool)
-    cdef double max_entropy = log(<double>pool.reference_count)
     cdef double final_strength_simple
-    cdef double concentration = 1.0 - (dataset_entropy / max_entropy)
+    # `calculate_dataset_entropy` already returns entropy normalized to [0,1]
+    # (entropy / log(n_refs)). Use 1 - dataset_entropy as the concentration
+    # measure to avoid double-scaling by log(n_refs).
+    cdef double concentration = 1.0 - dataset_entropy
     cdef bint mode_manual
     cdef double adaptive_strength
     cdef double confidence_factor

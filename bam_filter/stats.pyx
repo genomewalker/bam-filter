@@ -18,6 +18,37 @@ filtering criteria based on coverage evenness and quality metrics.
 
 #include <inttypes.h>
 
+# Forward declare htslib types to ensure they're available for function pointers
+# NOTE: htslib 1.3.x uses bam_hdr_t, newer versions (1.10+) use sam_hdr_t
+# We use sam_hdr_t throughout the codebase, so add compatibility typedef and function wrappers
+cdef extern from *:
+    """
+    #include "htslib/sam.h"
+
+    /* Check htslib version and provide compatibility layer for old versions */
+    #if !defined(HTS_VERSION) || HTS_VERSION < 101000
+        /* Compatibility for htslib < 1.10 (uses bam_hdr_t instead of sam_hdr_t) */
+        #ifndef sam_hdr_t
+            typedef bam_hdr_t sam_hdr_t;
+            #define sam_hdr_destroy bam_hdr_destroy
+            #define sam_hdr_name2tid bam_name2id
+
+            /* sam_hdr_tid2len doesn't exist, create inline wrapper */
+            static inline uint32_t sam_hdr_tid2len(const sam_hdr_t *h, int tid) {
+                return h->target_len[tid];
+            }
+        #endif
+    #endif
+    """
+    ctypedef struct sam_hdr_t
+    ctypedef struct samFile
+    ctypedef struct hts_idx_t
+
+    # Forward declare functions
+    void sam_hdr_destroy(sam_hdr_t* h) nogil
+    int64_t sam_hdr_tid2len(const sam_hdr_t* header, int tid) nogil
+    int sam_hdr_name2tid(sam_hdr_t* header, const char* name) nogil
+
 from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint16_t, uint8_t, uint32_t, uint64_t, INT32_MAX
 from libc.stdlib cimport malloc, free, realloc, calloc, qsort
 from libc.string cimport memcpy, memset, strlen, strcmp, strcpy, strtok, strncmp
@@ -128,54 +159,40 @@ cdef extern from "seqid_khash.h":
     khint_t kh_put_seqid_map(kh_seqid_map_t*, khint64_t, int*) nogil
     khint_t kh_size(kh_seqid_map_t*) nogil
 
-cdef extern from "htslib/sam.h":
-    int bam_aux2i(const uint8_t *s) nogil
-    int32_t bam_endpos(bam1_t* b) nogil
-    ctypedef struct bam1_core_t:
-        int32_t tid
-        int64_t pos
-        uint8_t qual
-        uint16_t flag
-        uint16_t l_qname
-        uint32_t n_cigar
-        int32_t l_qseq
-    ctypedef struct bam1_t:
-        bam1_core_t core
-        uint8_t* data
-        int l_data
-        uint32_t m_data
-    ctypedef struct samFile
-    ctypedef struct sam_hdr_t:
-        char* text
-        int n_targets
-        char** target_name
-    ctypedef struct hts_idx_t
-    ctypedef struct hts_itr_t
-    
-    int64_t sam_hdr_tid2len(sam_hdr_t* hdr, int tid) nogil
-    samFile* hts_open(const char* fn, const char* mode) nogil
-    int hts_close(samFile* fp) nogil
-    sam_hdr_t* sam_hdr_read(samFile* fp) nogil
-    sam_hdr_t* sam_hdr_init() nogil
-    int sam_read1(samFile* fp, sam_hdr_t* hdr, bam1_t* b) nogil
-    int sam_write1(samFile* fp, const sam_hdr_t* h, const bam1_t* b) nogil
-    int sam_hdr_write(samFile* fp, const sam_hdr_t* h) nogil
-    int sam_hdr_add_line(sam_hdr_t* h, const char* tag, ...) nogil
-    int sam_hdr_add_lines(sam_hdr_t* h, const char* text, int keep) nogil
-    bam1_t* bam_init1() nogil
-    void bam_destroy1(bam1_t* b) nogil
-    hts_idx_t* sam_index_load(samFile* fp, const char* fn) nogil
-    hts_itr_t* sam_itr_queryi(hts_idx_t* idx, int tid, int beg, int end) nogil
-    int sam_itr_next(samFile* fp, hts_itr_t* iter, bam1_t* b) nogil
-    void hts_itr_destroy(hts_itr_t* iter) nogil
-    void hts_idx_destroy(hts_idx_t* idx) nogil
-    int hts_idx_get_stat(hts_idx_t* idx, int tid, uint64_t* mapped, uint64_t* unmapped) nogil
-    uint8_t* bam_aux_get(bam1_t* b, const char* tag) nogil
-    char* bam_get_qname(bam1_t* b) nogil
-    void sam_hdr_destroy(sam_hdr_t* h) nogil
-    int32_t sam_hdr_name2tid(sam_hdr_t* header, const char* name) nogil
-    # Threading helper
-    int hts_set_threads(samFile* fp, int n) nogil
+# Import htslib types and functions from centralized header
+from bam_filter.processor_types cimport (
+    bam1_t,
+    bam1_core_t,
+    samFile,
+    sam_hdr_t,
+    hts_idx_t,
+    hts_itr_t,
+    hts_open,
+    hts_close,
+    sam_hdr_read,
+    sam_hdr_destroy,
+    sam_hdr_tid2len,
+    sam_hdr_name2tid,
+    sam_hdr_init,
+    sam_hdr_write,
+    sam_hdr_add_line,
+    sam_hdr_add_lines,
+    sam_read1,
+    sam_write1,
+    bam_init1,
+    bam_destroy1,
+    sam_index_load,
+    hts_idx_destroy,
+    hts_idx_get_stat,
+    sam_itr_queryi,
+    sam_itr_next,
+    hts_itr_destroy,
+    bam_aux_get,
+    bam_get_qname,
+    bam_aux2i,
+    bam_endpos,
+    hts_set_threads,
+)
 
 cdef extern from "htslib/hts.h":
     int hts_set_opt(void *fp, int opt, ...) nogil

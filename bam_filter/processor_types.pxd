@@ -148,7 +148,9 @@ cdef extern from "htslib/sam.h" nogil:
         uint32_t m_data
 
     ctypedef struct sam_hdr_t:
+        char* text
         int n_targets
+        char** target_name
 
     ctypedef struct hts_idx_t
     ctypedef struct hts_itr_t
@@ -175,6 +177,9 @@ cdef extern from "htslib/sam.h" nogil:
     sam_hdr_t* sam_hdr_parse(size_t l_text, const char* text)
     int32_t sam_hdr_nref(sam_hdr_t* header)
     int32_t bam_endpos(bam1_t* b) nogil
+    sam_hdr_t* sam_hdr_init()
+    int sam_hdr_add_line(sam_hdr_t* h, const char* tag, ...)
+    int sam_hdr_add_lines(sam_hdr_t* h, const char* text, int keep)
 
     # Read/Write
     int sam_read1(samFile* fp, sam_hdr_t* h, bam1_t* b)

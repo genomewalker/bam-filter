@@ -1,7 +1,7 @@
 # cython: language_level=3
 from libc.stdio cimport FILE
 from bam_filter.stats cimport RefStats, FilterConditions
-from bam_filter.processor cimport sam_hdr_t
+from bam_filter.processor_types cimport sam_hdr_t
 
 # zlib gzFile is declared directly to avoid depending on a non-portable
 # Cython-provided zlib.pxd. Expose the minimal API we need for callers.

@@ -5,6 +5,7 @@ using an Expectation-Maximization (EM) algorithm with optional SQUAREM accelerat
 """
 
 import os
+import sys
 import logging
 from time import perf_counter
 from typing import Any, Dict, List, Optional, Tuple
@@ -77,8 +78,15 @@ def reassign_reads(
     clustering: bool = False,
     leiden_resolution: float = 1.0,
     leiden_max_iterations: int = 10,
+    outlier_method: str = "mad",
     # Graph export
     graph_export: Optional[str] = None,
+    # Taxonomy parameters
+    taxonomy_db: Optional[str] = None,
+    taxonomy_min_rank: int = 6,
+    taxonomy_cross_domain_threshold: float = 0.10,
+    taxonomy_kingdom_threshold: float = 0.25,
+    taxonomy_genus_threshold: float = 0.50,
 ) -> Dict[str, Any]:
     """Reassign multi-mapping reads using EM algorithm with SQUAREM acceleration.
 
@@ -156,6 +164,8 @@ def reassign_reads(
     """
     overall_start = perf_counter()
 
+    print(f"[DEBUG reassign_reads] taxonomy_db parameter value: {taxonomy_db!r}", file=sys.stderr)
+
     if not os.path.exists(bam_file):
         raise FileNotFoundError(f"Input BAM file not found: {bam_file}")
 
@@ -202,6 +212,51 @@ def reassign_reads(
             pipeline_steps.append("BAM file generation")
 
         _info("Pipeline: %s", " → ".join(pipeline_steps))
+
+        # Load taxonomy databases if provided
+        taxdb = None
+        accmap = None
+        if taxonomy_db:
+            print(f"[DEBUG] taxonomy_db parameter: {taxonomy_db}", file=sys.stderr)
+            _info("Loading taxonomy database from %s", taxonomy_db)
+            from bam_filter.taxonomy_db import TaxonomyDatabase, load_accession_map_from_file
+
+            try:
+                print(f"[DEBUG] Attempting to load taxonomy from {taxonomy_db}", file=sys.stderr)
+                taxdb = TaxonomyDatabase.from_parquet(taxonomy_db)
+                print(f"[DEBUG] Successfully loaded {taxdb.n_nodes} taxonomy nodes", file=sys.stderr)
+                _info("  Loaded taxonomy: %d nodes", taxdb.n_nodes)
+            except Exception as e:
+                print(f"[DEBUG] Failed to load taxonomy: {e}", file=sys.stderr)
+                import traceback
+                traceback.print_exc()
+                _warn("Failed to load taxonomy database: %s", str(e))
+                _warn("Continuing without taxonomy-aware graph analysis")
+                taxdb = None
+
+            if taxdb is not None:
+                # Try to load accession map from taxonomy directory
+                accession_map_path = os.path.join(taxonomy_db, "accession_map.parquet")
+                print(f"[DEBUG] Checking for accession map at: {accession_map_path}", file=sys.stderr)
+                print(f"[DEBUG] File exists: {os.path.exists(accession_map_path)}", file=sys.stderr)
+                if os.path.exists(accession_map_path):
+                    print(f"[DEBUG] Loading accession map from {accession_map_path}", file=sys.stderr)
+                    _info("Loading accession map from %s", accession_map_path)
+
+                    # Extract reference names from BAM to use as filter for efficient loading
+                    # This will be done inside processor.pyx after graph analysis when we know which refs to keep
+                    # For now, pass None and let the accession map loading be deferred
+                    print(f"[DEBUG] Accession map will be loaded on-demand with reference filtering", file=sys.stderr)
+                    # Store the path for later use
+                    accmap = accession_map_path  # Pass path instead of loaded object
+                else:
+                    print(f"[DEBUG] Accession map not found", file=sys.stderr)
+                    _warn("No accession_map.parquet found in %s", taxonomy_db)
+                    _warn("Taxonomy-aware graph analysis requires accession_map.parquet in the taxonomy directory")
+                    _warn("Continuing without taxonomy-aware graph analysis")
+                    taxdb = None
+                    accmap = None
+
         result = process_bam_with_em(
             bam_file=bam_file,
             output_bam=output_bam,
@@ -233,7 +288,14 @@ def reassign_reads(
             clustering=clustering,
             leiden_resolution=leiden_resolution,
             leiden_max_iterations=leiden_max_iterations,
+            outlier_method=outlier_method,
             graph_export=graph_export,
+            taxonomy_db=taxdb,
+            taxonomy_accession_map=accmap,
+            taxonomy_min_rank=taxonomy_min_rank,
+            taxonomy_cross_domain_threshold=taxonomy_cross_domain_threshold,
+            taxonomy_kingdom_threshold=taxonomy_kingdom_threshold,
+            taxonomy_genus_threshold=taxonomy_genus_threshold,
         )
         processing_duration = perf_counter() - processing_start
         _info("Core processing completed in %.2f seconds", processing_duration)
@@ -382,7 +444,14 @@ def reassign(args):
         "clustering": getattr(args, "clustering", False),
         "leiden_resolution": getattr(args, "leiden_resolution", 1.0),
         "leiden_max_iterations": getattr(args, "leiden_max_iterations", 10),
+        "outlier_method": getattr(args, "outlier_method", "mad"),
         "graph_export": getattr(args, "graph_export", None),
+        # Taxonomy parameters
+        "taxonomy_db": getattr(args, "taxonomy_db", None),
+        "taxonomy_min_rank": getattr(args, "taxonomy_min_rank", 6),
+        "taxonomy_cross_domain_threshold": getattr(args, "taxonomy_cross_domain_threshold", 0.10),
+        "taxonomy_kingdom_threshold": getattr(args, "taxonomy_kingdom_threshold", 0.25),
+        "taxonomy_genus_threshold": getattr(args, "taxonomy_genus_threshold", 0.50),
     }
 
     try:

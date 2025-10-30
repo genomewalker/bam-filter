@@ -21,6 +21,8 @@ cdef struct LeidenResults:
     float* community_cc_values   # CC value for the community each reference belongs to
     float* individual_cc_values  # Individual CC value for each reference (Barrat's method)
     float* cc_threshold_values   # Broken-stick threshold used for each reference's community
+    float* anomaly_scores        # Anomaly score for each reference (for multi-metric methods like Isolation Forest)
+    float* betweenness_centrality  # Betweenness centrality for each reference (bridge-ness metric)
 
 cdef struct CommunityStructure:
     # NOTE: CommunityStructure was previously declared here but is no longer
@@ -41,7 +43,20 @@ cdef LeidenResults* leiden_clustering(
     double resolution,
     int32_t max_iterations,
     bint verbose,
-    int32_t thread_count
+    int32_t thread_count,
+    int outlier_method,  # 0 = MAD (default), 1 = IQR, 2 = IFOREST, 3 = LOF, 4 = ZSCORE
+    int32_t iforest_n_trees,
+    uint32_t iforest_subsample_size,
+    double leiden_anomaly_threshold,
+    uint32_t iforest_random_seed,
+    uint32_t lof_k,
+    double lof_contamination,
+    double zscore_threshold,
+    uint32_t* exact_connection_counts,
+    double* co_mapping_averages,
+    uint64_t* max_co_mappings,
+    double* neighbor_multimap_avg,
+    uint32_t array_size
 ) except NULL nogil
 # Graph statistics using igraph (NEW - much faster than custom implementation)
 

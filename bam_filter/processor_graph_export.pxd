@@ -10,8 +10,7 @@ from bam_filter.processor cimport MemoryPool
 from bam_filter.processor_graph cimport ReferenceStats, ReferencePattern, WeightedGraph
 from bam_filter.processor_mapping cimport ReferenceMapping
 
-cdef extern from "htslib/sam.h":
-    ctypedef struct sam_hdr_t
+from bam_filter.processor cimport sam_hdr_t
 
 # Main export function
 cdef int export_graph_graphml(
@@ -22,5 +21,6 @@ cdef int export_graph_graphml(
     ReferencePattern* pattern_data,
     ReferenceStats* ref_stats,
     const char* output_path,
-    bint verbose
-) noexcept nogil
+    bint verbose,
+    bint export_only_used_stats,
+) nogil

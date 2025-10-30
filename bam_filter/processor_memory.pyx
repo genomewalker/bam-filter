@@ -133,20 +133,14 @@ cdef MemoryPool* create_memory_pool(int64_t alignment_count,
 
     memset(pool, 0, sizeof(MemoryPool))
 
-    if alignment_count < 1000000:
-        initial_alignment_count = max_int64(100000, alignment_count // 10)
-        bf_nogil_logf_notime(
-            b"MEMORY",
-            "alignment_allocation: mode=progressive alignments=%ld",
-            alignment_count,
-        )
-    else:
-        initial_alignment_count = alignment_count
-        bf_nogil_logf_notime(
-            b"MEMORY",
-            "alignment_allocation: mode=full alignments=%ld",
-            alignment_count,
-        )
+    # Always allocate full capacity to avoid buffer overflows
+    # Progressive allocation was causing segfaults when actual count exceeded initial capacity
+    initial_alignment_count = alignment_count
+    bf_nogil_logf_notime(
+        b"MEMORY",
+        "alignment_allocation: mode=full alignments=%ld",
+        alignment_count,
+    )
 
     temp_size = max_int64(unique_read_count, reference_count)
     alignments_size = initial_alignment_count * sizeof(Alignment)
@@ -235,7 +229,8 @@ cdef MemoryPool* create_memory_pool(int64_t alignment_count,
     pool.temp_buffer_A_offset = reference_weights_size
     pool.temp_buffer_B_offset = reference_weights_size + temp_size
 
-    pool.alignment_count = initial_alignment_count
+    pool.alignment_count = 0  # Initially no alignments stored
+    pool.alignment_capacity = initial_alignment_count  # Allocated capacity
     pool.original_alignment_count = alignment_count
     pool.reference_count = reference_count
     pool.unique_read_count = unique_read_count
@@ -412,5 +407,6 @@ cdef int shrink_memory_pool(MemoryPool* pool) except -1 nogil:
         return -1
     if newp:
         pool.alignments = newp
+    pool.alignment_capacity = pool.alignment_count  # After shrink, capacity matches count
     pool.original_alignment_count = pool.alignment_count
     return 0

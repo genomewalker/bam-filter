@@ -85,7 +85,9 @@ def is_debug():
     return bf_logging.should_log(bf_logging.LogLevel.DEBUG)
 
 
-def _resolve_verbosity_level(verbose_count: int, verbose_level: Optional[str]) -> bf_logging.LogLevel:
+def _resolve_verbosity_level(
+    verbose_count: int, verbose_level: Optional[str]
+) -> bf_logging.LogLevel:
     if verbose_level:
         return _VERBOSITY_NAME_TO_LEVEL.get(verbose_level, bf_logging.LogLevel.SUMMARY)
 
@@ -572,7 +574,7 @@ defaults = {
     "min_read_ani": 90.0,
     "min_breadth": 0,
     "min_coverage_evenness": 0,
-    "min_coeff_var": np.inf,
+    "min_coeff_var": float("inf"),
     "min_coverage_mean": 0,
     "prefix": None,
     "sort_memory": "1G",
@@ -611,7 +613,23 @@ defaults = {
     "leiden_resolution": 1.0,  # Resolution parameter for community detection
     "leiden_max_iterations": 10,  # Maximum iterations for convergence
     "leiden_parallel": False,  # Enable parallel move phase
+    "outlier_method": "mad",  # "mad" | "iqr" | "iforest" | "lof" | "zscore" - Statistical outlier detection method
 }
+
+# Defaults for outlier detection parameters
+defaults.update(
+    {
+        "iforest_n_trees": 100,
+        "iforest_subsample_size": 256,
+        # If negative (e.g. -1) the detector will choose a per-community auto threshold.
+        # Non-negative values (0.0-0.5) are treated as explicit contamination proportions.
+        "iforest_contamination": -1.0,
+        "iforest_random_seed": 42,
+        "lof_k": 20,
+        "lof_contamination": 0.1,
+        "zscore_threshold": 3.0,
+    }
+)
 
 help_msg = {
     "bam": "BAM file containing aligned reads",
@@ -689,6 +707,7 @@ help_msg = {
     "leiden_resolution": "Resolution parameter for Leiden clustering (0.5-2.0). Lower=larger communities (0.5=family level), 1.0=default (species level), higher=smaller communities (2.0=strain level)",
     "leiden_max_iterations": "Maximum iterations for Leiden clustering convergence (3-20, default=10)",
     "leiden_parallel": "Enable parallel processing in Leiden move phase for speed (experimental)",
+    "outlier_method": "Statistical outlier detection method for clustering coefficient filtering: 'mad' (Median Absolute Deviation, default - robust univariate, uses modified z-score > 3.5), 'iqr' (Interquartile Range - standard boxplot method, Q1-1.5*IQR), 'iforest' (Isolation Forest - multi-metric tree-based anomaly detection, uses all graph metrics), 'lof' (Local Outlier Factor - density-based detection), or 'zscore' (Standard Z-score - parametric method). MAD/IQR only use clustering coefficient. Isolation Forest uses all available graph metrics (CC, degree, neighbor quality, etc.) for more robust detection.",
 }
 
 from difflib import get_close_matches, SequenceMatcher
@@ -1051,7 +1070,7 @@ def get_arguments(argv=None):
         "--min-read-count",
         type=lambda x: int(
             check_values(
-                x, minval=1, maxval=np.inf, parser=parser, var="--min-read-count"
+                x, minval=1, maxval=float("inf"), parser=parser, var="--min-read-count"
             )
         ),
         default=defaults["min_read_count"],  # ✓ SYNCED: now 1
@@ -1164,7 +1183,7 @@ def get_arguments(argv=None):
         type=float,
         default=defaults["information_threshold"],
         metavar="FLOAT",
-        help=help_msg["information_threshold"],
+        help="[DEPRECATED - No longer used] " + help_msg["information_threshold"],
     )
 
     # Graph construction arguments (cluster-aware filtering always enabled)
@@ -1222,6 +1241,140 @@ def get_arguments(argv=None):
         metavar="INT",
         help=help_msg["leiden_max_iterations"],
     )
+    reassign_optional_args.add_argument(
+        "--outlier-method",
+        dest="outlier_method",
+        type=str,
+        choices=["mad", "iqr", "iforest", "lof", "zscore"],
+        default=defaults["outlier_method"],
+        metavar="METHOD",
+        help=help_msg["outlier_method"],
+    )
+
+    reassign_optional_args.add_argument(
+        "--export-mode",
+        dest="export_mode",
+        type=str,
+        choices=["auto", "compact", "full"],
+        default="auto",
+        metavar="MODE",
+        help=(
+            "Graph/TSV export mode: 'auto' (default) chooses compact vs full based on "
+            "outlier-method; 'compact' restricts output to the small CC/anomaly set; "
+            "'full' emits all computed graph metrics."
+        ),
+    )
+
+    # Isolation Forest parameters
+    reassign_optional_args.add_argument(
+        "--iforest-n-trees",
+        dest="iforest_n_trees",
+        type=lambda x: int(
+            check_values(
+                x, minval=1, maxval=10000, parser=parser, var="--iforest-n-trees"
+            )
+        ),
+        default=defaults["iforest_n_trees"],
+        metavar="INT",
+        help="Number of trees in the Isolation Forest ensemble (default: 100)",
+    )
+    reassign_optional_args.add_argument(
+        "--iforest-subsample-size",
+        dest="iforest_subsample_size",
+        type=lambda x: int(
+            check_values(
+                x,
+                minval=2,
+                maxval=1000000,
+                parser=parser,
+                var="--iforest-subsample-size",
+            )
+        ),
+        default=defaults["iforest_subsample_size"],
+        metavar="INT",
+        help="Subsample size for building each Isolation Forest tree (default: 256)",
+    )
+
+    # Allow negative value to indicate data-driven per-community auto threshold (e.g., -1)
+    def _parse_iforest_contamination(x):
+        try:
+            val = float(x)
+        except Exception:
+            parser.error(
+                f"argument --iforest-contamination: Invalid value {x}. Must be a float in [-1,0.5]. Use -1 for auto mode."
+            )
+        if val < 0.0 and val != -1.0:
+            parser.error(
+                f"argument --iforest-contamination: Invalid negative value {x}. Use -1 to request auto per-community thresholds."
+            )
+        if val > 0.5:
+            parser.error(
+                f"argument --iforest-contamination: Invalid value {x}. Must be between -1 (auto) and 0.5"
+            )
+        return val
+
+    reassign_optional_args.add_argument(
+        "--iforest-contamination",
+        dest="iforest_contamination",
+        type=_parse_iforest_contamination,
+        default=defaults["iforest_contamination"],
+        metavar="FLOAT",
+        help="Expected proportion of outliers for Isolation Forest (0-0.5). Use -1 to enable data-driven per-community auto thresholding (default: -1).",
+    )
+    reassign_optional_args.add_argument(
+        "--iforest-random-seed",
+        dest="iforest_random_seed",
+        type=lambda x: int(
+            check_values(
+                x,
+                minval=0,
+                maxval=2**31 - 1,
+                parser=parser,
+                var="--iforest-random-seed",
+            )
+        ),
+        default=defaults["iforest_random_seed"],
+        metavar="INT",
+        help="Random seed for Isolation Forest reproducibility (default: 42)",
+    )
+
+    # LOF parameters
+    reassign_optional_args.add_argument(
+        "--lof-k",
+        dest="lof_k",
+        type=lambda x: int(
+            check_values(x, minval=1, maxval=1000, parser=parser, var="--lof-k")
+        ),
+        default=defaults["lof_k"],
+        metavar="INT",
+        help="Number of neighbors for LOF (default: 20)",
+    )
+    reassign_optional_args.add_argument(
+        "--lof-contamination",
+        dest="lof_contamination",
+        type=lambda x: float(
+            check_values(
+                x, minval=0.0, maxval=0.5, parser=parser, var="--lof-contamination"
+            )
+        ),
+        default=defaults["lof_contamination"],
+        metavar="FLOAT",
+        help="Expected proportion of outliers for LOF (0-0.5, default: 0.1)",
+    )
+
+    # Z-score threshold
+    reassign_optional_args.add_argument(
+        "--zscore-threshold",
+        dest="zscore_threshold",
+        type=lambda x: float(
+            check_values(
+                x, minval=0.1, maxval=10.0, parser=parser, var="--zscore-threshold"
+            )
+        ),
+        default=defaults["zscore_threshold"],
+        metavar="FLOAT",
+        help="Z-score threshold for zscore outlier method (default: 3.0)",
+    )
 
     reassign_optional_args.add_argument(
         "--graph-export",
@@ -1230,7 +1383,60 @@ def get_arguments(argv=None):
         default=None,
         metavar="PATH",
         help="Export graph to GraphML format for visualization (Cytoscape, igraph, etc.). "
-             "Includes node attributes (reference name, community, CC, read counts) and edge weights.",
+        "Includes node attributes (reference name, community, CC, read counts) and edge weights.",
+    )
+
+    # Taxonomy-aware graph analysis
+    reassign_optional_args.add_argument(
+        "--taxonomy-db",
+        dest="taxonomy_db",
+        type=str,
+        default=None,
+        metavar="DIR",
+        help="Path to taxonomy database directory (Parquet format). "
+        "Should contain nodes.parquet, metadata.parquet, and optionally accession_map.parquet. "
+        "If accession_map.parquet exists, taxonomy-aware graph analysis will be enabled.",
+    )
+
+    reassign_optional_args.add_argument(
+        "--taxonomy-min-rank",
+        dest="taxonomy_min_rank",
+        type=int,
+        default=6,
+        metavar="RANK_ID",
+        help="Minimum taxonomic rank ID for mismatch detection. "
+        "Rank IDs: 2=species, 6=genus, 8=family, 13=order, 17=class, 20=phylum, 24=superkingdom. "
+        "Default: 6 (genus level).",
+    )
+
+    reassign_optional_args.add_argument(
+        "--taxonomy-cross-domain-threshold",
+        dest="taxonomy_cross_domain_threshold",
+        type=float,
+        default=0.10,
+        metavar="FRAC",
+        help="Fraction of cross-domain neighbors to flag reference as contamination. "
+        "Default: 0.10 (flag if >10%% of neighbors cross domains).",
+    )
+
+    reassign_optional_args.add_argument(
+        "--taxonomy-kingdom-threshold",
+        dest="taxonomy_kingdom_threshold",
+        type=float,
+        default=0.25,
+        metavar="FRAC",
+        help="Fraction of kingdom-mismatch neighbors to flag reference. "
+        "Default: 0.25 (flag if >25%% of neighbors cross kingdoms).",
+    )
+
+    reassign_optional_args.add_argument(
+        "--taxonomy-genus-threshold",
+        dest="taxonomy_genus_threshold",
+        type=float,
+        default=0.50,
+        metavar="FRAC",
+        help="Fraction of genus-level mismatch neighbors to flag reference. "
+        "Default: 0.50 (flag if >50%% of neighbors differ at genus level).",
     )
 
     misc_filter_args.add_argument(
@@ -1294,7 +1500,7 @@ def get_arguments(argv=None):
         "--max-read-length",
         type=lambda x: int(
             check_values(
-                x, minval=1, maxval=np.inf, parser=parser, var="--max-read-length"
+                x, minval=1, maxval=float("inf"), parser=parser, var="--max-read-length"
             )
         ),
         default=defaults["max_read_length"],
@@ -1307,7 +1513,7 @@ def get_arguments(argv=None):
         "--min-read-count",
         type=lambda x: int(
             check_values(
-                x, minval=1, maxval=np.inf, parser=parser, var="--min-read-count"
+                x, minval=1, maxval=float("inf"), parser=parser, var="--min-read-count"
             )
         ),
         default=defaults["min_read_count"],
@@ -1392,7 +1598,7 @@ def get_arguments(argv=None):
         "--min-coeff-var",
         type=lambda x: float(
             check_values(
-                x, minval=0, maxval=np.inf, parser=parser, var="--min-evenness"
+                x, minval=0, maxval=float("inf"), parser=parser, var="--min-evenness"
             )
         ),
         default=defaults["min_coeff_var"],
@@ -1564,6 +1770,80 @@ def get_arguments(argv=None):
         required=False,
         help=help_msg["lca_stats"],
     )
+
+    # Create the parser for the build-taxonomy command
+    parser_build_taxonomy = sub_parsers.add_parser(
+        "build-taxonomy",
+        help="Build Parquet taxonomy database from NCBI dump files",
+        parents=[parent_parser],
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        allow_abbrev=False,
+    )
+
+    build_taxonomy_required_args = parser_build_taxonomy.add_argument_group(
+        "Build taxonomy required arguments"
+    )
+    build_taxonomy_optional_args = parser_build_taxonomy.add_argument_group(
+        "Build taxonomy optional arguments"
+    )
+
+    build_taxonomy_required_args.add_argument(
+        "--nodes",
+        dest="nodes",
+        type=str,
+        required=True,
+        metavar="FILE",
+        help="Path to NCBI nodes.dmp file (plain text or .gz compressed)",
+    )
+
+    build_taxonomy_required_args.add_argument(
+        "--names",
+        dest="names",
+        type=str,
+        required=True,
+        metavar="FILE",
+        help="Path to NCBI names.dmp file (plain text or .gz compressed)",
+    )
+
+    build_taxonomy_required_args.add_argument(
+        "--output",
+        "-o",
+        dest="output",
+        type=str,
+        required=True,
+        metavar="DIR",
+        help="Output directory for Parquet taxonomy database files",
+    )
+
+    build_taxonomy_required_args.add_argument(
+        "--acc2taxid",
+        dest="acc2taxid",
+        type=str,
+        nargs="+",
+        required=True,
+        metavar="FILE",
+        help="Path(s) to NCBI accession2taxid file(s) (plain text or .gz compressed). Can specify multiple files.",
+    )
+
+    build_taxonomy_optional_args.add_argument(
+        "--num-threads",
+        dest="num_threads",
+        type=int,
+        default=1,
+        metavar="INT",
+        help="Number of threads for parallel processing",
+    )
+
+    build_taxonomy_optional_args.add_argument(
+        "--cache-taxids",
+        dest="cache_taxids",
+        type=int,
+        nargs="+",
+        default=None,
+        metavar="TAXID",
+        help="List of taxids to precompute in LCA cache for O(1) queries. Optional.",
+    )
+
     if argv is None:
         argv = sys.argv[1:]
 
@@ -1594,7 +1874,11 @@ def get_arguments(argv=None):
             if gm == -1:
                 bf_logging.log("GRAPH", "Mode: none (no filtering). CLI value=%s", gm)
             elif gm == 0:
-                bf_logging.log("GRAPH", "Mode: auto (will choose threshold later). CLI value=%s", gm)
+                bf_logging.log(
+                    "GRAPH",
+                    "Mode: auto (will choose threshold later). CLI value=%s",
+                    gm,
+                )
             else:
                 bf_logging.log("GRAPH", "Mode: explicit value. CLI value=%s", gm)
     except Exception:

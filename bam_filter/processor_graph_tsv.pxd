@@ -18,4 +18,4 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
                           double* neighbor_multimap_avg, double* neighbor_connections_avg,
                           uint32_t* neighbor_counts, uint32_t array_size,
                           double dataset_median_connections, int32_t min_read_count,
-                          bint include_clustering, const char* tsv_path) noexcept nogil
+                          bint include_clustering, int outlier_method, const char* tsv_path) noexcept nogil

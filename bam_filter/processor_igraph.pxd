@@ -202,5 +202,5 @@ cdef extern from "igraph.h":
     
     # Betweenness centrality
     igraph_error_t igraph_betweenness(const igraph_t *graph, igraph_vector_t *res,
-                                     const igraph_vs_t *vids, igraph_bool_t directed,
+                                     const igraph_vs_t vids, igraph_bool_t directed,
                                      const igraph_vector_t *weights) nogil
