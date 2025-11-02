@@ -1,34 +1,44 @@
 name: filterBAM_ci
 
-on: [push, pull_request]
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
 
 jobs:
-  filterBAM_ci:
-    name: filterBAM_ci
-    runs-on: "ubuntu-latest"
-    if: "!contains(github.event.head_commit.message, '[skip_ci]')"
+  tests:
+    name: Tests (Ubuntu, Python 3.9)
+    runs-on: ubuntu-latest
+    if: ${{ !(github.event_name == 'push' && contains(github.event.head_commit.message || '', '[skip_ci]')) && !(github.event_name == 'pull_request' && contains(github.event.pull_request.title || '', '[skip_ci]')) }}
+    defaults:
+      run:
+        shell: bash -l {0}
     steps:
-      - uses: actions/checkout@v2
-      - uses: conda-incubator/setup-miniconda@v2
+      - uses: actions/checkout@v4
+
+      - name: Set up micromamba
+        uses: mamba-org/setup-micromamba@v1
         with:
-          python-version: "3.9"
-          solver: "libmamba"
-          channels: conda-forge,bioconda,defaults
-          channel-priority: true
           environment-file: environment.yml
-          activate-environment: filterBAM
+          cache-environment: true
+          init-shell: bash
+          condarc: |
+            channel_priority: strict
+
+      - name: Install project (editable)
+        run: |
+          pip install --upgrade pip
+          pip install -e .[test,dev]
+
       - name: Lint with flake8
-        shell: bash -l {0}
         run: |
-          pip install flake8
           flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-      - name: Test with pytest
-        shell: bash -l {0}
+
+      - name: Run pytest
         run: |
-          pip install Cython 'ray>=0.8.7'
-          pip install -e .
-          pip install pytest pytest-cov pytest-dependency pytest-console-scripts
+          pytest --maxfail=1 --disable-warnings -vv
+
       - name: Check filterBAM help message
-        shell: bash -l {0}
         run: |
           filterBAM --help

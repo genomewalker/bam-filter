@@ -2,23 +2,46 @@ name: publish_pypi
 
 on:
   release:
-    types: [published, edited]
+    types: [published]
 
 jobs:
   build-and-publish:
-    name: Build and publish Python 🐍 distributions 📦 to PyPI and TestPyPI
+    name: Build and publish Python packages
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        shell: bash -l {0}
     steps:
-      - uses: actions/checkout@v1
-      - name: Setup Python 3.9
-        uses: actions/setup-python@v1
+      - uses: actions/checkout@v4
+
+      - name: Set up micromamba
+        uses: mamba-org/setup-micromamba@v1
         with:
-          python-version: 3.9
-      - name: Build filter-bam
+          environment-file: environment.yml
+          cache-environment: true
+          init-shell: bash
+          condarc: |
+            channel_priority: strict
+
+      - name: Install project for testing
         run: |
-          pip install wheel
-          python setup.py sdist bdist_wheel
-      - name: Publish distribution 📦 to PyPI
-        uses: pypa/gh-action-pypi-publish@master
+          pip install --upgrade pip
+          pip install -e .[test,dev]
+
+      - name: Run pytest
+        run: |
+          pytest --maxfail=1 --disable-warnings -vv
+
+      - name: Build distributions
+        run: |
+          pip install build
+          python -m build
+
+      - name: Publish distribution to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
         with:
+          user: __token__
           password: ${{ secrets.PYPI_PASSWORD }}

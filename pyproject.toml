@@ -1,0 +1,82 @@
+[build-system]
+requires = [
+  "scikit-build-core[pyproject]>=0.9",
+  "setuptools>=69",
+  "wheel",
+  "cython>=0.29.24",
+  "numpy>=1.24",
+]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "bam-filter"
+dynamic = ["version"]
+description = "A simple tool to filter references from a BAM file using different filter types"
+readme = "README.md"
+requires-python = ">=3.9,<3.10"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Antonio Fernandez-Guerra", email = "antonio@metagenomics.eu" },
+]
+keywords = ["bam-filter"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+  "Programming Language :: Python :: 3.9",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies = [
+  "Cython>=0.29.24",
+  "pandas>=1.3.3",
+  "scipy>=1.9.0",
+  "tqdm>=4.64.1",
+  "pysam>=0.17.0",
+  "numpy>1.24",
+  "pyrle>=0.0.31",
+  "sorted-nearest>=0.0.38",
+  "pyranges>=0.0.118",
+  "kneed>=0.8.1",
+  "matplotlib>=3.6.0",
+  "taxopy>=0.12.0",
+  "python-datatable>=1.1.3",
+  "networkx>=3.2.1",
+  "psutil>=5.9.8",
+  "numba>=0.60.0",
+  "pyarrow>=10.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/genomewalker/bam-filter"
+Repository = "https://github.com/genomewalker/bam-filter"
+Issues = "https://github.com/genomewalker/bam-filter/issues"
+
+[project.scripts]
+filterBAM = "bam_filter.__main__:main"
+
+[project.optional-dependencies]
+test = [
+  "pytest",
+  "pytest-cov",
+  "pytest-dependency",
+  "pytest-console-scripts",
+  "ray>=0.8.7",
+]
+dev = [
+  "flake8",
+]
+
+[tool.setuptools.packages.find]
+include = ["bam_filter"]
+exclude = ["docs", "tests", "scripts"]
+
+[tool.setuptools.dynamic]
+version = { attr = "bam_filter.__version__" }
+
+[tool.versioneer]
+VCS = "git"
+style = "pep440"
+versionfile_source = "bam_filter/_version.py"
+versionfile_build = "bam_filter/_version.py"
+tag_prefix = ""
+parentdir_prefix = "bam-filter-"

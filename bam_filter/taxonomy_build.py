@@ -156,11 +156,10 @@ def convert_gz_to_parquet(
             writer.close()
         tmp_path.unlink(missing_ok=True)  # type: ignore[attr-defined]
 
+    elapsed = time.time() - start_time
     bf_logging.log(
         "BUILD-TAXONOMY",
-        "  ↳ %,d rows written in %.1fs",
-        total_rows,
-        time.time() - start_time,
+        f"  ↳ {total_rows:,d} rows written in {elapsed:.1f}s",
     )
     return total_rows
 
@@ -231,7 +230,7 @@ def build_taxonomy(args) -> None:
             acc2taxid_file=None,
             num_threads=args.num_threads,
         )
-        bf_logging.log("BUILD-TAXONOMY", "  ✓ Loaded %,d taxonomy nodes", tax.n_nodes)
+        bf_logging.log("BUILD-TAXONOMY", f"  ✓ Loaded {tax.n_nodes:,d} taxonomy nodes")
     except Exception as exc:  # pragma: no cover - defensive
         bf_logging.error("BUILD-TAXONOMY: Error loading taxonomy: %s", exc)
         sys.exit(1)
@@ -283,8 +282,7 @@ def build_taxonomy(args) -> None:
     if args.cache_taxids:
         bf_logging.log(
             "BUILD-TAXONOMY",
-            "Building LCA cache for %,d taxids",
-            len(args.cache_taxids),
+            f"Building LCA cache for {len(args.cache_taxids):,d} taxids",
         )
         try:
             tax.build_lca_cache(args.cache_taxids)
@@ -308,8 +306,7 @@ def build_taxonomy(args) -> None:
             )
             bf_logging.log(
                 "BUILD-TAXONOMY",
-                "  ✓ Merged %,d accession mappings",
-                merged_rows,
+                f"  ✓ Merged {merged_rows:,d} accession mappings",
             )
             for temp_file in parquet_files:
                 if os.path.abspath(temp_file) != os.path.abspath(final_parquet):
@@ -323,17 +320,16 @@ def build_taxonomy(args) -> None:
 
     bf_logging.log("BUILD-TAXONOMY", "")
     bf_logging.log("BUILD-TAXONOMY", "✓ Taxonomy database built successfully!")
-    bf_logging.log("BUILD-TAXONOMY", "  Taxonomy nodes: %,d", tax.n_nodes)
+    bf_logging.log("BUILD-TAXONOMY", f"  Taxonomy nodes: {tax.n_nodes:,d}")
 
     accession_rows = _count_parquet_rows(os.path.join(args.output, "accession_map.parquet"))
     if accession_rows:
-        bf_logging.log("BUILD-TAXONOMY", "  Accession mappings: %,d", accession_rows)
+        bf_logging.log("BUILD-TAXONOMY", f"  Accession mappings: {accession_rows:,d}")
 
     if getattr(tax, "lca_cache", None) is not None:
         bf_logging.log(
             "BUILD-TAXONOMY",
-            "  LCA cache: %,d taxids",
-            getattr(tax.lca_cache, "n_cached", 0),
+            f"  LCA cache: {getattr(tax.lca_cache, 'n_cached', 0):,d} taxids",
         )
 
     bf_logging.log("BUILD-TAXONOMY", "")

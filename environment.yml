@@ -5,4 +5,22 @@ channels:
   - defaults
 dependencies:
   - python>=3.9,<3.10
+  - pip
+  - scikit-build-core>=0.9
+  - setuptools>=69
+  - wheel
+  - cython>=0.29.24
+  - numpy>=1.24
   - cxx-compiler
+  - pkg-config
+  - htslib
+  - igraph
+  - arrow-cpp
+  - duckdb
+  - pytest
+  - pytest-cov
+  - pip:
+      - pytest-dependency
+      - pytest-console-scripts
+      - ray>=0.8.7
+      - flake8
