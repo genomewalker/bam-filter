@@ -56,7 +56,7 @@ from bam_filter.processor_taxonomy_filters cimport (
 from bam_filter.processor_graph_export cimport export_graph_graphml
 from bam_filter.processor_mapping cimport ReferenceMapping
 from bam_filter.taxonomy_db cimport TaxonomyDB
-from bam_filter.processor_enhanced_filters cimport apply_enhanced_filtering
+from bam_filter.processor_tiered_filters cimport apply_tiered_filtering
 from bam_filter.processor_graph_taxonomy cimport (
     detect_taxonomy_anomalies,
     TaxonomyGraphConfig
@@ -481,10 +481,7 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
                                        bint strict_mode,
                                        bint remove_cross_domain_edges,
                                        bint flag_misannotations) except -1 nogil:
-    """Apply 3-tier enhanced filtering based on graph topology and taxonomy.
-
-    Integrates Community clustering, betweenness centrality, clustering coefficients,
-    and taxonomy coherence to identify and remove contamination.
+    """Apply three-tier filtering that combines clustering, topology metrics, and taxonomy checks.
 
     Parameters
     ----------
@@ -545,15 +542,11 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
     Notes
     -----
     Workflow:
-    1. Run Community clustering with component detection
-    2. Calculate betweenness centrality and clustering coefficients
-    3. Apply taxonomy-informed filtering (if enabled)
-    4. Apply 3-tier enhanced filtering:
-       - Tier 1: Structural role classification (PERIPHERAL/CORE/HUB/BRIDGE)
-       - Tier 2: Community coherence checking via taxonomy LCA
-       - Tier 3: Integrated decision matrix
-    5. Compact alignments and rebuild read indices
-    6. Export results to TSV and GraphML
+    1. Run community clustering with component detection.
+    2. Compute betweenness and clustering coefficients.
+    3. Apply taxonomy-informed filtering when enabled.
+    4. Execute the tiered decision pipeline (structural role, coherence, integrated decision).
+    5. Compact alignments, rebuild indices, and emit optional exports.
     """
     
     if verbose:
@@ -665,7 +658,7 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
                 )
 
                 # NOTE: neighbor_lists and neighbor_counts cleanup moved to AFTER
-                # apply_enhanced_filtering so they can be used for edge removal
+                # apply_tiered_filtering so they can be used for edge removal
 
                 if verbose:
                     bf_nogil_logf_notime(b"CLUSTER", "Taxonomy anomaly detection complete\n")
@@ -733,14 +726,14 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
                     pattern_data[ref_idx_loop].betweenness_centrality = 0.0
                     pattern_data[ref_idx_loop].num_neighbor_communities = 0
 
-    # Apply enhanced 3-tier filtering (NEW - includes bridge detection!)
+    # Apply three-tier filtering (NEW - includes bridge detection!)
     if verbose:
-        bf_nogil_logf_notime(b"CLUSTER", "\\nApplying enhanced 3-tier filtering...\\n")
+        bf_nogil_logf_notime(b"CLUSTER", "\\nApplying three-tier filtering...\\n")
 
     # Use thresholds passed as function parameters
     # Pass neighbor data for edge removal (re-extract from graph if needed)
     cdef char* alignment_keep_flags = NULL
-    if apply_enhanced_filtering(
+    if apply_tiered_filtering(
         pattern_data,
         ref_stats,
         array_size,
@@ -758,7 +751,7 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
         flag_misannotations,
         &alignment_keep_flags  # Get alignment flags for combined compaction
     ) != 0:
-        bf_nogil_logf_notime(b"CLUSTER", "ERROR: Enhanced filtering failed\\n")
+        bf_nogil_logf_notime(b"CLUSTER", "ERROR: Tiered filtering failed\\n")
         # Continue anyway, don't fail completely
 
     # Cleanup neighbor lists (after edge removal is complete)

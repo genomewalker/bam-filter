@@ -12,7 +12,7 @@
 
 """Convergence detection helpers for EM algorithm.
 
-Provides robust statistical functions (median, MAD) for detecting EM
+Provides MAD-based statistical functions (median, MAD) for detecting EM
 convergence anomalies and stagnation patterns.
 """
 
@@ -62,8 +62,8 @@ cdef int _count_filled(int iteration, int H) except -1 nogil:
     if filled > H: filled = H
     return filled
 
-cdef void _robust_sigma(double* buf, int H, int filled, double* med_out, double* sigma_out) noexcept nogil:
-    """Compute robust median and sigma (MAD-based) from history buffer.
+cdef void _mad_statistics(double* buf, int H, int filled, double* med_out, double* sigma_out) noexcept nogil:
+    """Compute MAD-based median and scale from history buffer.
 
     Uses Median Absolute Deviation (MAD) scaled by 1.4826 for consistency
     with normal distribution standard deviation. Handles partially-filled
@@ -80,7 +80,7 @@ cdef void _robust_sigma(double* buf, int H, int filled, double* med_out, double*
     med_out : double*
         Output for median value
     sigma_out : double*
-        Output for robust sigma (1.4826 * MAD)
+        Output for MAD-derived sigma (1.4826 * MAD)
     """
     cdef double tmp[5]
     cdef double dev[5]

@@ -19,7 +19,7 @@ from libc.stdint cimport uint32_t, int32_t
 
 # Outlier detection method enum
 cdef enum OutlierMethod:
-    OUTLIER_MAD = 0      # Median Absolute Deviation (robust)
+    OUTLIER_MAD = 0      # Median Absolute Deviation (MAD-based)
     OUTLIER_IQR = 1      # Interquartile Range (standard boxplot)
     OUTLIER_IFOREST = 2  # Isolation Forest (multi-metric)
     OUTLIER_LOF = 3      # Local Outlier Factor (density-based)

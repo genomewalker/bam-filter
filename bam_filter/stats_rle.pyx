@@ -227,8 +227,8 @@ cdef inline void get_tad_from_rle(
     int trim_min=10, int trim_max=90
 ) noexcept nogil:
     """
-    Fixed TAD calculation using histogram approach for outlier-robust depth estimation.
-    Trims coverage value distribution (not positional) for robustness.
+    Fixed TAD calculation using histogram approach for outlier-resistant depth estimation.
+    Trims coverage value distribution (not positional) to maintain stability.
     """
     result_mean[0] = 0.0
     result_len[0] = 0
@@ -1044,7 +1044,7 @@ cdef void calculate_abundance_metrics(
         stats.n_reads_tad = <int64_t>(estimated_reads + (0.5 if estimated_reads >= 0 else -0.5))
 
         # Calculate abundance per reference length (consistent with other abundance metrics)
-        # This gives: "reads estimated from robust depth per reference length"
+        # This gives: "reads estimated from truncated depth per reference length"
         tad_rate = estimated_reads / <double>stats.ref_length
         stats.tax_abund_tad = <int64_t>(tad_rate * scale + (0.5 if tad_rate * scale >= 0 else -0.5))
     else:

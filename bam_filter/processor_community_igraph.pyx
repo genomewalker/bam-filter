@@ -285,7 +285,7 @@ cdef int process_single_community_global(
     # Calculate statistical outlier threshold for CC values using simplified approach
     # Supports MAD (default) and IQR methods - both univariate on CC only
     # INTERPRETATION: CC >= threshold -> KEEP (cohesive), CC < threshold -> REMOVE (hub/contamination)
-    # Note: Complex multi-metric methods removed - 3-tier enhanced filtering handles this better
+    # Note: Complex multi-metric methods removed - the three-tier filtering pipeline handles this better
 
     cdef uint32_t i_member
 
@@ -467,7 +467,7 @@ cdef float calculate_statistical_outlier_threshold_mad(float* values, uint32_t n
     Calculate threshold for identifying low-CC hubs using Modified Z-Score (MAD method).
 
     APPROACH:
-    Uses Median Absolute Deviation (MAD) for robust outlier detection.
+    Uses Median Absolute Deviation (MAD) for MAD-based outlier detection.
     The modified z-score is: 0.6745 * (x - median) / MAD
     Values with |modified_z_score| > 3.5 are considered outliers.
 
@@ -480,7 +480,7 @@ cdef float calculate_statistical_outlier_threshold_mad(float* values, uint32_t n
 
     ADVANTAGES:
     - Only removes TRUE statistical outliers (may remove 0 references if data is clean!)
-    - Robust to extreme outliers (unlike standard deviation)
+    - Resistant to extreme outliers (unlike standard deviation)
     - Non-parametric (doesn't assume normal distribution)
     - Well-established in statistics literature
 
@@ -702,7 +702,7 @@ cdef float calculate_broken_stick_threshold(float* values, uint32_t n, bint verb
     """
     Statistical outlier detection using MAD (Median Absolute Deviation).
 
-    Uses Modified Z-Score with MAD for robust outlier detection.
+    Uses Modified Z-Score with MAD for MAD-based outlier detection.
     Only removes TRUE statistical outliers (may remove 0 references if data is clean).
 
     This function maintains the old name for backward compatibility but uses

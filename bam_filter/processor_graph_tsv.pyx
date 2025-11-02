@@ -130,7 +130,7 @@ cdef void extract_lineage_data(TaxonomyDB* taxonomy_db, int32_t taxid, LineageDa
             rank_name = NULL
 
         # Store name at appropriate rank using RANK NAME comparison
-        # This is robust to taxonomy changes and custom taxonomies
+        # This remains resilient to taxonomy changes and custom taxonomies
         if rank_name != NULL:
             # Superkingdom / Domain (check multiple variations)
             if c_strcmp(rank_name, "superkingdom") == 0 or c_strcmp(rank_name, "domain") == 0:

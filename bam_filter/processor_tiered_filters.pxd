@@ -1,6 +1,6 @@
 # cython: language_level=3
 """
-Enhanced filtering with 3-tier approach:
+Three-tier filtering approach:
 - Tier 1: Structural role classification (PERIPHERAL, CORE, HUB, BRIDGE)
 - Tier 2: Community coherence analysis
 - Tier 3: Integrated decision matrix
@@ -56,8 +56,8 @@ cdef FilterDecision make_filtering_decision(
 ) nogil
 
 
-# Main entry point: Apply 3-tier enhanced filtering
-cdef int apply_enhanced_filtering(
+# Main entry point: Apply three-tier filtering
+cdef int apply_tiered_filtering(
     ReferencePattern* pattern_data,
     ReferenceStats* ref_stats,
     uint32_t array_size,

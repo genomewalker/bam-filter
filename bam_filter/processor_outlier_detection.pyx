@@ -6,20 +6,10 @@
 # cython: nonecheck=False
 
 """
-Multi-metric outlier detection for graph-based filtering.
+Outlier detection routines used by graph-based filtering.
 
-This module implements various outlier detection algorithms optimized for
-identifying anomalous references in BAM filtering based on graph topology metrics.
-
-Algorithms implemented:
-1. MAD (Median Absolute Deviation) - robust univariate outlier detection
-2. IQR (Interquartile Range) - standard boxplot method
-3. Isolation Forest - tree-based multi-metric anomaly detection
-4. LOF (Local Outlier Factor) - density-based anomaly detection
-
-The Isolation Forest implementation is lightweight and specifically tailored
-for small to medium datasets (hundreds to thousands of references) typical
-in metagenomic graph analysis.
+Implements MAD and IQR rules as well as optional Isolation Forest and LOF
+variants for multi-metric analysis.
 """
 
 from libc.stdlib cimport malloc, free, rand, srand, qsort, RAND_MAX
@@ -110,7 +100,7 @@ cdef double calculate_mad_threshold_c(
     """
     Calculate outlier threshold using MAD (Median Absolute Deviation).
 
-    This is the robust version of z-score outlier detection.
+    This is the MAD-scaled version of z-score outlier detection.
     Modified z-score = 0.6745 * (x - median) / MAD
 
     Returns:

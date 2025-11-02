@@ -226,8 +226,8 @@ ext_modules = [
         ],
     ),
     Extension(
-        "bam_filter.processor_enhanced_filters",
-        ["bam_filter/processor_enhanced_filters.pyx"],
+        "bam_filter.processor_tiered_filters",
+        ["bam_filter/processor_tiered_filters.pyx"],
         extra_compile_args=common_compile_args,
         extra_link_args=common_link_args,
         include_dirs=common_include_dirs,
@@ -292,16 +292,6 @@ ext_modules = [
         extra_compile_args=common_compile_args,
         extra_link_args=common_link_args,
         include_dirs=common_compile_dirs if False else common_include_dirs,
-        library_dirs=common_library_dirs,
-        libraries=common_libraries,
-    ),
-    # Small Python-facing wrapper around the internal PMD scoring functions
-    Extension(
-        "bam_filter._pmd_wrapper",
-        ["bam_filter/_pmd_wrapper.pyx"],
-        extra_compile_args=common_compile_args,
-        extra_link_args=common_link_args,
-        include_dirs=common_include_dirs,
         library_dirs=common_library_dirs,
         libraries=common_libraries,
     ),

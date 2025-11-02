@@ -1727,7 +1727,7 @@ def process_bam_with_em(
     clock_start = bf_logging.start_timer()
 
     try:
-    # Call enhanced compute_alignment_scores with dominance regularization
+    # Call score_alignments with dominance regularization adjustments
         result = score_alignments(
             bam_file=bam_file,
             output_bam=output_bam,

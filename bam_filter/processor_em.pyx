@@ -36,7 +36,7 @@ from bam_filter.processor_precomputed cimport (
     free_precomputed_weights, update_precomputed_weights
 )
 from bam_filter.processor_fast_math cimport stable_log_sum_exp, safe_normalize_weights
-from bam_filter.processor_convergence_helpers cimport _median5, _count_filled, _robust_sigma
+from bam_filter.processor_convergence_helpers cimport _median5, _count_filled, _mad_statistics
 
 cdef extern from "bam_filter/c_logging.h":
     void bf_nogil_logf_notime(const char* tag, const char* fmt, ...) nogil
@@ -1441,8 +1441,8 @@ cdef int check_trend_based_convergence(double current_ll, double prev_ll,
     param_history[idx] = residual_norm
     filled = _count_filled(iteration, H)
 
-    _robust_sigma(ll_history, H, filled, &ll_med, &ll_sigma)
-    _robust_sigma(param_history, H, filled, &pr_med, &pr_sigma)
+    _mad_statistics(ll_history, H, filled, &ll_med, &ll_sigma)
+    _mad_statistics(param_history, H, filled, &pr_med, &pr_sigma)
 
     ll_eps_floor    = 10.0 * DBL_EPSILON * fmax(1.0, fabs(current_ll))
     param_eps_floor = 10.0 * DBL_EPSILON
@@ -1490,7 +1490,7 @@ cdef int check_trend_based_convergence(double current_ll, double prev_ll,
     pred_r_ok = have_models and ((r_inf / dimension_scale) <= param_tol_eff)
 
     if pred_ll_ok and pred_r_ok:
-        bf_nogil_logf_notime(b"EM", "Iter %d: CONVERGED [predictive+robust] tail_LL=%.2e<=%.1e, Aitken(||F||)->%.2e (scaled=%.2e)<=%.1e",
+        bf_nogil_logf_notime(b"EM", "Iter %d: CONVERGED [predictive+MAD] tail_LL=%.2e<=%.1e, Aitken(||F||)->%.2e (scaled=%.2e)<=%.1e",
                iteration + 1, ll_tail, ll_tol_eff, r_inf, r_inf / dimension_scale, param_tol_eff)
         return True
 

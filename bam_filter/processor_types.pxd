@@ -92,7 +92,7 @@ cdef struct EMAlgorithmConfig:
     # Squarem control
     int32_t squarem_start_iter
 
-    # Globalization / backtracking (robust SQUAREM control)
+    # Globalization / backtracking (stabilized SQUAREM control)
     bint enable_globalization
     double backtrack_factor
     int32_t max_backtrack_steps

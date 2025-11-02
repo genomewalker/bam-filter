@@ -10,20 +10,8 @@
 # distutils: language = c++
 
 """
-Enhanced 3-tier filtering for graph-based contamination detection.
-
-TIER 1: Structural Role Classification
-- Uses betweenness centrality to identify inter-community bridges
-- Uses clustering coefficient to identify hubs vs cores
-- CRITICAL: Bridge detection catches contamination missed by CC-only filtering
-
-TIER 2: Community Coherence
-- Checks if community members share compatible taxonomy
-- Identifies mixed-taxonomy clusters (likely contamination)
-
-TIER 3: Integrated Decision Matrix
-- Combines structural role + taxonomy + community coherence
-- Makes evidence-based filtering decisions
+Three-stage filtering pipeline combining structural roles, taxonomy coherence,
+and aggregated decision rules for graph-based contamination detection.
 """
 
 from libc.stdio cimport printf
@@ -60,7 +48,7 @@ cdef StructuralRole classify_structural_role(
     Classify a node's structural role in the graph.
 
     Decision tree:
-    1. High betweenness + crosses communities → BRIDGE (MOST SUSPICIOUS)
+    1. High betweenness + crosses communities → BRIDGE (most suspicious)
     2. High degree + low CC → HUB (suspicious)
     3. High degree + high CC → CORE (conserved, likely clean)
     4. Low degree → PERIPHERAL (specific, likely clean)
@@ -87,15 +75,10 @@ cdef StructuralRole classify_structural_role(
     StructuralRole
         Classified role
     """
-    # Priority 1: Check for BRIDGE (inter-community connector)
-    # This is the MOST CRITICAL contamination signal
-    #
-    # HYBRID APPROACH:
-    # 1. Pre-filter: num_neighbor_communities >= 2 (must connect multiple communities)
-    # 2. Refine: Use betweenness if available (proxy or exact)
-    #
-    # If betweenness > 0: Use both metrics (stronger signal)
-    # If betweenness = 0: Use num_neighbor_communities alone (pre-filter only)
+    # Priority 1: look for bridges connecting multiple communities
+    # Strategy:
+    # 1. Require num_neighbor_communities >= 2
+    # 2. Use betweenness when it is available to refine the decision
 
     if num_neighbor_communities >= 2:
         # Connects 2+ communities - candidate for BRIDGE
@@ -743,7 +726,7 @@ cdef int remove_cross_domain_edges_for_reference(
 # Main Entry Point
 # ==============================================================================
 
-cdef int apply_enhanced_filtering(
+cdef int apply_tiered_filtering(
     ReferencePattern* pattern_data,
     ReferenceStats* ref_stats,
     uint32_t array_size,
@@ -762,7 +745,7 @@ cdef int apply_enhanced_filtering(
     char** out_alignment_keep_flags
 ) nogil:
     """
-    Apply 3-tier enhanced filtering to all references.
+    Apply three-tier filtering to all references.
 
     This replaces the old CC-only filtering with a comprehensive approach:
     - Tier 1: Classify structural role (including bridge detection!)
@@ -805,31 +788,31 @@ cdef int apply_enhanced_filtering(
 
     if verbose:
         bf_nogil_logf_notime(
-            b"ENHANCED_FILTER",
-            "\\n=== TIER-BASED ENHANCED FILTERING ===\\n"
+            b"TIERED_FILTER",
+            "\\n=== TIER-BASED FILTERING ===\\n"
         )
         bf_nogil_logf_notime(
-            b"ENHANCED_FILTER",
+            b"TIERED_FILTER",
             "  Taxonomy: %s\\n",
             b"AVAILABLE" if taxonomy_available else b"NOT AVAILABLE (Tier 2 disabled)"
         )
         bf_nogil_logf_notime(
-            b"ENHANCED_FILTER",
+            b"TIERED_FILTER",
             "  Betweenness threshold: %.4f\\n",
             betweenness_threshold
         )
         bf_nogil_logf_notime(
-            b"ENHANCED_FILTER",
+            b"TIERED_FILTER",
             "  CC threshold: %.3f\\n",
             cc_threshold
         )
         bf_nogil_logf_notime(
-            b"ENHANCED_FILTER",
+            b"TIERED_FILTER",
             "  Hub degree threshold: %u\\n",
             hub_degree_threshold
         )
         bf_nogil_logf_notime(
-            b"ENHANCED_FILTER",
+            b"TIERED_FILTER",
             "  Strict mode: %s\\n\\n",
             b"YES" if strict_mode else b"NO"
         )
@@ -951,7 +934,7 @@ cdef int apply_enhanced_filtering(
 
     if verbose:
         bf_nogil_logf_notime(
-            b"ENHANCED_FILTER",
+            b"TIERED_FILTER",
             "  Found %u communities, checked coherence for all\\n",
             num_communities_found
         )
@@ -974,7 +957,7 @@ cdef int apply_enhanced_filtering(
 
         if verbose:
             bf_nogil_logf_notime(
-                b"ENHANCED_FILTER",
+                b"TIERED_FILTER",
                 "\\n=== EDGE REMOVAL (CROSS-DOMAIN) ===\\n"
             )
 
@@ -982,7 +965,7 @@ cdef int apply_enhanced_filtering(
         alignment_keep_flags = <char*>calloc(pool.alignment_count, sizeof(char))
         if alignment_keep_flags == NULL:
             if verbose:
-                bf_nogil_logf_notime(b"ENHANCED_FILTER", "ERROR: Failed to allocate alignment flags\\n")
+                bf_nogil_logf_notime(b"TIERED_FILTER", "ERROR: Failed to allocate alignment flags\\n")
         else:
             # Initialize all to 1 (keep)
             for aln_idx in range(pool.alignment_count):
@@ -1016,22 +999,22 @@ cdef int apply_enhanced_filtering(
             if edge_stats.alignments_removed > 0:
                 if verbose:
                     bf_nogil_logf_notime(
-                        b"ENHANCED_FILTER",
+                        b"TIERED_FILTER",
                         "  Cross-domain edges found: %u\\n",
                         edge_stats.cross_domain_edges_found
                     )
                     bf_nogil_logf_notime(
-                        b"ENHANCED_FILTER",
+                        b"TIERED_FILTER",
                         "  Alignments marked for removal: %ld\\n",
                         edge_stats.alignments_removed
                     )
                     bf_nogil_logf_notime(
-                        b"ENHANCED_FILTER",
+                        b"TIERED_FILTER",
                         "  References affected: %u\\n",
                         edge_stats.references_affected
                     )
                     bf_nogil_logf_notime(
-                        b"ENHANCED_FILTER",
+                        b"TIERED_FILTER",
                         "  (Compaction will happen after reference filtering)\\n\\n"
                     )
 
@@ -1041,7 +1024,7 @@ cdef int apply_enhanced_filtering(
             if flag_misannotations:
                 if verbose:
                     bf_nogil_logf_notime(
-                        b"ENHANCED_FILTER",
+                        b"TIERED_FILTER",
                         "\\n=== MISANNOTATION DETECTION ===\\n"
                     )
 
@@ -1223,27 +1206,27 @@ cdef int apply_enhanced_filtering(
 
                 if verbose:
                     bf_nogil_logf_notime(
-                        b"ENHANCED_FILTER",
+                        b"TIERED_FILTER",
                         "  CONFIDENT misannotations (>0.8): %u\\n",
                         flagged_confident
                     )
                     bf_nogil_logf_notime(
-                        b"ENHANCED_FILTER",
+                        b"TIERED_FILTER",
                         "  LIKELY misannotations (0.6-0.8):  %u\\n",
                         flagged_likely
                     )
                     bf_nogil_logf_notime(
-                        b"ENHANCED_FILTER",
+                        b"TIERED_FILTER",
                         "  WARNING misannotations (0.4-0.6): %u\\n",
                         flagged_warning
                     )
                     bf_nogil_logf_notime(
-                        b"ENHANCED_FILTER",
+                        b"TIERED_FILTER",
                         "  Lost ALL edges: %u\\n",
                         edge_stats.references_lost_all_edges
                     )
                     bf_nogil_logf_notime(
-                        b"ENHANCED_FILTER",
+                        b"TIERED_FILTER",
                         "  Lost >75%% edges: %u\\n\\n",
                         edge_stats.references_lost_most_edges
                     )
@@ -1426,64 +1409,64 @@ cdef int apply_enhanced_filtering(
 
     if verbose:
         bf_nogil_logf_notime(
-            b"ENHANCED_FILTER",
+            b"TIERED_FILTER",
             "\\n=== STRUCTURAL ROLE DISTRIBUTION ===\\n"
         )
         bf_nogil_logf_notime(
-            b"ENHANCED_FILTER",
+            b"TIERED_FILTER",
             "  PERIPHERAL: %u (specific, low connectivity)\\n",
             count_peripheral
         )
         bf_nogil_logf_notime(
-            b"ENHANCED_FILTER",
+            b"TIERED_FILTER",
             "  CORE:       %u (conserved, cohesive)\\n",
             count_core
         )
         bf_nogil_logf_notime(
-            b"ENHANCED_FILTER",
+            b"TIERED_FILTER",
             "  HUB:        %u (promiscuous, suspicious)\\n",
             count_hub
         )
         bf_nogil_logf_notime(
-            b"ENHANCED_FILTER",
-            "  BRIDGE:     %u (inter-community, CRITICAL!)\\n",
+            b"TIERED_FILTER",
+            "  BRIDGE:     %u (inter-community connector)\\n",
             count_bridge
         )
         bf_nogil_logf_notime(
-            b"ENHANCED_FILTER",
+            b"TIERED_FILTER",
             "\\n=== FILTERING DECISIONS ===\\n"
         )
         bf_nogil_logf_notime(
-            b"ENHANCED_FILTER",
+            b"TIERED_FILTER",
             "  KEPT:    %u\\n",
             count_kept
         )
         bf_nogil_logf_notime(
-            b"ENHANCED_FILTER",
+            b"TIERED_FILTER",
             "  REMOVED: %u\\n",
             count_removed
         )
         bf_nogil_logf_notime(
-            b"ENHANCED_FILTER",
+            b"TIERED_FILTER",
             "  REVIEW:  %u (flagged for inspection)\\n",
             count_review
         )
         if count_individual_override > 0:
             bf_nogil_logf_notime(
-                b"ENHANCED_FILTER",
+                b"TIERED_FILTER",
                 "\\n=== INDIVIDUAL TAXONOMY RESCUE ===\\n"
             )
             bf_nogil_logf_notime(
-                b"ENHANCED_FILTER",
+                b"TIERED_FILTER",
                 "  Rescued %u refs from incoherent communities\\n",
                 count_individual_override
             )
             bf_nogil_logf_notime(
-                b"ENHANCED_FILTER",
+                b"TIERED_FILTER",
                 "  (100%% genus-level neighbor matches + CC >= 0.9)\\n"
             )
         bf_nogil_logf_notime(
-            b"ENHANCED_FILTER",
+            b"TIERED_FILTER",
             "\\n"
         )
 
