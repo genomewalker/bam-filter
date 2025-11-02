@@ -560,29 +560,11 @@ cdef OutlierDetectionResult* detect_outliers_multivariate_c(
             random_seed
         )
     elif method == OUTLIER_LOF:
-        return detect_outliers_lof_c(features, n_references, 20, contamination)
+        # LOF is deprecated - return NULL (will fallback to MAD)
+        return NULL
     else:
         # Fallback: use MAD on clustering coefficient only
         return NULL
-
-# ============================================================================
-# LOF (Local Outlier Factor) - Stub for Future Implementation
-# ============================================================================
-
-cdef OutlierDetectionResult* detect_outliers_lof_c(
-    const ReferenceFeatures* features,
-    uint32_t n_references,
-    uint32_t k_neighbors,
-    double contamination
-) nogil:
-    """
-    LOF implementation - placeholder for future development.
-
-    LOF detects outliers based on local density deviation.
-    Points in low-density regions (relative to neighbors) are outliers.
-    """
-    # TODO: Implement LOF algorithm
-    return NULL
 
 # ============================================================================
 # Feature Extraction Helpers

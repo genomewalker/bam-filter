@@ -35,9 +35,11 @@ from bam_filter.processor_graph_taxonomy cimport (
     compute_lca_between_refs,
     get_taxonomy_flag_name
 )
+from bam_filter.processor_graph_ops cimport WeightedGraph, GraphNode
 from bam_filter.taxonomy_db cimport (
     TaxonomyDB, AccessionMap,
-    compute_lca_nogil, TaxonomyDatabase, AccessionMapping
+    compute_lca_nogil, TaxonomyDatabase, AccessionMapping,
+    lookup_taxid_duckdb
 )
 
 cdef extern from "htslib/sam.h":
@@ -249,13 +251,24 @@ cdef int enrich_patterns_with_taxonomy(
             not_found_count += 1
             continue
 
-        # Look up taxid
-        k = kh_get_str(acc_hash, accession_buf)
-        if not kh_exist(acc_hash, k):
+        # Look up taxid - check if using khash or DuckDB backend
+        if acc_hash != NULL:
+            # khash lookup
+            k = kh_get_str(acc_hash, accession_buf)
+            if not kh_exist(acc_hash, k):
+                not_found_count += 1
+                continue
+            taxid = acc_hash.vals[k]
+        elif accmap.duckdb_conn != NULL:
+            # DuckDB on-demand lookup
+            taxid = lookup_taxid_duckdb(accmap, accession_buf)
+            if taxid < 0:
+                not_found_count += 1
+                continue
+        else:
+            # No valid backend
             not_found_count += 1
             continue
-
-        taxid = acc_hash.vals[k]
         if taxid < 0 or taxid > taxdb.max_taxid:
             not_found_count += 1
             continue
@@ -291,6 +304,7 @@ cdef int detect_taxonomy_anomalies(
     TaxonomyGraphConfig* config,
     uint32_t** neighbor_lists,
     uint32_t* neighbor_counts,
+    void* graph_handle,
     bint verbose
 ) noexcept nogil:
     """
@@ -351,15 +365,39 @@ cdef int detect_taxonomy_anomalies(
     cdef int32_t RANK_DOMAIN = 25
     cdef int32_t RANK_SUPERKINGDOM = 24
     cdef int32_t RANK_KINGDOM = 23
+    cdef int32_t RANK_PHYLUM = 20
+    cdef int32_t RANK_CLASS = 17
+    cdef int32_t RANK_ORDER = 13
+    cdef int32_t RANK_FAMILY = 8
     cdef int32_t RANK_GENUS = 6
 
     if verbose:
         printf("Detecting taxonomy-based anomalies in graph connectivity...\n")
+        printf("  n_refs=%u neighbor_lists=%p neighbor_counts=%p graph_handle=%p\n",
+               n_refs, <void*>neighbor_lists, <void*>neighbor_counts, graph_handle)
         printf("  Configuration:\n")
         printf("    Min rank for comparison: %d\n", config.min_rank_id_for_comparison)
         printf("    Cross-domain threshold: %.2f%%\n", config.cross_domain_threshold * 100.0)
         printf("    Kingdom mismatch threshold: %.2f%%\n", config.kingdom_mismatch_threshold * 100.0)
         printf("    Genus mismatch threshold: %.2f%%\n", config.genus_mismatch_threshold * 100.0)
+
+        # Sample a few neighbor counts to verify data
+        if neighbor_counts != NULL and n_refs > 0:
+            printf("  Sample neighbor_counts: [0]=%u [100]=%u [1000]=%u\n",
+                   neighbor_counts[0],
+                   neighbor_counts[100] if n_refs > 100 else 0,
+                   neighbor_counts[1000] if n_refs > 1000 else 0)
+
+    # Initialize per-rank counters for all references
+    for ref_idx in range(n_refs):
+        pattern_data[ref_idx].tax_neighbors_total = 0
+        pattern_data[ref_idx].tax_mismatch_domain = 0
+        pattern_data[ref_idx].tax_mismatch_kingdom = 0
+        pattern_data[ref_idx].tax_mismatch_phylum = 0
+        pattern_data[ref_idx].tax_mismatch_class = 0
+        pattern_data[ref_idx].tax_mismatch_order = 0
+        pattern_data[ref_idx].tax_mismatch_family = 0
+        pattern_data[ref_idx].tax_match_genus_below = 0
 
     # Analyze each reference's neighbors
     for ref_idx in range(n_refs):
@@ -377,7 +415,7 @@ cdef int detect_taxonomy_anomalies(
         if n_neighbors == 0:
             continue
 
-        # Count taxonomic mismatches with neighbors
+        # Count taxonomic mismatches with neighbors (both old-style and per-rank)
         cross_domain_count = 0
         kingdom_mismatch_count = 0
         genus_mismatch_count = 0
@@ -407,15 +445,40 @@ cdef int detect_taxonomy_anomalies(
             lca_depth = taxdb.nodes[lca_idx].depth
 
             total_edges_analyzed += 1
+            pattern_data[ref_idx].tax_neighbors_total += 1
 
-            # Check for cross-domain connections
-            if lca_rank_id <= RANK_DOMAIN or lca_rank_id == RANK_SUPERKINGDOM:
+            # Classify by LCA rank (for per-rank analysis)
+            # IMPORTANT: Rank IDs are HIGHER for LESS specific ranks (domain=25, genus=6, species=2)
+            # So we use >= for high-level comparisons and <= for low-level comparisons
+            if lca_rank_id >= RANK_SUPERKINGDOM:
+                # Domain/Superkingdom level or above (most severe: LCA is at or above domain)
+                pattern_data[ref_idx].tax_mismatch_domain += 1
                 cross_domain_count += 1
-            # Check for kingdom-level mismatches
-            elif lca_rank_id <= RANK_KINGDOM and lca_rank_id > RANK_SUPERKINGDOM:
+            elif lca_rank_id == RANK_KINGDOM:
+                # Kingdom level (LCA is exactly at kingdom)
+                pattern_data[ref_idx].tax_mismatch_kingdom += 1
                 kingdom_mismatch_count += 1
-            # Check for genus-level mismatches
-            elif lca_rank_id < config.min_rank_id_for_comparison:
+            elif lca_rank_id == RANK_PHYLUM:
+                # Phylum level (LCA is exactly at phylum)
+                pattern_data[ref_idx].tax_mismatch_phylum += 1
+                genus_mismatch_count += 1
+            elif lca_rank_id == RANK_CLASS:
+                # Class level (LCA is exactly at class)
+                pattern_data[ref_idx].tax_mismatch_class += 1
+                genus_mismatch_count += 1
+            elif lca_rank_id == RANK_ORDER:
+                # Order level (LCA is exactly at order)
+                pattern_data[ref_idx].tax_mismatch_order += 1
+                genus_mismatch_count += 1
+            elif lca_rank_id == RANK_FAMILY:
+                # Family level (LCA is exactly at family)
+                pattern_data[ref_idx].tax_mismatch_family += 1
+                genus_mismatch_count += 1
+            elif lca_rank_id <= RANK_GENUS:
+                # Genus or below (good match: LCA is at genus, species, or subspecies)
+                pattern_data[ref_idx].tax_match_genus_below += 1
+            else:
+                # Unclassified rank between family and genus
                 genus_mismatch_count += 1
 
         # Calculate mismatch fractions
@@ -431,6 +494,105 @@ cdef int detect_taxonomy_anomalies(
                 pattern_data[ref_idx].taxonomy_flag = 3  # kingdom_mismatch
             elif genus_mismatch_fraction >= config.genus_mismatch_threshold:
                 pattern_data[ref_idx].taxonomy_flag = 1  # potential_contamination
+
+    # Check pruned isolated nodes using their original neighbors
+    # These nodes have degree=0 now but had edges before pruning
+    cdef WeightedGraph* graph = <WeightedGraph*>graph_handle
+    cdef GraphNode* node
+    cdef uint32_t orig_degree
+    cdef uint32_t pruned_isolated_checked = 0
+
+    if graph and graph.nodes:
+        for ref_idx in range(n_refs):
+            # Skip if already flagged or no taxonomy
+            if pattern_data[ref_idx].taxonomy_flag > 0:
+                continue
+
+            taxid1 = pattern_data[ref_idx].taxid
+            if taxid1 < 0:
+                continue
+
+            # Check if this is a pruned isolated node
+            if ref_idx < graph.num_nodes:
+                node = &graph.nodes[ref_idx]
+                if node.degree == 0 and node.original_degree > 0 and node.original_neighbors:
+                    # Pruned isolated node - check original neighbors
+                    pruned_isolated_checked += 1
+                    orig_degree = node.original_degree
+
+                    # Count taxonomic mismatches with original neighbors
+                    cross_domain_count = 0
+                    kingdom_mismatch_count = 0
+                    genus_mismatch_count = 0
+
+                    rank_id1 = pattern_data[ref_idx].taxid_rank_id
+                    depth1 = pattern_data[ref_idx].taxid_depth
+
+                    for neighbor_idx in range(orig_degree):
+                        neighbor_ref_idx = node.original_neighbors[neighbor_idx]
+                        if neighbor_ref_idx >= n_refs:
+                            continue
+
+                        taxid2 = pattern_data[neighbor_ref_idx].taxid
+                        if taxid2 < 0:
+                            continue
+
+                        rank_id2 = pattern_data[neighbor_ref_idx].taxid_rank_id
+                        depth2 = pattern_data[neighbor_ref_idx].taxid_depth
+
+                        # Compute LCA
+                        lca_taxid = compute_lca_nogil(taxdb, taxid1, taxid2)
+                        if lca_taxid < 0 or lca_taxid > taxdb.max_taxid:
+                            continue
+
+                        lca_idx = taxdb.taxid_to_idx[lca_taxid]
+                        if lca_idx < 0:
+                            continue
+
+                        lca_rank_id = taxdb.nodes[lca_idx].rank_id
+
+                        # Count per-rank for pruned isolated nodes
+                        pattern_data[ref_idx].tax_neighbors_total += 1
+
+                        # Classify by LCA rank
+                        if lca_rank_id <= RANK_DOMAIN or lca_rank_id == RANK_SUPERKINGDOM:
+                            pattern_data[ref_idx].tax_mismatch_domain += 1
+                            cross_domain_count += 1
+                        elif lca_rank_id == RANK_KINGDOM:
+                            pattern_data[ref_idx].tax_mismatch_kingdom += 1
+                            kingdom_mismatch_count += 1
+                        elif lca_rank_id == RANK_PHYLUM:
+                            pattern_data[ref_idx].tax_mismatch_phylum += 1
+                            genus_mismatch_count += 1
+                        elif lca_rank_id == RANK_CLASS:
+                            pattern_data[ref_idx].tax_mismatch_class += 1
+                            genus_mismatch_count += 1
+                        elif lca_rank_id == RANK_ORDER:
+                            pattern_data[ref_idx].tax_mismatch_order += 1
+                            genus_mismatch_count += 1
+                        elif lca_rank_id == RANK_FAMILY:
+                            pattern_data[ref_idx].tax_mismatch_family += 1
+                            genus_mismatch_count += 1
+                        elif lca_rank_id >= RANK_GENUS:
+                            pattern_data[ref_idx].tax_match_genus_below += 1
+                        else:
+                            genus_mismatch_count += 1
+
+                    # Flag based on thresholds (using original neighbors)
+                    if orig_degree > 0:
+                        cross_domain_fraction = <float>cross_domain_count / <float>orig_degree
+                        kingdom_mismatch_fraction = <float>kingdom_mismatch_count / <float>orig_degree
+                        genus_mismatch_fraction = <float>genus_mismatch_count / <float>orig_degree
+
+                        if cross_domain_fraction >= config.cross_domain_threshold:
+                            pattern_data[ref_idx].taxonomy_flag = 2  # cross_domain
+                        elif kingdom_mismatch_fraction >= config.kingdom_mismatch_threshold:
+                            pattern_data[ref_idx].taxonomy_flag = 3  # kingdom_mismatch
+                        elif genus_mismatch_fraction >= config.genus_mismatch_threshold:
+                            pattern_data[ref_idx].taxonomy_flag = 1  # potential_contamination
+
+        if verbose and pruned_isolated_checked > 0:
+            printf("  Checked %u pruned isolated nodes using original neighbors\n", pruned_isolated_checked)
 
     if verbose:
         flagged_count = 0

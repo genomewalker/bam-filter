@@ -14,7 +14,7 @@
 Graph operations module for co-mapping analysis.
 
 This module provides graph data structures and operations separated from
-the Leiden clustering algorithm to maintain clean separation of concerns.
+community detection (Leiden/union-find) to maintain clean separation of concerns.
 
 RESPONSIBILITIES:
 - Graph data structures (WeightedGraph, GraphNode)
@@ -169,6 +169,8 @@ cdef WeightedGraph* create_weighted_graph(uint32_t num_nodes) except NULL nogil:
         graph.nodes[i].neighbors = NULL
         graph.nodes[i].weights = NULL
         graph.nodes[i].degree = 0
+        graph.nodes[i].original_degree = 0
+        graph.nodes[i].original_neighbors = NULL
         graph.nodes[i].capacity = 0
         graph.nodes[i].node_weight = 0
 
@@ -1419,6 +1421,8 @@ cdef void destroy_weighted_graph(WeightedGraph* graph) noexcept nogil:
     longer used after calling this function.
     """
     cdef uint32_t i
+    cdef igraph_t* ig
+    cdef igraph_vector_t* weights
 
     if not graph:
         return
@@ -1429,6 +1433,8 @@ cdef void destroy_weighted_graph(WeightedGraph* graph) noexcept nogil:
                 free(graph.nodes[i].neighbors)
             if graph.nodes[i].weights:
                 free(graph.nodes[i].weights)
+            if graph.nodes[i].original_neighbors:
+                free(graph.nodes[i].original_neighbors)
         free(graph.nodes)
 
     # Free TSV data if present
@@ -1452,6 +1458,24 @@ cdef void destroy_weighted_graph(WeightedGraph* graph) noexcept nogil:
         free(graph.tsv_neighbor_connections_avg)
     if graph.tsv_neighbor_counts:
         free(graph.tsv_neighbor_counts)
+
+    # Free cached igraph and weights if present
+    if graph.igraph_handle:
+        ig = <igraph_t*>graph.igraph_handle
+        igraph_destroy(ig)
+        free(ig)
+        graph.igraph_handle = NULL
+
+    if graph.weights_handle:
+        weights = <igraph_vector_t*>graph.weights_handle
+        igraph_vector_destroy(weights)
+        free(weights)
+        graph.weights_handle = NULL
+
+    # Free connected nodes list if present
+    if graph.connected_node_ids:
+        free(graph.connected_node_ids)
+        graph.connected_node_ids = NULL
 
     free(graph)
 
@@ -2254,21 +2278,24 @@ cdef void prune_low_weight_edges(WeightedGraph* graph, uint32_t min_edge_weight)
     - The function modifies the graph in-place and is ``nogil``.
     - ``graph.num_edges`` is recomputed from the remaining edges and
       represents the number of undirected edges after pruning.
+    - Saves original_degree for each node before pruning to detect pruned isolated nodes later
     """
     cdef uint32_t node_idx, i, new_degree
     cdef GraphNode* node
     cdef uint64_t edges_before = graph.num_edges
     cdef uint64_t edges_removed = 0
-    
+
     if not graph or min_edge_weight <= 1:
         return
-    
+
     bf_nogil_logf_notime(b"IGRAPH OPS", "  Pruning edges with weight < %u...\n", min_edge_weight)
-    
+
     for node_idx in range(graph.num_nodes):
         node = &graph.nodes[node_idx]
+        # Save original degree before pruning (for detecting pruned isolated nodes)
+        node.original_degree = node.degree
         new_degree = 0
-        
+
         # Compact the neighbor/weight arrays, keeping only edges >= min_weight
         for i in range(node.degree):
             if node.weights[i] >= min_edge_weight:
@@ -2279,7 +2306,17 @@ cdef void prune_low_weight_edges(WeightedGraph* graph, uint32_t min_edge_weight)
             else:
                 # Edge is being removed, update node weight
                 node.node_weight -= node.weights[i]
-        
+
+        # If node will become isolated (had edges, now has none), save original neighbors
+        # This allows taxonomy-based filtering later
+        if node.degree > 0 and new_degree == 0:
+            # Allocate and copy original neighbors
+            node.original_neighbors = <uint32_t*>malloc(node.degree * sizeof(uint32_t))
+            if node.original_neighbors:
+                for i in range(node.degree):
+                    node.original_neighbors[i] = node.neighbors[i]
+            # Note: original_degree already saved above
+
         # Update degree
         edges_removed += (node.degree - new_degree)
         node.degree = new_degree
@@ -2547,5 +2584,118 @@ cdef int build_igraph_from_weighted_graph(
 
             igraph_vector_int_destroy(&csize)
         igraph_vector_int_destroy(&membership)
-    
+
+    return 0
+
+
+cdef int extract_neighbors_from_igraph(WeightedGraph* graph, uint32_t num_refs,
+                                        uint32_t*** out_neighbor_lists,
+                                        uint32_t** out_neighbor_counts,
+                                        int verbose) noexcept nogil:
+    """
+    Extract neighbor lists from an igraph structure.
+
+    This is used when filtered_graph.nodes is NULL (memory-optimized igraph-only build)
+    but we need neighbor connectivity for taxonomy anomaly detection.
+
+    Parameters
+    ----------
+    graph : WeightedGraph*
+        Graph containing igraph_handle
+    num_refs : uint32_t
+        Number of references/nodes
+    out_neighbor_lists : uint32_t***
+        Output parameter for neighbor lists array
+    out_neighbor_counts : uint32_t**
+        Output parameter for neighbor counts array
+    verbose : int
+        Verbosity flag
+
+    Returns
+    -------
+    int
+        0 on success, -1 on error
+
+    Notes
+    -----
+    The caller is responsible for freeing both arrays and the individual neighbor arrays.
+    """
+    if not graph or not graph.igraph_handle:
+        return -1
+
+    cdef igraph_t* ig = <igraph_t*>graph.igraph_handle
+    cdef uint32_t** neighbor_lists = NULL
+    cdef uint32_t* neighbor_counts = NULL
+    cdef igraph_vector_int_t neighbors_vec
+    cdef igraph_integer_t n_neighbors
+    cdef int ret
+    cdef uint32_t ref_idx, neighbor_idx, i
+    cdef igraph_integer_t neighbor_id
+
+    # Allocate arrays
+    neighbor_lists = <uint32_t**>malloc(num_refs * sizeof(uint32_t*))
+    neighbor_counts = <uint32_t*>malloc(num_refs * sizeof(uint32_t))
+
+    if not neighbor_lists or not neighbor_counts:
+        if neighbor_lists:
+            free(neighbor_lists)
+        if neighbor_counts:
+            free(neighbor_counts)
+        return -1
+
+    # Initialize to NULL/0
+    for ref_idx in range(num_refs):
+        neighbor_lists[ref_idx] = NULL
+        neighbor_counts[ref_idx] = 0
+
+    # Extract neighbors from igraph
+    ret = igraph_vector_int_init(&neighbors_vec, 0)
+    if ret != IGRAPH_SUCCESS:
+        free(neighbor_lists)
+        free(neighbor_counts)
+        return -1
+
+    for ref_idx in range(num_refs):
+        # Get neighbors for this node
+        ret = igraph_neighbors(ig, &neighbors_vec, ref_idx, IGRAPH_ALL)
+        if ret != IGRAPH_SUCCESS:
+            igraph_vector_int_destroy(&neighbors_vec)
+            # Free previously allocated arrays
+            for i in range(ref_idx):
+                if neighbor_lists[i]:
+                    free(neighbor_lists[i])
+            free(neighbor_lists)
+            free(neighbor_counts)
+            return -1
+
+        n_neighbors = igraph_vector_int_size(&neighbors_vec)
+        neighbor_counts[ref_idx] = <uint32_t>n_neighbors
+
+        if n_neighbors > 0:
+            # Allocate array for this node's neighbors
+            neighbor_lists[ref_idx] = <uint32_t*>malloc(n_neighbors * sizeof(uint32_t))
+            if not neighbor_lists[ref_idx]:
+                igraph_vector_int_destroy(&neighbors_vec)
+                # Free previously allocated arrays
+                for i in range(ref_idx):
+                    if neighbor_lists[i]:
+                        free(neighbor_lists[i])
+                free(neighbor_lists)
+                free(neighbor_counts)
+                return -1
+
+            # Copy neighbors
+            for neighbor_idx in range(n_neighbors):
+                neighbor_id = get_vector_int_element_local(&neighbors_vec, neighbor_idx)
+                neighbor_lists[ref_idx][neighbor_idx] = <uint32_t>neighbor_id
+
+    igraph_vector_int_destroy(&neighbors_vec)
+
+    if verbose:
+        bf_nogil_logf_notime(NULL, "Extracted neighbors from igraph: %u nodes processed\n", num_refs)
+
+    # Set output parameters
+    out_neighbor_lists[0] = neighbor_lists
+    out_neighbor_counts[0] = neighbor_counts
+
     return 0

@@ -1825,11 +1825,11 @@ cdef void destroy_read_refs_index(ReadRefsIndex* rri) noexcept nogil:
     if rri.counts: free(rri.counts)
     free(rri)
 
-cdef WeightedGraph* analyze_reference_graph(MemoryPool* pool, ReferencePattern* pattern_data, 
+cdef WeightedGraph* analyze_reference_graph(MemoryPool* pool, ReferencePattern* pattern_data,
                                            int32_t min_read_count, EMAlgorithmConfig* config,
                                            sam_hdr_t* bam_header, ReferenceMapping* mapping,
                                            bint verbose, bint build_igraph, const char* tsv_export_path,
-                                           uint32_t graph_min_edge_weight) noexcept nogil:
+                                           uint32_t graph_min_edge_weight, TaxonomyDB* taxonomy_db) noexcept nogil:
     """High-level reference graph analysis pipeline.
 
     Performs a multi-phase analysis that converts alignment data in ``pool`` into
@@ -1930,6 +1930,13 @@ cdef WeightedGraph* analyze_reference_graph(MemoryPool* pool, ReferencePattern* 
     cdef WeightedGraph* filtered_graph = NULL
     cdef igraph_t* igraph_ptr = NULL
     cdef igraph_vector_t* weights_ptr = NULL
+    # Connected nodes optimization variables
+    cdef uint32_t* connected_node_ids = NULL
+    cdef uint32_t n_connected = 0
+    cdef uint32_t n_isolated = 0
+    cdef igraph_vector_int_t degree_vec
+    cdef igraph_integer_t node_degree
+    cdef int degree_ret
     cdef int build_result
     # igraph component vectors (declare at function scope to satisfy Cython)
     cdef igraph_vector_int_t comp_membership
@@ -2242,12 +2249,12 @@ cdef WeightedGraph* analyze_reference_graph(MemoryPool* pool, ReferencePattern* 
         pattern_data[ref_idx].component_id = ref_idx
         pattern_data[ref_idx].component_size = 1
 
-        # Initialize Leiden fields with defaults (will be overwritten if clustering is run)
-        pattern_data[ref_idx].leiden_community_id = 0
-        pattern_data[ref_idx].leiden_community_cc = 0.0
-        pattern_data[ref_idx].leiden_individual_cc = 0.0
-        pattern_data[ref_idx].leiden_cc_threshold = 0.0
-        pattern_data[ref_idx].leiden_keep_flag = 1  # default: keep all references
+        # Initialize Community fields with defaults (will be overwritten if clustering is run)
+        pattern_data[ref_idx].community_id = 0
+        pattern_data[ref_idx].community_cc = 0.0
+        pattern_data[ref_idx].community_individual_cc = 0.0
+        pattern_data[ref_idx].community_cc_threshold = 0.0
+        pattern_data[ref_idx].community_keep_flag = 1  # default: keep all references
 
     dataset_median_connections = compute_dataset_median_connections(
         exact_connection_counts, total_reads, array_size, low_coverage_threshold)
@@ -2308,7 +2315,7 @@ cdef WeightedGraph* analyze_reference_graph(MemoryPool* pool, ReferencePattern* 
 
     # After printing the summary and computing stats from ReadIndex-derived
     # arrays, optionally build the trimmed/filtered igraph for clustering
-    # and cache it for later Leiden operations. Building the igraph after the
+    # and cache it for later Community operations. Building the igraph after the
     # summary ensures the reported metrics are not affected by pruning.
     if build_igraph:
         if verbose:
@@ -2339,7 +2346,7 @@ cdef WeightedGraph* analyze_reference_graph(MemoryPool* pool, ReferencePattern* 
         if verbose:
             bf_nogil_logf_notime(NULL, "igraph built successfully\n")
 
-        # Store igraph and its weight vector on the heap so it can be reused by Leiden
+        # Store igraph and its weight vector on the heap so it can be reused by Community
         filtered_graph = <WeightedGraph*>malloc(sizeof(WeightedGraph))
         if not filtered_graph:
             bf_nogil_logf_notime(NULL, "ERROR: Failed to allocate WeightedGraph wrapper\n")
@@ -2379,7 +2386,48 @@ cdef WeightedGraph* analyze_reference_graph(MemoryPool* pool, ReferencePattern* 
         filtered_graph.weights_handle = <void*>weights_ptr
 
         if verbose:
-            bf_nogil_logf_notime(NULL, "Cached igraph and edge weights for Leiden clustering\n")
+            bf_nogil_logf_notime(NULL, "Cached igraph and edge weights for Community clustering\n")
+
+        # Extract connected nodes (degree > 0) for Community optimization
+        # This avoids processing 88k+ isolated nodes that become singleton communities
+        # Variables declared at function scope (lines 1934-1939)
+
+        # Get all node degrees at once
+        degree_ret = igraph_vector_int_init(&degree_vec, array_size)
+        if degree_ret == IGRAPH_SUCCESS:
+            degree_ret = igraph_degree(&ig_graph, &degree_vec, igraph_vss_all(),
+                                      IGRAPH_ALL, False)  # loops=False (don't count self-loops)
+            if degree_ret == IGRAPH_SUCCESS:
+                # Count connected vs isolated nodes
+                for ref_idx in range(array_size):
+                    node_degree = get_vector_int_element(&degree_vec, ref_idx)
+                    if node_degree > 0:
+                        n_connected += 1
+                    else:
+                        n_isolated += 1
+
+                if verbose:
+                    bf_nogil_logf_notime(NULL, "Graph connectivity: %u connected nodes, %u isolated nodes\n",
+                                        n_connected, n_isolated)
+
+                # Allocate and fill connected node list
+                if n_connected > 0:
+                    connected_node_ids = <uint32_t*>malloc(n_connected * sizeof(uint32_t))
+                    if not connected_node_ids:
+                        bf_nogil_logf_notime(NULL, "WARNING: Failed to allocate connected nodes list; will process all nodes\n")
+                        n_connected = 0
+                    else:
+                        n_connected = 0  # Reset for filling
+                        for ref_idx in range(array_size):
+                            node_degree = get_vector_int_element(&degree_vec, ref_idx)
+                            if node_degree > 0:
+                                connected_node_ids[n_connected] = ref_idx
+                                n_connected += 1
+
+            igraph_vector_int_destroy(&degree_vec)
+
+        filtered_graph.connected_node_ids = connected_node_ids
+        filtered_graph.n_connected_nodes = n_connected
 
         free(ref_stats_for_graph)
 
@@ -2388,8 +2436,8 @@ cdef WeightedGraph* analyze_reference_graph(MemoryPool* pool, ReferencePattern* 
             bf_nogil_logf_notime(NULL, "Connected components: %ld (singletons: %ld)\n", <long>builder_n_components, <long>builder_singletons)
 
     # Only write TSV here if clustering is disabled. If clustering is enabled,
-    # the TSV will be written after Leiden clustering completes (from apply_cluster_aware_filtering)
-    # so that Leiden results are included in the output.
+    # the TSV will be written after Community clustering completes (from apply_cluster_aware_filtering)
+    # so that Community results are included in the output.
     if tsv_export_path and not build_igraph:
         if ref_stats:
             # Write TSV with graph analysis results
@@ -2400,7 +2448,8 @@ cdef WeightedGraph* analyze_reference_graph(MemoryPool* pool, ReferencePattern* 
                                       co_mapping_averages, max_co_mappings, co_mapping_counts,
                                       neighbor_multimap_avg, neighbor_connections_avg,
                                       neighbor_counts, array_size, dataset_median_connections,
-                                      min_read_count, build_igraph, 0, tsv_export_path) != 0:
+                                      min_read_count, build_igraph, 0, tsv_export_path,
+                                      taxonomy_db) != 0:
                 bf_nogil_logf_notime(NULL, "ERROR: Failed to write graph analysis TSV\n")
         else:
             bf_nogil_logf_notime(NULL, "ERROR: Reference stats not calculated for TSV export\n")
@@ -2413,7 +2462,7 @@ cdef WeightedGraph* analyze_reference_graph(MemoryPool* pool, ReferencePattern* 
         destroy_read_refs_index(read_refs_idx)
 
     # If build_igraph is true, store TSV data in filtered_graph for later use
-    # after Leiden clustering completes. Otherwise free immediately.
+    # after Community clustering completes. Otherwise free immediately.
     if build_igraph and filtered_graph:
         filtered_graph.tsv_total_reads = total_reads
         filtered_graph.tsv_multimap_reads = multimap_reads
@@ -2479,7 +2528,7 @@ cdef WeightedGraph* analyze_reference_graph(MemoryPool* pool, ReferencePattern* 
             if thread_alignments_per_ref[thread_id]: free(thread_alignments_per_ref[thread_id])
         free(thread_alignments_per_ref)
 
-    # Return the filtered graph so it can be reused by Leiden clustering
+    # Return the filtered graph so it can be reused by Community clustering
     # Caller is responsible for calling destroy_weighted_graph() when done
     return filtered_graph
 
@@ -2718,7 +2767,8 @@ cdef int write_graph_tsv(MemoryPool* pool, sam_hdr_t* bam_header,
                         int32_t min_read_count,
                         bint include_clustering,
                         int outlier_method,
-                        const char* tsv_path) noexcept nogil:
+                        const char* tsv_path,
+                        TaxonomyDB* taxonomy_db) noexcept nogil:
     # Forwarder kept for ABI compatibility: call the implementation in the
     # separate processor_graph_tsv extension which contains the full logic.
     return write_graph_tsv_c(pool, bam_header, mapping, pattern_data, ref_stats,
@@ -2727,4 +2777,5 @@ cdef int write_graph_tsv(MemoryPool* pool, sam_hdr_t* bam_header,
                              max_co_mappings, co_mapping_counts,
                              neighbor_multimap_avg, neighbor_connections_avg,
                              neighbor_counts, array_size, dataset_median_connections,
-                             min_read_count, include_clustering, outlier_method, tsv_path)
+                             min_read_count, include_clustering, outlier_method, tsv_path,
+                             taxonomy_db)

@@ -120,6 +120,10 @@ cdef void calculate_summary_metrics(ProcessingStats* stats) noexcept nogil:
 cdef void print_processing_stats(ProcessingStats* stats) noexcept nogil:
     """Print comprehensive formatted statistics report."""
     cdef const char* tag = b"STATS"
+    cdef int64_t removed_refs
+    cdef int64_t review_refs
+    cdef double removed_pct
+    cdef double review_pct
 
     bf_nogil_logf_notime(tag, "")
     bf_nogil_logf_notime(tag, "================================================================================\n")
@@ -187,8 +191,29 @@ cdef void print_processing_stats(ProcessingStats* stats) noexcept nogil:
         bf_nogil_logf_notime(tag, "[STAGE 5] Graph Analysis (Network Patterns)\n")
         bf_nogil_logf_notime(tag, "  Status:              skipped (graph export disabled)\n\n")
 
+    # Taxonomy-informed filtering statistics (if enabled)
+    if stats.taxonomy_strict_removed > 0 or stats.taxonomy_weighted_count > 0 or stats.taxonomy_second_chance_restored > 0:
+        bf_nogil_logf_notime(tag, "[STAGE 5b] Taxonomy-Informed Filtering\n")
+        if stats.taxonomy_strict_removed > 0:
+            bf_nogil_logf_notime(tag, "  Strict removal:       %12lld (cross-domain/kingdom anomalies)\n", <long long>stats.taxonomy_strict_removed)
+        if stats.taxonomy_weighted_count > 0:
+            bf_nogil_logf_notime(tag, "  Weighted outliers:    %12lld (taxonomy-flagged 2-4x weighting)\n", <long long>stats.taxonomy_weighted_count)
+        if stats.taxonomy_second_chance_restored > 0:
+            bf_nogil_logf_notime(tag, "  Second-chance kept:   %12lld (validated false positives)\n", <long long>stats.taxonomy_second_chance_restored)
+        bf_nogil_logf_notime(tag, "\n")
+    elif stats.taxonomy_enabled == 1:
+        bf_nogil_logf_notime(tag, "[STAGE 5b] Taxonomy-Informed Filtering\n")
+        bf_nogil_logf_notime(tag, "  No taxonomy anomalies met strict removal thresholds.\n\n")
+    else:
+        bf_nogil_logf_notime(tag, "[STAGE 5b] Taxonomy-Informed Filtering\n")
+        bf_nogil_logf_notime(tag, "  Status:               disabled (no taxonomy database provided)\n\n")
+
     if stats.filtered_coverage_only >= 0:
-        bf_nogil_logf_notime(tag, "[STAGE 6] Unified Filtering (Coverage + Information)\n")
+        bf_nogil_logf_notime(tag, "[STAGE 6] Graph Filtering (Edge Removal & Misannotation)\n")
+        removed_refs = 0
+        review_refs = stats.misannotation_review_total
+        if stats.post_probability_references > 0:
+            removed_refs = stats.post_probability_references - stats.post_unified_references
         if stats.post_probability_references > 0:
             bf_nogil_logf_notime(
                 tag,
@@ -196,12 +221,28 @@ cdef void print_processing_stats(ProcessingStats* stats) noexcept nogil:
                 <long long>stats.post_unified_references,
                 100.0 * <double>stats.post_unified_references / <double>stats.post_probability_references,
             )
+            removed_pct = 0.0
+            if removed_refs > 0:
+                removed_pct = 100.0 * <double>removed_refs / <double>stats.post_probability_references
+            review_pct = 0.0
+            if review_refs > 0:
+                review_pct = 100.0 * <double>review_refs / <double>stats.post_probability_references
+            bf_nogil_logf_notime(
+                tag,
+                "  References removed:   %12lld (%.1f%%)\n",
+                <long long>removed_refs,
+                removed_pct,
+            )
+            bf_nogil_logf_notime(
+                tag,
+                "  References review:    %12lld (%.1f%%)\n",
+                <long long>review_refs,
+                review_pct,
+            )
         else:
             bf_nogil_logf_notime(tag, "  References kept:      %12lld\n", <long long>stats.post_unified_references)
-        bf_nogil_logf_notime(tag, "  References filtered:\n")
-        bf_nogil_logf_notime(tag, "    Coverage only:      %12lld\n", <long long>stats.filtered_coverage_only)
-        bf_nogil_logf_notime(tag, "    Information only:   %12lld\n", <long long>stats.filtered_information_only)
-        bf_nogil_logf_notime(tag, "    Both criteria:      %12lld\n\n", <long long>stats.filtered_both_criteria)
+            bf_nogil_logf_notime(tag, "  References removed:   %12lld\n", <long long>removed_refs)
+            bf_nogil_logf_notime(tag, "  References review:    %12lld\n", <long long>review_refs)
 
         if stats.post_probability_alignments > 0:
             bf_nogil_logf_notime(
@@ -212,10 +253,26 @@ cdef void print_processing_stats(ProcessingStats* stats) noexcept nogil:
             )
         else:
             bf_nogil_logf_notime(tag, "  Alignments kept:      %12lld\n", <long long>stats.post_unified_alignments)
-        bf_nogil_logf_notime(tag, "  Alignments removed:\n")
-        bf_nogil_logf_notime(tag, "    From coverage:      %12lld\n", <long long>stats.alignments_removed_coverage)
-        bf_nogil_logf_notime(tag, "    From information:   %12lld\n", <long long>stats.alignments_removed_information)
-        bf_nogil_logf_notime(tag, "    From both:          %12lld\n\n", <long long>stats.alignments_removed_both)
+        bf_nogil_logf_notime(tag, "  Alignments removed (edge removal): %12lld\n\n", <long long>stats.edge_removal_alignments_removed)
+
+        if stats.edge_removal_edges_found > 0 or stats.edge_removal_alignments_removed > 0 or stats.edge_removal_references_affected > 0:
+            bf_nogil_logf_notime(tag, "  Edge removal summary:\n")
+            bf_nogil_logf_notime(tag, "    Cross-domain edges: %12lld\n", <long long>stats.edge_removal_edges_found)
+            bf_nogil_logf_notime(tag, "    Alignments removed: %12lld\n", <long long>stats.edge_removal_alignments_removed)
+            bf_nogil_logf_notime(tag, "    References affected:%12lld\n", <long long>stats.edge_removal_references_affected)
+            if stats.edge_removal_refs_lost_all_edges > 0 or stats.edge_removal_refs_lost_most_edges > 0:
+                bf_nogil_logf_notime(tag, "    Lost all edges:     %12lld\n", <long long>stats.edge_removal_refs_lost_all_edges)
+                bf_nogil_logf_notime(tag, "    Lost >75%% edges:   %12lld\n", <long long>stats.edge_removal_refs_lost_most_edges)
+            bf_nogil_logf_notime(tag, "\n")
+
+        if removed_refs > 0 or review_refs > 0 or stats.misannotation_confident > 0 or stats.misannotation_likely > 0 or stats.misannotation_warning > 0:
+            bf_nogil_logf_notime(tag, "  Misannotation summary:\n")
+            bf_nogil_logf_notime(tag, "    Removed (total):    %12lld\n", <long long>removed_refs)
+            bf_nogil_logf_notime(tag, "      Confident:        %12lld\n", <long long>stats.misannotation_confident)
+            bf_nogil_logf_notime(tag, "      Likely:           %12lld\n", <long long>stats.misannotation_likely)
+            if stats.misannotation_warning > 0:
+                bf_nogil_logf_notime(tag, "    Warning (kept):     %12lld\n", <long long>stats.misannotation_warning)
+            bf_nogil_logf_notime(tag, "    Review flagged:     %12lld\n\n", <long long>review_refs)
 
         if stats.post_probability_reads > 0:
             bf_nogil_logf_notime(
@@ -226,8 +283,11 @@ cdef void print_processing_stats(ProcessingStats* stats) noexcept nogil:
             )
         else:
             bf_nogil_logf_notime(tag, "  Unique reads kept:    %12lld\n\n", <long long>stats.post_unified_reads)
+
+        if stats.taxonomy_enabled == 0:
+            bf_nogil_logf_notime(tag, "  Note: Taxonomy unavailable; edge removal and misannotation rely on structural signals only.\n\n")
     else:
-        bf_nogil_logf_notime(tag, "[STAGE 6] Unified Filtering (Coverage + Information)\n")
+        bf_nogil_logf_notime(tag, "[STAGE 6] Graph Filtering (Edge Removal & Misannotation)\n")
         bf_nogil_logf_notime(tag, "  Status:              skipped (cluster-aware filtering disabled)\n")
         bf_nogil_logf_notime(
             tag,

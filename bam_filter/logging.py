@@ -50,6 +50,7 @@ _TAG_LEVEL_DEFAULTS: Dict[str, LogLevel] = {
     "": LogLevel.SUMMARY,
     "CLI": LogLevel.SUMMARY,
     "REASSIGN": LogLevel.SUMMARY,
+    "BUILD-TAXONOMY": LogLevel.SUMMARY,
     "PROCESS": LogLevel.INFO,
     "GRAPH": LogLevel.INFO,
     "BAM-WRITER": LogLevel.SUMMARY,

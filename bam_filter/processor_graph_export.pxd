@@ -9,6 +9,7 @@ Exports read-reference co-mapping graphs to standard network formats
 from bam_filter.processor cimport MemoryPool
 from bam_filter.processor_graph cimport ReferenceStats, ReferencePattern, WeightedGraph
 from bam_filter.processor_mapping cimport ReferenceMapping
+from bam_filter.taxonomy_db cimport TaxonomyDB
 
 from bam_filter.processor cimport sam_hdr_t
 
@@ -23,4 +24,5 @@ cdef int export_graph_graphml(
     const char* output_path,
     bint verbose,
     bint export_only_used_stats,
+    TaxonomyDB* taxonomy_db,
 ) nogil

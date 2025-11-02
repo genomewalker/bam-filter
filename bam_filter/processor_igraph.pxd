@@ -75,6 +75,15 @@ cdef extern from "igraph.h":
                                           igraph_integer_t *nb_clusters,
                                           igraph_real_t *quality) nogil
 
+    # Community detection - Label Propagation Algorithm (LPA)
+    # Fast O(m) algorithm for large graphs
+    igraph_error_t igraph_community_label_propagation(const igraph_t *graph,
+                                                      igraph_vector_int_t *membership,
+                                                      igraph_neimode_t mode,
+                                                      const igraph_vector_t *weights,
+                                                      const igraph_vector_int_t *initial,
+                                                      const igraph_vector_bool_t *fixed) nogil
+
     # Connected components / clusters (returns number of components in cno)
     ctypedef enum igraph_connectedness_t:
         IGRAPH_WEAK = 0

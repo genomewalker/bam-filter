@@ -96,13 +96,6 @@ cdef OutlierDetectionResult* detect_outliers_iforest_c(
     uint32_t random_seed
 ) nogil
 
-cdef OutlierDetectionResult* detect_outliers_lof_c(
-    const ReferenceFeatures* features,
-    uint32_t n_references,
-    uint32_t k_neighbors,
-    double contamination
-) nogil
-
 cdef OutlierDetectionResult* detect_outliers_multivariate_c(
     const ReferenceFeatures* features,
     uint32_t n_references,

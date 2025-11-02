@@ -4,7 +4,7 @@
 Graph operations module - header file
 
 This module provides graph data structures and operations for co-mapping analysis.
-Separated from Leiden clustering to maintain clear separation of concerns.
+Separated from community detection (Leiden/union-find) to maintain clear separation of concerns.
 
 Functions:
 - create_weighted_graph: Create empty graph structure
@@ -30,9 +30,11 @@ from bam_filter.processor_igraph cimport (
 
 # Graph data structures
 cdef struct GraphNode:
-    uint32_t* neighbors      # Sorted array of neighbor node IDs
-    uint32_t* weights        # Corresponding edge weights
-    uint32_t degree          # Number of edges
+    uint32_t* neighbors      # Sorted array of neighbor node IDs (after pruning)
+    uint32_t* weights        # Corresponding edge weights (after pruning)
+    uint32_t degree          # Number of edges (after pruning)
+    uint32_t original_degree # Number of edges before pruning (for detecting pruned isolated nodes)
+    uint32_t* original_neighbors  # Original neighbors before pruning (only saved if node becomes isolated)
     uint32_t capacity        # Allocated capacity
     uint64_t node_weight     # Sum of all edge weights for this node
 
@@ -42,10 +44,14 @@ cdef struct WeightedGraph:
     uint32_t num_nodes       # Number of nodes
     uint64_t total_weight    # Sum of all edge weights (2× for undirected)
     uint64_t num_edges       # Number of edges (counted once per direction)
-    void* igraph_handle      # igraph_t* pointer for reuse in Leiden clustering
+    void* igraph_handle      # igraph_t* pointer for reuse in community detection
     void* weights_handle     # igraph_vector_t* pointer for edge weights (cached with igraph)
 
-    # TSV data (cached for writing after Leiden clustering)
+    # Connected nodes optimization (for skipping isolated nodes in community detection)
+    uint32_t* connected_node_ids  # Array of node IDs with degree > 0
+    uint32_t n_connected_nodes    # Number of connected nodes
+
+    # TSV data (cached for writing after community detection)
     uint32_t* tsv_total_reads
     uint32_t* tsv_multimap_reads
     uint64_t* tsv_alignments_per_ref
@@ -137,3 +143,9 @@ cdef int build_igraph_direct_from_read_index(
 
 # Broken-stick threshold picker (exported so other modules can call it nogil)
 cdef uint32_t pick_min_edge_weight_broken_stick(MemoryPool* pool, ReadIndex* read_index, ReferenceStats* ref_stats, uint32_t num_refs, uint32_t min_read_count, double tol, int verbose, double tail_percentile, uint32_t min_tail_size) noexcept nogil
+
+# Extract neighbor lists from igraph (for taxonomy analysis when nodes array is NULL)
+cdef int extract_neighbors_from_igraph(WeightedGraph* graph, uint32_t num_refs,
+                                        uint32_t*** out_neighbor_lists,
+                                        uint32_t** out_neighbor_counts,
+                                        int verbose) noexcept nogil

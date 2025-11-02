@@ -38,6 +38,10 @@ cdef struct TaxonomyDB:
 cdef struct AccessionMap:
     void* acc_hash  # kh_str_t* (opaque to avoid khash dependency)
     int32_t n_entries
+    # DuckDB backend (alternative to khash for large datasets)
+    void* duckdb_db         # duckdb_database handle
+    void* duckdb_conn       # duckdb_connection handle
+    char* parquet_path      # Path to parquet file (for DuckDB queries)
 
 cdef struct LCACache:
     int32_t* lca_matrix
@@ -57,8 +61,14 @@ cdef void free_lca_cache(LCACache* cache) nogil
 cdef int32_t compute_lca_nogil(TaxonomyDB* db, int32_t taxid1, int32_t taxid2) nogil
 cdef int32_t query_lca_cache(LCACache* cache, int32_t taxid1, int32_t taxid2) nogil
 
+# DuckDB-backed accession lookup
+cdef int32_t lookup_taxid_duckdb(AccessionMap* amap, const char* accession) nogil except -2
+
 # Lineage string generation (Greengenes-style)
 cdef int build_lineage_string_nogil(TaxonomyDB* db, int32_t taxid, char* buffer, int32_t buffer_size) noexcept nogil
+
+# Get taxonomic name at specific rank
+cdef const char* get_name_at_rank_nogil(TaxonomyDB* db, int32_t taxid, int32_t target_rank_id) noexcept nogil
 
 # Rank utilities
 cdef int32_t get_rank_id(str rank_str)

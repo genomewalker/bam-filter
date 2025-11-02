@@ -70,14 +70,14 @@ def reassign_reads(
     # Reference length override
     reference_lengths_tsv: Optional[str] = None,
     reference_stats_tsv: Optional[str] = None,
-    information_threshold: float = 0.0,
+    information_threshold: float = -999.0,
     # Graph construction parameters
     graph_min_edge_weight: int = 0,
     graph_auto_tol: float = 0.10,
     # Clustering parameters
     clustering: bool = False,
-    leiden_resolution: float = 1.0,
-    leiden_max_iterations: int = 10,
+    community_resolution: float = 1.0,
+    community_max_iterations: int = 10,
     outlier_method: str = "mad",
     # Graph export
     graph_export: Optional[str] = None,
@@ -87,7 +87,31 @@ def reassign_reads(
     taxonomy_cross_domain_threshold: float = 0.10,
     taxonomy_kingdom_threshold: float = 0.25,
     taxonomy_genus_threshold: float = 0.50,
+    # Taxonomy-informed filtering parameters
+    taxonomy_filter: bool = False,
+    taxonomy_strict_filter: bool = True,
+    taxonomy_strict_min_connections: int = 5,
+    taxonomy_weighted_outlier: bool = True,
+    taxonomy_anomaly_weight: float = 2.0,
+    taxonomy_second_chance: bool = True,
+    taxonomy_second_chance_cc: float = 0.3,
+    # Edge removal and misannotation detection
+    remove_cross_domain_edges: bool = False,
+    flag_misannotations: bool = False,
 ) -> Dict[str, Any]:
+    if (remove_cross_domain_edges or flag_misannotations):
+        if not taxonomy_db:
+            raise ValueError(
+                "The flags --remove-cross-domain-edges and --flag-misannotations "
+                "require a taxonomy database (--taxonomy-db)."
+            )
+        if not taxonomy_filter:
+            taxonomy_filter = True
+            _info(
+                "Taxonomy filtering automatically enabled because "
+                "--remove-cross-domain-edges/--flag-misannotations was requested."
+            )
+
     """Reassign multi-mapping reads using EM algorithm with SQUAREM acceleration.
 
     This function wraps the high-performance C/Cython processor that handles
@@ -141,18 +165,16 @@ def reassign_reads(
         TSV file with reference lengths (reference_name<tab>length)
     reference_stats_tsv : str, optional
         Output path for reference statistics TSV
-    information_threshold : float, default=0.0
-        Information-theoretic filtering threshold
     graph_min_edge_weight : int, default=0
         Minimum edge weight for graph (0=auto, -1=none, >0=explicit)
     graph_auto_tol : float, default=0.10
         Tolerance for automatic threshold selection
     clustering : bool, default=False
-        Enable Leiden clustering
-    leiden_resolution : float, default=1.0
-        Leiden resolution parameter
-    leiden_max_iterations : int, default=10
-        Maximum Leiden iterations
+        Enable Community clustering
+    community_resolution : float, default=1.0
+        Community resolution parameter
+    community_max_iterations : int, default=10
+        Maximum Community iterations
     graph_export : str, optional
         Path to export graph in GraphML format
 
@@ -163,8 +185,6 @@ def reassign_reads(
         and processing metadata
     """
     overall_start = perf_counter()
-
-    print(f"[DEBUG reassign_reads] taxonomy_db parameter value: {taxonomy_db!r}", file=sys.stderr)
 
     if not os.path.exists(bam_file):
         raise FileNotFoundError(f"Input BAM file not found: {bam_file}")
@@ -213,49 +233,39 @@ def reassign_reads(
 
         _info("Pipeline: %s", " → ".join(pipeline_steps))
 
-        # Load taxonomy databases if provided
-        taxdb = None
-        accmap = None
+        # Prepare taxonomy database paths (will be loaded in Phase 5b)
+        taxdb_path = None
+        accmap_path = None
         if taxonomy_db:
-            print(f"[DEBUG] taxonomy_db parameter: {taxonomy_db}", file=sys.stderr)
-            _info("Loading taxonomy database from %s", taxonomy_db)
-            from bam_filter.taxonomy_db import TaxonomyDatabase, load_accession_map_from_file
+            if verbose:
+                print(f"[DEBUG] Taxonomy database path provided: {taxonomy_db}", file=sys.stderr)
 
-            try:
-                print(f"[DEBUG] Attempting to load taxonomy from {taxonomy_db}", file=sys.stderr)
-                taxdb = TaxonomyDatabase.from_parquet(taxonomy_db)
-                print(f"[DEBUG] Successfully loaded {taxdb.n_nodes} taxonomy nodes", file=sys.stderr)
-                _info("  Loaded taxonomy: %d nodes", taxdb.n_nodes)
-            except Exception as e:
-                print(f"[DEBUG] Failed to load taxonomy: {e}", file=sys.stderr)
-                import traceback
-                traceback.print_exc()
-                _warn("Failed to load taxonomy database: %s", str(e))
+            # Verify taxonomy database exists
+            if not os.path.exists(taxonomy_db):
+                _warn("Taxonomy database path does not exist: %s", taxonomy_db)
                 _warn("Continuing without taxonomy-aware graph analysis")
-                taxdb = None
-
-            if taxdb is not None:
-                # Try to load accession map from taxonomy directory
+            else:
+                # Check for accession map in taxonomy directory
                 accession_map_path = os.path.join(taxonomy_db, "accession_map.parquet")
-                print(f"[DEBUG] Checking for accession map at: {accession_map_path}", file=sys.stderr)
-                print(f"[DEBUG] File exists: {os.path.exists(accession_map_path)}", file=sys.stderr)
                 if os.path.exists(accession_map_path):
-                    print(f"[DEBUG] Loading accession map from {accession_map_path}", file=sys.stderr)
-                    _info("Loading accession map from %s", accession_map_path)
-
-                    # Extract reference names from BAM to use as filter for efficient loading
-                    # This will be done inside processor.pyx after graph analysis when we know which refs to keep
-                    # For now, pass None and let the accession map loading be deferred
-                    print(f"[DEBUG] Accession map will be loaded on-demand with reference filtering", file=sys.stderr)
-                    # Store the path for later use
-                    accmap = accession_map_path  # Pass path instead of loaded object
+                    if verbose:
+                        print(f"[DEBUG] Taxonomy database and accession map found", file=sys.stderr)
+                        print(f"[DEBUG] Will load in Phase 5b: Taxonomy Enrichment", file=sys.stderr)
+                    # Pass paths to processor - will be loaded together in Phase 5b
+                    taxdb_path = taxonomy_db
+                    accmap_path = accession_map_path
                 else:
-                    print(f"[DEBUG] Accession map not found", file=sys.stderr)
+                    if verbose:
+                        print(f"[DEBUG] Accession map not found at: {accession_map_path}", file=sys.stderr)
                     _warn("No accession_map.parquet found in %s", taxonomy_db)
                     _warn("Taxonomy-aware graph analysis requires accession_map.parquet in the taxonomy directory")
                     _warn("Continuing without taxonomy-aware graph analysis")
-                    taxdb = None
-                    accmap = None
+
+        # Debug logging: show what we're passing to processor
+        if verbose:
+            print(f"[DEBUG] About to call process_bam_with_em with:", file=sys.stderr)
+            print(f"[DEBUG]   taxdb_path = {taxdb_path}", file=sys.stderr)
+            print(f"[DEBUG]   accmap_path = {accmap_path}", file=sys.stderr)
 
         result = process_bam_with_em(
             bam_file=bam_file,
@@ -286,16 +296,25 @@ def reassign_reads(
             graph_min_edge_weight=graph_min_edge_weight,
             graph_auto_tol=graph_auto_tol,
             clustering=clustering,
-            leiden_resolution=leiden_resolution,
-            leiden_max_iterations=leiden_max_iterations,
+            community_resolution=community_resolution,
+            community_max_iterations=community_max_iterations,
             outlier_method=outlier_method,
             graph_export=graph_export,
-            taxonomy_db=taxdb,
-            taxonomy_accession_map=accmap,
+            taxonomy_db=taxdb_path,
+            taxonomy_accession_map=accmap_path,
             taxonomy_min_rank=taxonomy_min_rank,
             taxonomy_cross_domain_threshold=taxonomy_cross_domain_threshold,
             taxonomy_kingdom_threshold=taxonomy_kingdom_threshold,
             taxonomy_genus_threshold=taxonomy_genus_threshold,
+            taxonomy_filter_enabled=taxonomy_filter,
+            taxonomy_strict_filter=taxonomy_strict_filter,
+            taxonomy_strict_min_connections=taxonomy_strict_min_connections,
+            taxonomy_weighted_outlier=taxonomy_weighted_outlier,
+            taxonomy_anomaly_weight=taxonomy_anomaly_weight,
+            taxonomy_second_chance=taxonomy_second_chance,
+            taxonomy_second_chance_cc=taxonomy_second_chance_cc,
+            remove_cross_domain_edges=remove_cross_domain_edges,
+            flag_misannotations=flag_misannotations,
         )
         processing_duration = perf_counter() - processing_start
         _info("Core processing completed in %.2f seconds", processing_duration)
@@ -406,6 +425,19 @@ def reassign(args):
         base_name = os.path.splitext(bam_file)[0]
         output_bam = f"{base_name}_reassigned.bam"
 
+    taxonomy_filter_enabled = getattr(args, "taxonomy_filter_enabled", False)
+    taxonomy_strict_filter = getattr(args, "taxonomy_strict_filter", None)
+    if taxonomy_strict_filter is None:
+        taxonomy_strict_filter = taxonomy_filter_enabled
+
+    taxonomy_weighted_outlier = getattr(args, "taxonomy_weighted_outlier", None)
+    if taxonomy_weighted_outlier is None:
+        taxonomy_weighted_outlier = taxonomy_filter_enabled
+
+    taxonomy_second_chance = getattr(args, "taxonomy_second_chance", None)
+    if taxonomy_second_chance is None:
+        taxonomy_second_chance = taxonomy_filter_enabled
+
     # Extract parameters from args
     params = {
         "bam_file": bam_file,
@@ -439,11 +471,11 @@ def reassign(args):
         "steplength_scheme": getattr(args, "steplength_scheme", 3),
         "reference_lengths_tsv": getattr(args, "reference_lengths_tsv", None),
         "reference_stats_tsv": getattr(args, "reference_stats_tsv", None),
-        "information_threshold": getattr(args, "information_threshold", 0.0),
         "graph_min_edge_weight": getattr(args, "graph_min_edge_weight", 0),
+        "graph_auto_tol": getattr(args, "graph_auto_tol", 0.10),
         "clustering": getattr(args, "clustering", False),
-        "leiden_resolution": getattr(args, "leiden_resolution", 1.0),
-        "leiden_max_iterations": getattr(args, "leiden_max_iterations", 10),
+        "community_resolution": getattr(args, "community_resolution", 1.0),
+        "community_max_iterations": getattr(args, "community_max_iterations", 10),
         "outlier_method": getattr(args, "outlier_method", "mad"),
         "graph_export": getattr(args, "graph_export", None),
         # Taxonomy parameters
@@ -452,6 +484,17 @@ def reassign(args):
         "taxonomy_cross_domain_threshold": getattr(args, "taxonomy_cross_domain_threshold", 0.10),
         "taxonomy_kingdom_threshold": getattr(args, "taxonomy_kingdom_threshold", 0.25),
         "taxonomy_genus_threshold": getattr(args, "taxonomy_genus_threshold", 0.50),
+        # Taxonomy-informed filtering parameters
+        "taxonomy_filter": taxonomy_filter_enabled,
+        "taxonomy_strict_filter": taxonomy_strict_filter,
+        "taxonomy_strict_min_connections": getattr(args, "taxonomy_strict_min_connections", 5),
+        "taxonomy_weighted_outlier": taxonomy_weighted_outlier,
+        "taxonomy_anomaly_weight": getattr(args, "taxonomy_anomaly_weight", 2.0),
+        "taxonomy_second_chance": taxonomy_second_chance,
+        "taxonomy_second_chance_cc": getattr(args, "taxonomy_second_chance_cc", 0.3),
+        # Edge removal and misannotation detection
+        "remove_cross_domain_edges": getattr(args, "remove_cross_domain_edges", False),
+        "flag_misannotations": getattr(args, "flag_misannotations", False),
     }
 
     try:

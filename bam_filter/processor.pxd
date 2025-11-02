@@ -175,13 +175,32 @@ cdef struct ProcessingStats:
 
     # Unified filtering breakdown
     int64_t filtered_coverage_only        # Failed coverage only
-    int64_t filtered_information_only     # Failed information only  
+    int64_t filtered_information_only     # Failed information only
     int64_t filtered_both_criteria        # Failed both criteria
-    
+
     int64_t alignments_removed_coverage   # Alignments from coverage-failed refs
     int64_t alignments_removed_information  # Alignments from info-failed refs
     int64_t alignments_removed_both       # Alignments from both-failed refs
-    
+
+    # Taxonomy-informed filtering (if enabled)
+    int32_t taxonomy_enabled              # 1 if taxonomy filtering configured, 0 otherwise
+    int64_t taxonomy_strict_removed       # Removed by strict taxonomy filtering
+    int64_t taxonomy_weighted_count       # References with weighted anomaly scores
+    int64_t taxonomy_second_chance_restored  # Restored by second-chance validation
+
+    # Edge removal + misannotation stats
+    int64_t edge_removal_edges_found
+    int64_t edge_removal_alignments_removed
+    int64_t edge_removal_references_affected
+    int64_t edge_removal_refs_lost_all_edges
+    int64_t edge_removal_refs_lost_most_edges
+
+    int64_t misannotation_confident
+    int64_t misannotation_likely
+    int64_t misannotation_warning
+    int64_t misannotation_removed_total
+    int64_t misannotation_review_total
+
     # Stage 7: Final output
     int64_t final_alignments_written      # Alignments written to output BAM
     int64_t final_reads_written           # Unique reads in output BAM

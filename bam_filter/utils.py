@@ -602,34 +602,19 @@ defaults = {
     "max_backtrack_steps": 5,
     "steplength_scheme": 3,
     "calculate_pmd": True,
+    "library_type": "ds",
     "rank_lca": "species",
     "lca_summary": None,
     "reference_stats_tsv": None,
-    "information_threshold": -999.0,  # -999.0 = disabled (no filtering)
     # Graph construction parameters (cluster-aware filtering always enabled)
     "graph_min_edge_weight": 0,  # Minimum edge weight (shared reads) to keep in graph (0=auto, -1=no filtering)
-    # Leiden clustering parameters
+    # Community detection parameters
     "clustering_algorithm": "leiden",  # "leiden" | "union-find" (simple connected components)
-    "leiden_resolution": 1.0,  # Resolution parameter for community detection
-    "leiden_max_iterations": 10,  # Maximum iterations for convergence
-    "leiden_parallel": False,  # Enable parallel move phase
-    "outlier_method": "mad",  # "mad" | "iqr" | "iforest" | "lof" | "zscore" - Statistical outlier detection method
+    "community_resolution": 1.0,  # Resolution parameter for community detection
+    "community_max_iterations": 10,  # Maximum iterations for convergence
+    "community_parallel": False,  # Enable parallel move phase
+    "outlier_method": "mad",  # "mad" | "iqr" - Statistical outlier detection method (simplified)
 }
-
-# Defaults for outlier detection parameters
-defaults.update(
-    {
-        "iforest_n_trees": 100,
-        "iforest_subsample_size": 256,
-        # If negative (e.g. -1) the detector will choose a per-community auto threshold.
-        # Non-negative values (0.0-0.5) are treated as explicit contamination proportions.
-        "iforest_contamination": -1.0,
-        "iforest_random_seed": 42,
-        "lof_k": 20,
-        "lof_contamination": 0.1,
-        "zscore_threshold": 3.0,
-    }
-)
 
 help_msg = {
     "bam": "BAM file containing aligned reads",
@@ -697,17 +682,17 @@ help_msg = {
     "steplength_scheme": "SQUAREM steplength scheme: 1=S1, 2=S2, 3=S3 (recommended)",
     "output_bam": "Output BAM file with reassigned reads",
     "disable_pmd": "Disable PMD (Post-Mortem Damage) calculation (PMD enabled by default)",
-    "single_stranded": "Single-stranded library type (default: false)",
+    "library_type": "Library type for PMD scoring: 'ds' (double-stranded) or 'ss' (single-stranded).",
+    "single_stranded": "Shortcut for --library-type ss (single-stranded libraries).",
     "reference_stats_tsv": "Save per-reference statistics (TSV). Includes clustering/community columns when clustering is enabled.",
-    "information_threshold": "Informativeness score threshold for filtering references. Default (no flag)=disabled (calculate scores only, no filtering). When set: keeps references with score ≥ threshold. Examples: 0.0=informative only (S≥0), 0.5=moderate, 1.0=strict, -0.1=lenient",
     # Graph construction parameters (cluster-aware filtering always enabled)
     "graph_min_edge_weight": "Minimum edge weight (shared reads between references) to keep edges in graph. 0=auto (default), -1=no filtering, >0=use value. Lower values keep more edges (more connected), higher values prune weak connections (fewer components).",
-    # Leiden clustering help messages
+    # Community clustering help messages
     "clustering_algorithm": "Clustering algorithm for community detection: 'leiden' (high-quality modularity optimization, default) or 'union-find' (fast, simple connected components)",
-    "leiden_resolution": "Resolution parameter for Leiden clustering (0.5-2.0). Lower=larger communities (0.5=family level), 1.0=default (species level), higher=smaller communities (2.0=strain level)",
-    "leiden_max_iterations": "Maximum iterations for Leiden clustering convergence (3-20, default=10)",
-    "leiden_parallel": "Enable parallel processing in Leiden move phase for speed (experimental)",
-    "outlier_method": "Statistical outlier detection method for clustering coefficient filtering: 'mad' (Median Absolute Deviation, default - robust univariate, uses modified z-score > 3.5), 'iqr' (Interquartile Range - standard boxplot method, Q1-1.5*IQR), 'iforest' (Isolation Forest - multi-metric tree-based anomaly detection, uses all graph metrics), 'lof' (Local Outlier Factor - density-based detection), or 'zscore' (Standard Z-score - parametric method). MAD/IQR only use clustering coefficient. Isolation Forest uses all available graph metrics (CC, degree, neighbor quality, etc.) for more robust detection.",
+    "community_resolution": "Resolution parameter for community detection (Leiden γ). Lower=larger communities, higher=smaller communities.",
+    "community_max_iterations": "Maximum iterations for the community detection refinement loop (default: 10).",
+    "community_parallel": "Enable parallel processing in the community move phase for speed (experimental, Leiden-only).",
+    "outlier_method": "Statistical outlier detection method for clustering coefficient filtering: 'mad' (Median Absolute Deviation, default - robust univariate, uses modified z-score > 3.5) or 'iqr' (Interquartile Range - standard boxplot method, Q1-1.5*IQR). Both methods only flag extreme statistical outliers within each community. Complex multi-metric methods (iforest/lof/zscore) have been replaced by the 3-tier enhanced filtering system which uses betweenness centrality, clustering coefficients, and taxonomy coherence for contamination detection.",
 }
 
 from difflib import get_close_matches, SequenceMatcher
@@ -921,14 +906,18 @@ def get_arguments(argv=None):
         allow_abbrev=False,
     )
 
-    # createdb_required_args = parser_createdb.add_argument_group("required arguments")
-    # reassign_required_args = parser_reassign.add_argument_group(
-    #     "Re-assign required arguments"
-    # )
-    reassign_optional_args = parser_reassign.add_argument_group(
-        "Re-assign optional arguments"
+    # Reassign workflow: organize options by stage
+    reassign_io_args = parser_reassign.add_argument_group("Input / Output")
+    reassign_pmd_args = parser_reassign.add_argument_group("PMD & Library Type")
+    reassign_filter_args = parser_reassign.add_argument_group("Read Filtering")
+    reassign_em_args = parser_reassign.add_argument_group("EM Algorithm")
+    reassign_squarem_args = parser_reassign.add_argument_group("SQUAREM Acceleration")
+    reassign_graph_args = parser_reassign.add_argument_group("Graph Construction")
+    reassign_clustering_args = parser_reassign.add_argument_group(
+        "Clustering & Outlier Detection"
     )
-    misc_reassign_args = parser_reassign.add_argument_group("miscellaneous arguments")
+    reassign_taxonomy_args = parser_reassign.add_argument_group("Taxonomy Integration")
+    reassign_export_args = parser_reassign.add_argument_group("Reporting & Export")
 
     filter_required_args = parser_filter.add_argument_group("Filter required arguments")
     # filter_optional_args = parser_filter.add_argument_group("Filter optional arguments")
@@ -943,7 +932,7 @@ def get_arguments(argv=None):
     misc_filter_args = parser_filter.add_argument_group("miscellaneous arguments")
     out_filter_args = parser_filter.add_argument_group("output arguments")
 
-    reassign_optional_args.add_argument(
+    reassign_em_args.add_argument(
         "-i",
         "--max-em-iterations",  # ✓ SYNCED: was "--iters"
         type=lambda x: int(
@@ -957,7 +946,7 @@ def get_arguments(argv=None):
         help=help_msg["max_em_iterations"],
     )
 
-    reassign_optional_args.add_argument(
+    reassign_em_args.add_argument(
         "--em-tolerance",
         type=lambda x: float(
             check_values(
@@ -970,7 +959,7 @@ def get_arguments(argv=None):
         help=help_msg["em_tolerance"],
     )
 
-    reassign_optional_args.add_argument(
+    reassign_em_args.add_argument(
         "--min-probability",  # ✓ SYNCED: was "--min-prob"
         type=lambda x: float(
             check_values(
@@ -983,7 +972,7 @@ def get_arguments(argv=None):
         help=help_msg["min_probability"],
     )
 
-    reassign_optional_args.add_argument(
+    reassign_em_args.add_argument(
         "--prob-fraction",
         type=lambda x: float(
             check_values(x, minval=0, maxval=1, parser=parser, var="--prob-fraction")
@@ -994,7 +983,7 @@ def get_arguments(argv=None):
         help=help_msg["prob_fraction"],
     )
 
-    reassign_optional_args.add_argument(
+    reassign_em_args.add_argument(
         "--prior-weight",
         type=lambda x: float(
             check_values(
@@ -1007,21 +996,8 @@ def get_arguments(argv=None):
         help=help_msg["prior_weight"],
     )
 
-    reassign_optional_args.add_argument(
-        "--init-prior-strength",
-        type=lambda x: float(
-            check_values(
-                x, minval=1e-12, maxval=10.0, parser=parser, var="--init-prior-strength"
-            )
-        ),
-        metavar="FLOAT",
-        default=0.1,
-        dest="init_prior_strength",
-        help="Dirichlet prior strength for EM initialization (alpha parameter)",
-    )
-
     # ✓ SYNCED: Read Filtering Parameters
-    reassign_optional_args.add_argument(
+    reassign_filter_args.add_argument(
         "-A",
         "--min-read-ani",
         type=lambda x: float(
@@ -1033,7 +1009,7 @@ def get_arguments(argv=None):
         help=help_msg["min_read_ani"],
     )
 
-    reassign_optional_args.add_argument(
+    reassign_filter_args.add_argument(
         "-l",
         "--min-read-length",
         type=lambda x: int(
@@ -1047,7 +1023,7 @@ def get_arguments(argv=None):
         help=help_msg["min_read_length"],
     )
 
-    reassign_optional_args.add_argument(
+    reassign_filter_args.add_argument(
         "-L",
         "--max-read-length",
         type=lambda x: int(
@@ -1065,7 +1041,7 @@ def get_arguments(argv=None):
         help=help_msg["max_read_length"],
     )
 
-    reassign_optional_args.add_argument(
+    reassign_filter_args.add_argument(
         "-n",
         "--min-read-count",
         type=lambda x: int(
@@ -1079,7 +1055,7 @@ def get_arguments(argv=None):
         help=help_msg["min_read_count"],
     )
 
-    reassign_optional_args.add_argument(
+    reassign_squarem_args.add_argument(
         "--disable-squarem",
         dest="use_squarem_acceleration",
         action="store_false",
@@ -1087,7 +1063,7 @@ def get_arguments(argv=None):
         help="Disable SQUAREM acceleration (use standard EM instead)",
     )
 
-    reassign_optional_args.add_argument(
+    reassign_squarem_args.add_argument(
         "--disable-globalization",
         dest="enable_globalization",
         action="store_false",
@@ -1095,7 +1071,7 @@ def get_arguments(argv=None):
         help="Disable gSQUAREM globalization (use non-monotone SQUAREM)",
     )
 
-    reassign_optional_args.add_argument(
+    reassign_squarem_args.add_argument(
         "--squarem-start-iter",  # ✓ NEW: when to start SQUAREM
         type=lambda x: int(
             check_values(
@@ -1108,7 +1084,7 @@ def get_arguments(argv=None):
         help=help_msg["squarem_start_iter"],
     )
 
-    reassign_optional_args.add_argument(
+    reassign_squarem_args.add_argument(
         "--backtrack-factor",  # ✓ NEW: backtracking control
         type=lambda x: float(
             check_values(
@@ -1121,7 +1097,7 @@ def get_arguments(argv=None):
         help=help_msg["backtrack_factor"],
     )
 
-    reassign_optional_args.add_argument(
+    reassign_squarem_args.add_argument(
         "--max-backtrack-steps",  # ✓ NEW: backtracking limit
         type=lambda x: int(
             check_values(
@@ -1134,7 +1110,7 @@ def get_arguments(argv=None):
         help=help_msg["max_backtrack_steps"],
     )
 
-    reassign_optional_args.add_argument(
+    reassign_squarem_args.add_argument(
         "--steplength-scheme",  # ✓ NEW: S1/S2/S3 selection
         type=lambda x: int(
             check_values(
@@ -1148,7 +1124,7 @@ def get_arguments(argv=None):
     )
 
     # ✓ SYNCED: Output Parameters
-    reassign_optional_args.add_argument(
+    reassign_io_args.add_argument(
         "-o",
         "--output-bam",  # ✓ SYNCED: was "--out-bam"
         dest="output_bam",  # ✓ SYNCED: new dest name
@@ -1159,14 +1135,38 @@ def get_arguments(argv=None):
         const="",
         help=help_msg["output_bam"],
     )
-    reassign_optional_args.add_argument(
+    reassign_pmd_args.add_argument(
+        "--library-type",
+        dest="library_type",
+        choices=("ds", "ss"),
+        default=defaults["library_type"],
+        metavar="{ds,ss}",
+        help=help_msg["library_type"],
+    )
+    reassign_pmd_args.add_argument(
+        "--single-stranded",
+        dest="library_type",
+        action="store_const",
+        const="ss",
+        default=argparse.SUPPRESS,
+        help=help_msg["single_stranded"],
+    )
+    reassign_pmd_args.add_argument(
+        "--double-stranded",
+        dest="library_type",
+        action="store_const",
+        const="ds",
+        default=argparse.SUPPRESS,
+        help="Shortcut for --library-type ds (double-stranded libraries).",
+    )
+    reassign_pmd_args.add_argument(
         "--disable-pmd",
         dest="disable_pmd",
         action="store_true",
         default=False,  # PMD enabled by default
         help=help_msg["disable_pmd"],
     )
-    reassign_optional_args.add_argument(
+    reassign_export_args.add_argument(
         "-S",
         "--reference-stats",
         dest="reference_stats_tsv",
@@ -1177,17 +1177,8 @@ def get_arguments(argv=None):
         const="",
         help=help_msg["reference_stats_tsv"],
     )
-    reassign_optional_args.add_argument(
-        "--information-threshold",
-        dest="information_threshold",
-        type=float,
-        default=defaults["information_threshold"],
-        metavar="FLOAT",
-        help="[DEPRECATED - No longer used] " + help_msg["information_threshold"],
-    )
-
     # Graph construction arguments (cluster-aware filtering always enabled)
-    reassign_optional_args.add_argument(
+    reassign_graph_args.add_argument(
         "--graph-min-edge-weight",
         dest="graph_min_edge_weight",
         type=lambda x: (
@@ -1202,7 +1193,7 @@ def get_arguments(argv=None):
         help=help_msg["graph_min_edge_weight"],
     )
 
-    reassign_optional_args.add_argument(
+    reassign_graph_args.add_argument(
         "--graph-auto-tol",
         dest="graph_auto_tol",
         type=lambda x: float(
@@ -1216,167 +1207,42 @@ def get_arguments(argv=None):
     )
 
     # Clustering flags
-    reassign_optional_args.add_argument(
+    reassign_clustering_args.add_argument(
         "--clustering",
         dest="clustering",
         action="store_true",
         default=False,
         help="Enable clustering / community detection (requires --reference-stats)",
     )
-    # Keep Leiden tuning parameters (resolution / max iterations) but do not expose
+    # Keep community detection tuning parameters (resolution / max iterations) but do not expose
     # clustering algorithm selection or parallel flag via CLI to simplify the interface.
-    reassign_optional_args.add_argument(
-        "--leiden-resolution",
-        dest="leiden_resolution",
+    reassign_clustering_args.add_argument(
+        "--community-resolution",
+        dest="community_resolution",
         type=float,
-        default=defaults["leiden_resolution"],
+        default=defaults["community_resolution"],
         metavar="FLOAT",
-        help=help_msg["leiden_resolution"],
+        help=help_msg["community_resolution"],
     )
-    reassign_optional_args.add_argument(
-        "--leiden-max-iterations",
-        dest="leiden_max_iterations",
+    reassign_clustering_args.add_argument(
+        "--community-max-iterations",
+        dest="community_max_iterations",
         type=int,
-        default=defaults["leiden_max_iterations"],
+        default=defaults["community_max_iterations"],
         metavar="INT",
-        help=help_msg["leiden_max_iterations"],
+        help=help_msg["community_max_iterations"],
     )
-    reassign_optional_args.add_argument(
+    reassign_clustering_args.add_argument(
         "--outlier-method",
         dest="outlier_method",
         type=str,
-        choices=["mad", "iqr", "iforest", "lof", "zscore"],
+        choices=["mad", "iqr"],
         default=defaults["outlier_method"],
         metavar="METHOD",
         help=help_msg["outlier_method"],
     )
 
-    reassign_optional_args.add_argument(
-        "--export-mode",
-        dest="export_mode",
-        type=str,
-        choices=["auto", "compact", "full"],
-        default="auto",
-        metavar="MODE",
-        help=(
-            "Graph/TSV export mode: 'auto' (default) chooses compact vs full based on "
-            "outlier-method; 'compact' restricts output to the small CC/anomaly set; "
-            "'full' emits all computed graph metrics."
-        ),
-    )
-
-    # Isolation Forest parameters
-    reassign_optional_args.add_argument(
-        "--iforest-n-trees",
-        dest="iforest_n_trees",
-        type=lambda x: int(
-            check_values(
-                x, minval=1, maxval=10000, parser=parser, var="--iforest-n-trees"
-            )
-        ),
-        default=defaults["iforest_n_trees"],
-        metavar="INT",
-        help="Number of trees in the Isolation Forest ensemble (default: 100)",
-    )
-    reassign_optional_args.add_argument(
-        "--iforest-subsample-size",
-        dest="iforest_subsample_size",
-        type=lambda x: int(
-            check_values(
-                x,
-                minval=2,
-                maxval=1000000,
-                parser=parser,
-                var="--iforest-subsample-size",
-            )
-        ),
-        default=defaults["iforest_subsample_size"],
-        metavar="INT",
-        help="Subsample size for building each Isolation Forest tree (default: 256)",
-    )
-
-    # Allow negative value to indicate data-driven per-community auto threshold (e.g., -1)
-    def _parse_iforest_contamination(x):
-        try:
-            val = float(x)
-        except Exception:
-            parser.error(
-                f"argument --iforest-contamination: Invalid value {x}. Must be a float in [-1,0.5]. Use -1 for auto mode."
-            )
-        if val < 0.0 and val != -1.0:
-            parser.error(
-                f"argument --iforest-contamination: Invalid negative value {x}. Use -1 to request auto per-community thresholds."
-            )
-        if val > 0.5:
-            parser.error(
-                f"argument --iforest-contamination: Invalid value {x}. Must be between -1 (auto) and 0.5"
-            )
-        return val
-
-    reassign_optional_args.add_argument(
-        "--iforest-contamination",
-        dest="iforest_contamination",
-        type=_parse_iforest_contamination,
-        default=defaults["iforest_contamination"],
-        metavar="FLOAT",
-        help="Expected proportion of outliers for Isolation Forest (0-0.5). Use -1 to enable data-driven per-community auto thresholding (default: -1).",
-    )
-    reassign_optional_args.add_argument(
-        "--iforest-random-seed",
-        dest="iforest_random_seed",
-        type=lambda x: int(
-            check_values(
-                x,
-                minval=0,
-                maxval=2**31 - 1,
-                parser=parser,
-                var="--iforest-random-seed",
-            )
-        ),
-        default=defaults["iforest_random_seed"],
-        metavar="INT",
-        help="Random seed for Isolation Forest reproducibility (default: 42)",
-    )
-
-    # LOF parameters
-    reassign_optional_args.add_argument(
-        "--lof-k",
-        dest="lof_k",
-        type=lambda x: int(
-            check_values(x, minval=1, maxval=1000, parser=parser, var="--lof-k")
-        ),
-        default=defaults["lof_k"],
-        metavar="INT",
-        help="Number of neighbors for LOF (default: 20)",
-    )
-    reassign_optional_args.add_argument(
-        "--lof-contamination",
-        dest="lof_contamination",
-        type=lambda x: float(
-            check_values(
-                x, minval=0.0, maxval=0.5, parser=parser, var="--lof-contamination"
-            )
-        ),
-        default=defaults["lof_contamination"],
-        metavar="FLOAT",
-        help="Expected proportion of outliers for LOF (0-0.5, default: 0.1)",
-    )
-
-    # Z-score threshold
-    reassign_optional_args.add_argument(
-        "--zscore-threshold",
-        dest="zscore_threshold",
-        type=lambda x: float(
-            check_values(
-                x, minval=0.1, maxval=10.0, parser=parser, var="--zscore-threshold"
-            )
-        ),
-        default=defaults["zscore_threshold"],
-        metavar="FLOAT",
-        help="Z-score threshold for zscore outlier method (default: 3.0)",
-    )
-
-    reassign_optional_args.add_argument(
+    reassign_export_args.add_argument(
         "--graph-export",
         dest="graph_export",
         type=str,
@@ -1387,7 +1253,7 @@ def get_arguments(argv=None):
     )
 
     # Taxonomy-aware graph analysis
-    reassign_optional_args.add_argument(
+    reassign_taxonomy_args.add_argument(
         "--taxonomy-db",
         dest="taxonomy_db",
         type=str,
@@ -1398,7 +1264,7 @@ def get_arguments(argv=None):
         "If accession_map.parquet exists, taxonomy-aware graph analysis will be enabled.",
     )
 
-    reassign_optional_args.add_argument(
+    reassign_taxonomy_args.add_argument(
         "--taxonomy-min-rank",
         dest="taxonomy_min_rank",
         type=int,
@@ -1409,7 +1275,7 @@ def get_arguments(argv=None):
         "Default: 6 (genus level).",
     )
 
-    reassign_optional_args.add_argument(
+    reassign_taxonomy_args.add_argument(
         "--taxonomy-cross-domain-threshold",
         dest="taxonomy_cross_domain_threshold",
         type=float,
@@ -1419,7 +1285,7 @@ def get_arguments(argv=None):
         "Default: 0.10 (flag if >10%% of neighbors cross domains).",
     )
 
-    reassign_optional_args.add_argument(
+    reassign_taxonomy_args.add_argument(
         "--taxonomy-kingdom-threshold",
         dest="taxonomy_kingdom_threshold",
         type=float,
@@ -1429,7 +1295,7 @@ def get_arguments(argv=None):
         "Default: 0.25 (flag if >25%% of neighbors cross kingdoms).",
     )
 
-    reassign_optional_args.add_argument(
+    reassign_taxonomy_args.add_argument(
         "--taxonomy-genus-threshold",
         dest="taxonomy_genus_threshold",
         type=float,
@@ -1437,6 +1303,93 @@ def get_arguments(argv=None):
         metavar="FRAC",
         help="Fraction of genus-level mismatch neighbors to flag reference. "
         "Default: 0.50 (flag if >50%% of neighbors differ at genus level).",
+    )
+
+    # Taxonomy-informed filtering options (combine graph + taxonomy for automated filtering)
+    reassign_taxonomy_args.add_argument(
+        "--taxonomy-filter",
+        dest="taxonomy_filter_enabled",
+        action="store_true",
+        help="Enable taxonomy-informed filtering (combines graph topology + taxonomy for better filtering decisions). "
+        "Requires --taxonomy-db and --clustering.",
+    )
+
+    reassign_taxonomy_args.add_argument(
+        "--taxonomy-strict-filter",
+        dest="taxonomy_strict_filter",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable strict taxonomy filtering (automatically remove high-confidence contamination). "
+        "Default: enabled when --taxonomy-filter is set.",
+    )
+
+    reassign_taxonomy_args.add_argument(
+        "--taxonomy-strict-min-connections",
+        dest="taxonomy_strict_min_connections",
+        type=int,
+        default=5,
+        metavar="N",
+        help="Minimum number of graph connections required for strict taxonomy filtering. "
+        "Default: 5 (only remove cross-domain refs with >= 5 neighbors).",
+    )
+
+    reassign_taxonomy_args.add_argument(
+        "--taxonomy-weighted-outlier",
+        dest="taxonomy_weighted_outlier",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Weight anomaly scores by taxonomy flags (increases sensitivity to taxonomic incongruence). "
+        "Default: enabled when --taxonomy-filter is set.",
+    )
+
+    reassign_taxonomy_args.add_argument(
+        "--taxonomy-anomaly-weight",
+        dest="taxonomy_anomaly_weight",
+        type=float,
+        default=2.0,
+        metavar="WEIGHT",
+        help="Weight multiplier for taxonomy-flagged references in outlier detection. "
+        "Default: 2.0 (2x more suspicious if taxonomy flag is set).",
+    )
+
+    reassign_taxonomy_args.add_argument(
+        "--taxonomy-second-chance",
+        dest="taxonomy_second_chance",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Give graph-flagged references with normal taxonomy a second chance (reduces false positives). "
+        "Default: enabled when --taxonomy-filter is set.",
+    )
+
+    reassign_taxonomy_args.add_argument(
+        "--taxonomy-second-chance-cc",
+        dest="taxonomy_second_chance_cc",
+        type=float,
+        default=0.3,
+        metavar="CC",
+        help="Minimum clustering coefficient for second-chance validation. "
+        "Default: 0.3 (restore removed refs with CC >= 0.3 and normal taxonomy).",
+    )
+
+    reassign_taxonomy_args.add_argument(
+        "--remove-cross-domain-edges",
+        dest="remove_cross_domain_edges",
+        action="store_true",
+        help="Remove individual alignments between cross-domain references instead of removing entire references. "
+        "This preserves legitimate same-domain connections while eliminating contamination. "
+        "Requires --taxonomy-filter and --clustering. "
+        "Default: disabled (removes entire references with cross-domain contamination).",
+    )
+
+    reassign_taxonomy_args.add_argument(
+        "--flag-misannotations",
+        dest="flag_misannotations",
+        action="store_true",
+        help="Detect and flag potential database misannotations by analyzing cross-domain edge patterns. "
+        "References that lose ALL edges after cross-domain removal are flagged with high confidence. "
+        "Results exported to TSV with misannotation_flag and confidence_score columns for database curation. "
+        "Requires --remove-cross-domain-edges. "
+        "Default: disabled.",
     )
 
     misc_filter_args.add_argument(

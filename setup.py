@@ -1,4 +1,4 @@
-from setuptools import setup
+from setuptools import setup, find_packages
 import versioneer
 
 from setuptools import Extension
@@ -127,6 +127,16 @@ ext_modules = [
         library_dirs=common_library_dirs,
         libraries=common_libraries,
     ),
+    # Taxonomy-informed filtering module (combines graph + taxonomy for better filtering)
+    Extension(
+        "bam_filter.processor_taxonomy_filters",
+        ["bam_filter/processor_taxonomy_filters.pyx"],
+        extra_compile_args=common_compile_args,
+        extra_link_args=common_link_args,
+        include_dirs=common_include_dirs,
+        library_dirs=common_library_dirs,
+        libraries=common_libraries,
+    ),
     # # Lightweight nogil logging/timing utilities (available to cimport)
     # Extension(
     #     "bam_filter.nogil_log",
@@ -235,6 +245,15 @@ ext_modules = [
             ("_GNU_SOURCE", None),
         ],
     ),
+    Extension(
+        "bam_filter.processor_enhanced_filters",
+        ["bam_filter/processor_enhanced_filters.pyx"],
+        extra_compile_args=common_compile_args,
+        extra_link_args=common_link_args,
+        include_dirs=common_include_dirs,
+        library_dirs=common_library_dirs,
+        libraries=common_libraries,
+    ),
     # TSV writer for graph analysis (separated from processor_graph)
     Extension(
         "bam_filter.processor_graph_tsv",
@@ -265,8 +284,8 @@ ext_modules = [
     ),
     # Fast Leiden clustering using igraph C library (10-100x speedup)
     Extension(
-        "bam_filter.processor_leiden_igraph",
-        ["bam_filter/processor_leiden_igraph.pyx"],
+        "bam_filter.processor_community_igraph",
+        ["bam_filter/processor_community_igraph.pyx"],
         extra_compile_args=common_compile_args,
         extra_link_args=common_link_args,
         include_dirs=common_include_dirs,
@@ -477,7 +496,7 @@ setup(
     author="Antonio Fernandez-Guerra",
     author_email="antonio@metagenomics.eu",
     url="https://github.com/genomewalker/bam-filter",
-    packages=["bam_filter"],
+    packages=find_packages(exclude=("docs", "tests", "scripts")),
     entry_points={"console_scripts": ["filterBAM=bam_filter.__main__:main"]},
     install_requires=requirements,
     ext_modules=cythonize(ext_modules),

@@ -52,6 +52,7 @@ cdef int detect_taxonomy_anomalies(
     TaxonomyGraphConfig* config,
     uint32_t** neighbor_lists,
     uint32_t* neighbor_counts,
+    void* graph_handle,
     bint verbose
 ) noexcept nogil
 

@@ -237,8 +237,12 @@ cdef struct TaxonomyDB:
 
 # Accession to taxid mapping
 cdef struct AccessionMap:
-    kh_str_t* acc_hash      # Hash table: accession -> taxid
+    kh_str_t* acc_hash      # Hash table: accession -> taxid (NULL if using DuckDB)
     int32_t n_entries       # Number of entries
+    # DuckDB backend (alternative to khash for large datasets)
+    void* duckdb_db         # duckdb_database handle
+    void* duckdb_conn       # duckdb_connection handle
+    char* parquet_path      # Path to parquet file (for DuckDB queries)
 
 
 # LCA cache structure for O(1) lookups
@@ -256,6 +260,7 @@ cdef struct LCACache:
 cdef dict RANK_TO_ID = {
     'no rank': 0,
     'subspecies': 1,
+    'strain': 1,  # Same level as subspecies in some taxonomies (map to same ID)
     'species': 2,
     'species subgroup': 3,
     'species group': 4,
@@ -280,6 +285,8 @@ cdef dict RANK_TO_ID = {
     'kingdom': 23,
     'superkingdom': 24,
     'domain': 25,
+    'clade': 26,  # Intermediate rank (e.g., SAR between superkingdom and kingdom)
+    'lineage': 26,  # Intermediate rank in custom taxonomies (map to same ID as clade)
 }
 
 cdef int32_t get_rank_id(str rank_str):
@@ -464,12 +471,40 @@ cdef object _build_taxonomy_db_from_parsed_data(list nodes_data, dict names_dict
         free_taxonomy_db(db)
         raise MemoryError("Failed to allocate names buffer")
 
-    # Collect unique ranks
+    # Collect unique ranks and find max rank ID
     cdef set unique_ranks = set()
+    cdef int32_t max_rank_id = 0
+    cdef int32_t rank_id_val
     for taxid, parent_taxid, rank in nodes_data:
         unique_ranks.add(rank)
+        rank_id_val = get_rank_id(rank)
+        if rank_id_val > max_rank_id:
+            max_rank_id = rank_id_val
 
-    db.n_ranks = len(unique_ranks)
+    # Allocate rank_names array based on max rank ID (not number of unique ranks)
+    # Need space for rank IDs from 0 to max_rank_id
+    db.n_ranks = max_rank_id + 1
+
+    # Allocate and populate rank_names array
+    # This is critical for lineage extraction in processor_graph_tsv.pyx
+    db.rank_names = <char**>malloc(db.n_ranks * sizeof(char*))
+    if db.rank_names == NULL:
+        free_taxonomy_db(db)
+        raise MemoryError("Failed to allocate rank_names array")
+
+    # Initialize all to NULL
+    for i in range(db.n_ranks):
+        db.rank_names[i] = NULL
+
+    # Populate rank_names by mapping rank_id -> rank_name string
+    # Use the RANK_TO_ID dictionary to create the reverse mapping
+    cdef bytes rank_bytes
+    for rank_str, rank_id in RANK_TO_ID.items():
+        if rank_id < db.n_ranks:
+            rank_bytes = rank_str.encode('utf-8')
+            db.rank_names[rank_id] = <char*>malloc(len(rank_bytes) + 1)
+            if db.rank_names[rank_id] != NULL:
+                strcpy(db.rank_names[rank_id], <char*>rank_bytes)
 
     # Build nodes with depth calculation
     print("Building taxonomy tree structure...")
@@ -566,10 +601,13 @@ cdef void free_accession_map(AccessionMap* amap) nogil:
     """Free accession map memory."""
     cdef int k
     cdef kh_str_t* hash_ptr
+    cdef duckdb_connection* conn_ptr
+    cdef duckdb_database* db_ptr
 
     if amap == NULL:
         return
 
+    # Free khash if present
     if amap.acc_hash != NULL:
         hash_ptr = <kh_str_t*>amap.acc_hash
         # Free all string keys
@@ -578,7 +616,256 @@ cdef void free_accession_map(AccessionMap* amap) nogil:
                 free(<void*>hash_ptr.keys[k])
         kh_destroy_str(hash_ptr)
 
+    # Free DuckDB connection if present
+    if amap.duckdb_conn != NULL:
+        conn_ptr = <duckdb_connection*>amap.duckdb_conn
+        duckdb_disconnect(conn_ptr)
+        free(conn_ptr)
+
+    if amap.duckdb_db != NULL:
+        db_ptr = <duckdb_database*>amap.duckdb_db
+        duckdb_close(db_ptr)
+        free(db_ptr)
+
+    if amap.parquet_path != NULL:
+        free(amap.parquet_path)
+
     free(amap)
+
+
+cdef AccessionMap* create_duckdb_accession_map(const char* parquet_path) nogil except NULL:
+    """
+    Create an AccessionMap backed by DuckDB for on-demand lookups.
+    This avoids loading millions of accessions into memory.
+
+    Returns AccessionMap with DuckDB connection open.
+    """
+    cdef AccessionMap* amap = <AccessionMap*>malloc(sizeof(AccessionMap))
+    if amap == NULL:
+        return NULL
+
+    # Initialize fields
+    amap.acc_hash = NULL
+    amap.n_entries = 0
+    amap.parquet_path = strdup(parquet_path)
+
+    # Allocate and initialize DuckDB handles
+    amap.duckdb_db = malloc(sizeof(duckdb_database))
+    amap.duckdb_conn = malloc(sizeof(duckdb_connection))
+
+    if amap.duckdb_db == NULL or amap.duckdb_conn == NULL or amap.parquet_path == NULL:
+        free_accession_map(amap)
+        return NULL
+
+    # Open DuckDB
+    cdef duckdb_state state = duckdb_open(NULL, <duckdb_database*>amap.duckdb_db)
+    if state == DuckDBError:
+        free_accession_map(amap)
+        return NULL
+
+    # Connect
+    state = duckdb_connect((<duckdb_database*>amap.duckdb_db)[0], <duckdb_connection*>amap.duckdb_conn)
+    if state == DuckDBError:
+        free_accession_map(amap)
+        return NULL
+
+    return amap
+
+
+cdef int32_t lookup_taxid_duckdb(AccessionMap* amap, const char* accession) nogil except -2:
+    """
+    Look up taxid for an accession using DuckDB query.
+    Returns taxid, or -1 if not found, or -2 on error.
+    """
+    if amap == NULL or amap.duckdb_conn == NULL or amap.parquet_path == NULL:
+        return -2
+
+    # Build query: SELECT taxid FROM parquet WHERE accession = '...'
+    cdef char query[512]
+    snprintf(query, 512, "SELECT taxid FROM read_parquet('%s') WHERE accession = ? LIMIT 1",
+             amap.parquet_path)
+
+    # For simplicity, build the full query with the accession in it
+    # (prepared statements would be better but more complex)
+    cdef char full_query[1024]
+    snprintf(full_query, 1024, "SELECT taxid FROM read_parquet('%s') WHERE accession = '%s' LIMIT 1",
+             amap.parquet_path, accession)
+
+    cdef duckdb_result result
+    cdef duckdb_state state = duckdb_query((<duckdb_connection*>amap.duckdb_conn)[0], full_query, &result)
+
+    if state == DuckDBError:
+        duckdb_destroy_result(&result)
+        return -2
+
+    cdef idx_t num_rows = duckdb_row_count(&result)
+    cdef int32_t taxid = -1
+
+    if num_rows > 0:
+        taxid = duckdb_value_int32(&result, 0, 0)
+
+    duckdb_destroy_result(&result)
+    return taxid
+
+
+cdef int64_t _process_duckdb_accession_filter(kh_str_t* hash_ptr, const char* parquet_cstr,
+                                               char** filter_cstrs, idx_t filter_count) nogil except -1:
+    """
+    Helper function to process DuckDB accession filtering in nogil context.
+    Separated from main function to avoid stack overflow issues with large closures.
+
+    Returns number of matched rows.
+    """
+    cdef duckdb_database db
+    cdef duckdb_connection conn
+    cdef duckdb_result result
+    cdef duckdb_state state
+    cdef duckdb_appender appender
+    cdef const char* error_msg
+    cdef idx_t num_rows, num_cols, row_idx, i
+    cdef char* acc_value
+    cdef int32_t taxid_value
+    cdef char* acc_copy
+    cdef int ret, k
+    cdef size_t acc_len
+    cdef int64_t matched_rows = 0
+    cdef char* query_cstr
+
+    # Step 1: Open in-memory database
+    state = duckdb_open(NULL, &db)
+    if state == DuckDBError:
+        with gil:
+            raise RuntimeError("Failed to open DuckDB database")
+
+    # Step 2: Connect
+    state = duckdb_connect(db, &conn)
+    if state == DuckDBError:
+        duckdb_close(&db)
+        with gil:
+            raise RuntimeError("Failed to connect to DuckDB")
+
+    # Step 3: Create temp table
+    state = duckdb_query(conn, "CREATE TEMP TABLE filter_accs (accession VARCHAR)", &result)
+    if state == DuckDBError:
+        error_msg = duckdb_result_error(&result)
+        duckdb_destroy_result(&result)
+        duckdb_disconnect(&conn)
+        duckdb_close(&db)
+        with gil:
+            raise RuntimeError(f"Failed to create table")
+    duckdb_destroy_result(&result)
+
+    # Step 4: Bulk insert filter accessions
+    state = duckdb_appender_create(conn, NULL, "filter_accs", &appender)
+    if state == DuckDBError:
+        duckdb_disconnect(&conn)
+        duckdb_close(&db)
+        with gil:
+            raise RuntimeError("Failed to create appender")
+
+    for i in range(filter_count):
+        if filter_cstrs[i] == NULL:
+            continue
+
+        state = duckdb_append_varchar(appender, filter_cstrs[i])
+        if state == DuckDBError:
+            duckdb_appender_destroy(&appender)
+            duckdb_disconnect(&conn)
+            duckdb_close(&db)
+            with gil:
+                raise RuntimeError(f"Failed to append at index {i}")
+        duckdb_appender_end_row(appender)
+
+    state = duckdb_appender_close(appender)
+    if state == DuckDBError:
+        duckdb_appender_destroy(&appender)
+        duckdb_disconnect(&conn)
+        duckdb_close(&db)
+        with gil:
+            raise RuntimeError("Failed to close appender")
+    duckdb_appender_destroy(&appender)
+
+    # Step 5: Build and execute query
+    # Build SQL query string using C - allocate on heap
+    cdef char* query_template = "SELECT DISTINCT p.accession, p.taxid FROM read_parquet('%s') p WHERE p.accession IN (SELECT accession FROM filter_accs)"
+    cdef size_t query_len = strlen(query_template) + strlen(parquet_cstr) + 100  # Extra space
+    query_cstr = <char*>malloc(query_len)
+    if query_cstr == NULL:
+        duckdb_disconnect(&conn)
+        duckdb_close(&db)
+        with gil:
+            raise MemoryError("Failed to allocate query string")
+
+    snprintf(query_cstr, query_len, query_template, parquet_cstr)
+
+    state = duckdb_query(conn, query_cstr, &result)
+    free(query_cstr)  # Free the query string after use
+    if state == DuckDBError:
+        duckdb_destroy_result(&result)
+        duckdb_disconnect(&conn)
+        duckdb_close(&db)
+        with gil:
+            raise RuntimeError("Query failed")
+
+    # Step 6: Extract results and build hash table
+    num_rows = duckdb_row_count(&result)
+    num_cols = duckdb_column_count(&result)
+
+    # Verify hash_ptr is valid
+    if hash_ptr == NULL:
+        duckdb_destroy_result(&result)
+        duckdb_disconnect(&conn)
+        duckdb_close(&db)
+        return -2
+
+    if num_rows > 0 and num_cols >= 2:
+        for row_idx in range(num_rows):
+
+            # Get taxid
+            taxid_value = duckdb_value_int32(&result, <idx_t>1, <idx_t>row_idx)
+
+            # Get accession and immediately copy it
+            acc_value = duckdb_value_varchar(&result, <idx_t>0, <idx_t>row_idx)
+            if acc_value == NULL:
+                continue
+
+            acc_len = strlen(acc_value)
+            if acc_len == 0:
+                duckdb_free(acc_value)
+                continue
+
+            # Make a copy BEFORE doing any khash operations
+            acc_copy = strdup(acc_value)
+            duckdb_free(acc_value)  # Free DuckDB string immediately
+
+            if acc_copy == NULL:
+                continue
+
+            # Now insert into khash - kh_put_str handles duplicates
+            k = kh_put_str(hash_ptr, acc_copy, &ret)
+            if ret == -1:
+                # Insertion failed
+                free(acc_copy)
+                continue
+            elif ret == 0:
+                # Key already exists, free our copy and keep existing entry
+                free(acc_copy)
+                continue
+            else:
+                # ret > 0: new key inserted successfully
+                if k < hash_ptr.n_buckets:
+                    hash_ptr.vals[k] = taxid_value
+                    matched_rows += 1
+                else:
+                    # Invalid k value (should never happen)
+                    free(acc_copy)
+
+    # Cleanup
+    duckdb_destroy_result(&result)
+    duckdb_disconnect(&conn)
+    duckdb_close(&db)
+
+    return matched_rows
 
 
 cdef AccessionMap* load_accession_map_from_parquet_arrow_cpp(str parquet_file, accession_filter=None) except NULL:
@@ -660,6 +947,7 @@ cdef AccessionMap* load_accession_map_from_parquet_arrow_cpp(str parquet_file, a
     cdef char* parquet_cstr
     cdef bytes query_bytes
     cdef char** filter_cstrs
+    cdef size_t acc_len
 
     # Step 1: Load data with proper filtering
     try:
@@ -681,139 +969,20 @@ cdef AccessionMap* load_accession_map_from_parquet_arrow_cpp(str parquet_file, a
             if filter_cstrs == NULL:
                 raise MemoryError("Failed to allocate filter strings")
 
+            # Initialize all pointers to NULL for safety
+            for i in range(filter_count):
+                filter_cstrs[i] = NULL
+
             try:
                 for i, acc in enumerate(accession_filter):
                     acc_bytes = acc.encode('utf-8')
                     filter_cstrs[i] = strdup(<char*>acc_bytes)
+                    if filter_cstrs[i] == NULL:
+                        raise MemoryError(f"Failed to allocate memory for accession {i}")
 
-                # Now release GIL for the entire DuckDB operation
-                print(f"  [DEBUG] Starting DuckDB operations (nogil)...")
-                with nogil:
-                    # Step 1: Open in-memory database
-                    with gil:
-                        print(f"  [DEBUG] Opening DuckDB database...")
-                    state = duckdb_open(NULL, &db)  # NULL = in-memory
-                    if state == DuckDBError:
-                        with gil:
-                            raise RuntimeError("Failed to open DuckDB database")
-
-                    # Step 2: Connect
-                    with gil:
-                        print(f"  [DEBUG] Connecting to DuckDB...")
-                    state = duckdb_connect(db, &conn)
-                    if state == DuckDBError:
-                        duckdb_close(&db)
-                        with gil:
-                            raise RuntimeError("Failed to connect to DuckDB")
-
-                    # Step 3: Create temp table
-                    state = duckdb_query(conn,
-                                        "CREATE TEMP TABLE filter_accs (accession VARCHAR)",
-                                        &result)
-                    if state == DuckDBError:
-                        error_msg = duckdb_result_error(&result)
-                        duckdb_destroy_result(&result)
-                        duckdb_disconnect(&conn)
-                        duckdb_close(&db)
-                        with gil:
-                            raise RuntimeError(f"Failed to create table: {error_msg.decode('utf-8')}")
-                    duckdb_destroy_result(&result)
-
-                    # Step 4: Bulk insert filter accessions using appender (much faster than executemany)
-                    state = duckdb_appender_create(conn, NULL, "filter_accs", &appender)
-                    if state == DuckDBError:
-                        duckdb_disconnect(&conn)
-                        duckdb_close(&db)
-                        with gil:
-                            raise RuntimeError("Failed to create appender")
-
-                    for i in range(filter_count):
-                        state = duckdb_append_varchar(appender, filter_cstrs[i])
-                        if state == DuckDBError:
-                            error_msg = duckdb_appender_error(appender)
-                            duckdb_appender_destroy(&appender)
-                            duckdb_disconnect(&conn)
-                            duckdb_close(&db)
-                            with gil:
-                                raise RuntimeError(f"Failed to append: {error_msg.decode('utf-8')}")
-                        duckdb_appender_end_row(appender)
-
-                    state = duckdb_appender_close(appender)
-                    if state == DuckDBError:
-                        error_msg = duckdb_appender_error(appender)
-                        duckdb_appender_destroy(&appender)
-                        duckdb_disconnect(&conn)
-                        duckdb_close(&db)
-                        with gil:
-                            raise RuntimeError(f"Failed to close appender: {error_msg.decode('utf-8')}")
-                    duckdb_appender_destroy(&appender)
-
-                    # Step 5: Build and execute query with predicate pushdown
-                    # Must build query string with GIL
-                    with gil:
-                        query_str = f"SELECT DISTINCT p.accession, p.taxid FROM read_parquet('{parquet_file}') p WHERE p.accession IN (SELECT accession FROM filter_accs)"
-                        query_bytes = query_str.encode('utf-8')
-                        query_cstr = <char*>query_bytes
-
-                    state = duckdb_query(conn, query_cstr, &result)
-                    if state == DuckDBError:
-                        error_msg = duckdb_result_error(&result)
-                        duckdb_destroy_result(&result)
-                        duckdb_disconnect(&conn)
-                        duckdb_close(&db)
-                        with gil:
-                            raise RuntimeError(f"Query failed: {error_msg.decode('utf-8')}")
-
-                    # Step 6: Extract results and build hash table (all in nogil!)
-                    num_rows = duckdb_row_count(&result)
-                    num_cols = duckdb_column_count(&result)
-
-                    with gil:
-                        print(f"  ✓ Query returned {num_rows:,} rows")
-                        print(f"  Building hash table from {num_rows:,} accessions...")
-
-                    # Safety check
-                    if num_rows == 0 or num_cols < 2:
-                        with gil:
-                            print(f"  WARNING: Empty result or invalid columns: {num_rows} rows, {num_cols} cols")
-                    else:
-                        # Process each row - note row_idx must be idx_t for DuckDB calls
-                        for row_idx in range(num_rows):
-                            # Get accession string (column 0)
-                            # IMPORTANT: Cast row_idx explicitly to idx_t for DuckDB C API
-                            acc_value = duckdb_value_varchar(&result, <idx_t>0, <idx_t>row_idx)
-                            if acc_value == NULL:
-                                continue
-
-                            # Get taxid (column 1)
-                            taxid_value = duckdb_value_int32(&result, <idx_t>1, <idx_t>row_idx)
-
-                            # Check if already exists
-                            k = kh_get_str(hash_ptr, acc_value)
-                            if kh_exist_str(hash_ptr, k):
-                                duckdb_free(acc_value)  # Free the string returned by DuckDB
-                                continue
-
-                            # Insert into hash table (strdup to make our own copy)
-                            acc_copy = strdup(acc_value)
-                            if acc_copy == NULL:
-                                # Failed to allocate memory
-                                duckdb_free(acc_value)
-                                continue
-
-                            k = kh_put_str(hash_ptr, acc_copy, &ret)
-                            if ret >= 0:
-                                hash_ptr.vals[k] = taxid_value
-                                matched_rows += 1
-                            elif ret == 0:
-                                free(acc_copy)
-
-                            duckdb_free(acc_value)  # Free the string returned by DuckDB
-
-                    # Cleanup DuckDB
-                    duckdb_destroy_result(&result)
-                    duckdb_disconnect(&conn)
-                    duckdb_close(&db)
+                # Now execute DuckDB operations (call separate function to avoid stack overflow in nogil block)
+                matched_rows = _process_duckdb_accession_filter(
+                    hash_ptr, parquet_cstr, filter_cstrs, filter_count)
 
                 print(f"  ✓ Hash table built: {hash_ptr.size:,} unique accessions (nogil C API)")
 
@@ -894,6 +1063,10 @@ cdef AccessionMap* load_accession_map_from_parquet_arrow_cpp(str parquet_file, a
 
     amap.acc_hash = <void*>hash_ptr
     amap.n_entries = <int32_t>row_count
+    # Initialize DuckDB fields to NULL (we don't use DuckDB backend here)
+    amap.duckdb_db = NULL
+    amap.duckdb_conn = NULL
+    amap.parquet_path = NULL
 
     return amap
 
@@ -903,7 +1076,8 @@ def load_accession_map_from_file(str acc2taxid_file, bint is_custom=False, int n
     Load accession to taxid mapping from Parquet file.
 
     This function requires Parquet format for maximum performance.
-    Use `convert_acc2taxid_to_parquet.py` to convert .gz files to .parquet format.
+    Use `bam_filter.taxonomy_build.convert_gz_to_parquet` (or the
+    `filterBAM build-taxonomy` CLI) to convert .gz files to .parquet format.
 
     Parameters
     ----------
@@ -914,7 +1088,7 @@ def load_accession_map_from_file(str acc2taxid_file, bint is_custom=False, int n
     num_threads : int, optional
         Unused (kept for API compatibility)
     accession_filter : list of str, optional
-        If provided, only load accessions in this list (uses Parquet predicate pushdown for speed)
+        If provided, only load accessions in this list using a single batch DuckDB query
 
     Returns
     -------
@@ -924,21 +1098,31 @@ def load_accession_map_from_file(str acc2taxid_file, bint is_custom=False, int n
     Notes
     -----
     To convert .gz files to .parquet format:
-        python -m bam_filter.convert_acc2taxid_to_parquet input.gz output.parquet
+        python -c "from bam_filter.taxonomy_build import convert_gz_to_parquet; \
+convert_gz_to_parquet('input.gz', 'output.parquet')"
 
-    This provides 50-100x faster loading compared to the old pandas approach.
-
-    If accession_filter is provided, uses Parquet row group filtering for 100-1000x speedup
-    when loading a small subset of accessions from a large file.
+    When accession_filter is provided, this function executes a single batch query to
+    load only the needed accessions, then builds a small khash for O(1) lookups.
     """
     if not acc2taxid_file.endswith('.parquet'):
         raise ValueError(
             f"Only Parquet format is supported. Got: {acc2taxid_file}\n"
             f"Please convert your file to Parquet format using:\n"
-            f"  python -m bam_filter.convert_acc2taxid_to_parquet {acc2taxid_file} {acc2taxid_file}.parquet"
+            f"  python -c \"from bam_filter.taxonomy_build import convert_gz_to_parquet; "
+            f"convert_gz_to_parquet('{acc2taxid_file}', '{acc2taxid_file}.parquet')\""
         )
 
-    amap = load_accession_map_from_parquet_arrow_cpp(acc2taxid_file, accession_filter)
+    if accession_filter and len(accession_filter) > 0:
+        # Use batch query approach - single DuckDB query for all accessions
+        print(f"[TAXONOMY_DB] Loading {len(accession_filter):,} accessions using batch query...", flush=True)
+        amap = load_accession_map_from_parquet_arrow_cpp(acc2taxid_file, accession_filter)
+        print(f"[TAXONOMY_DB] Batch query complete", flush=True)
+    else:
+        # No filter - this will load the full file (not recommended for large files)
+        print(f"[TAXONOMY_DB] Loading full accession map (no filter)...", flush=True)
+        amap = load_accession_map_from_parquet_arrow_cpp(acc2taxid_file, None)
+        print(f"[TAXONOMY_DB] Full file loaded", flush=True)
+
     return AccessionMapping._from_c_struct(amap)
 
 
@@ -950,12 +1134,12 @@ cdef int32_t compute_lca_nogil(TaxonomyDB* db, int32_t taxid1, int32_t taxid2) n
     """
     Compute the Lowest Common Ancestor of two taxids.
 
-    Algorithm: Path to root comparison
-    - Build path from taxid1 to root
-    - Walk from taxid2 to root, checking if node is in taxid1's path
-    - First match is the LCA
+    Optimized algorithm using depth-aware traversal:
+    - Use pre-computed depth information to align nodes
+    - Then walk up both paths in parallel until they meet
+    - This is much faster than the naive O(depth²) approach
 
-    Time complexity: O(depth), typically O(log N)
+    Time complexity: O(depth), but with much better constants
     """
     if taxid1 == taxid2:
         return taxid1
@@ -969,48 +1153,63 @@ cdef int32_t compute_lca_nogil(TaxonomyDB* db, int32_t taxid1, int32_t taxid2) n
     if idx1 < 0 or idx2 < 0:
         return -1
 
-    # Build path from taxid1 to root using a simple array (max depth ~ 50)
-    cdef int32_t path1[128]  # Stack-allocated for speed
-    cdef int32_t path1_len = 0
-    cdef int32_t current_idx = idx1
+    cdef TaxNode* node1 = &db.nodes[idx1]
+    cdef TaxNode* node2 = &db.nodes[idx2]
+    cdef int32_t depth1 = node1.depth
+    cdef int32_t depth2 = node2.depth
+    cdef int32_t parent_taxid
 
-    while current_idx >= 0 and path1_len < 128:
-        path1[path1_len] = db.nodes[current_idx].taxid
-        path1_len += 1
-
-        # Move to parent
-        if db.nodes[current_idx].taxid == db.nodes[current_idx].parent_taxid:
-            break  # Reached root
-
-        parent_taxid = db.nodes[current_idx].parent_taxid
+    # Bring both nodes to the same depth by moving the deeper one up
+    while depth1 > depth2:
+        parent_taxid = node1.parent_taxid
+        if parent_taxid == node1.taxid:  # Reached root
+            return node1.taxid
         if parent_taxid < 0 or parent_taxid > db.max_taxid:
-            break
+            return -1
+        idx1 = db.taxid_to_idx[parent_taxid]
+        if idx1 < 0:
+            return -1
+        node1 = &db.nodes[idx1]
+        depth1 = node1.depth
 
-        current_idx = db.taxid_to_idx[parent_taxid]
-
-    # Walk from taxid2 to root, checking path1
-    current_idx = idx2
-    cdef int32_t i
-
-    while current_idx >= 0:
-        current_taxid = db.nodes[current_idx].taxid
-
-        # Check if current_taxid is in path1
-        for i in range(path1_len):
-            if path1[i] == current_taxid:
-                return current_taxid
-
-        # Move to parent
-        if db.nodes[current_idx].taxid == db.nodes[current_idx].parent_taxid:
-            return db.nodes[current_idx].taxid  # Return root
-
-        parent_taxid = db.nodes[current_idx].parent_taxid
+    while depth2 > depth1:
+        parent_taxid = node2.parent_taxid
+        if parent_taxid == node2.taxid:  # Reached root
+            return node2.taxid
         if parent_taxid < 0 or parent_taxid > db.max_taxid:
-            break
+            return -1
+        idx2 = db.taxid_to_idx[parent_taxid]
+        if idx2 < 0:
+            return -1
+        node2 = &db.nodes[idx2]
+        depth2 = node2.depth
 
-        current_idx = db.taxid_to_idx[parent_taxid]
+    # Now both are at same depth, walk up in parallel until they meet
+    while node1.taxid != node2.taxid:
+        # Check if we hit root
+        if node1.taxid == node1.parent_taxid:
+            return node1.taxid
+        if node2.taxid == node2.parent_taxid:
+            return node2.taxid
 
-    return -1  # No LCA found
+        # Move both up one level
+        parent_taxid = node1.parent_taxid
+        if parent_taxid < 0 or parent_taxid > db.max_taxid:
+            return -1
+        idx1 = db.taxid_to_idx[parent_taxid]
+        if idx1 < 0:
+            return -1
+        node1 = &db.nodes[idx1]
+
+        parent_taxid = node2.parent_taxid
+        if parent_taxid < 0 or parent_taxid > db.max_taxid:
+            return -1
+        idx2 = db.taxid_to_idx[parent_taxid]
+        if idx2 < 0:
+            return -1
+        node2 = &db.nodes[idx2]
+
+    return node1.taxid  # They met at this node
 
 
 cdef int32_t compute_lca_for_list_nogil(TaxonomyDB* db, int32_t[:] taxid_list) nogil:
@@ -1216,6 +1415,56 @@ cdef int build_lineage_string_nogil(TaxonomyDB* db, int32_t taxid, char* buffer,
 
     buffer[pos] = 0  # Null terminator
     return pos
+
+
+cdef const char* get_name_at_rank_nogil(TaxonomyDB* db, int32_t taxid, int32_t target_rank_id) noexcept nogil:
+    """
+    Get the taxonomic name at a specific rank by traversing lineage.
+
+    Parameters
+    ----------
+    db : TaxonomyDB*
+        Taxonomy database
+    taxid : int32_t
+        Starting taxonomy ID
+    target_rank_id : int32_t
+        Target rank ID to find (e.g., 6 for genus, 2 for species)
+
+    Returns
+    -------
+    const char*
+        Pointer to name string, or NULL if not found
+    """
+    if db == NULL or taxid < 0 or taxid > db.max_taxid:
+        return NULL
+
+    cdef int32_t current_idx = db.taxid_to_idx[taxid]
+    if current_idx < 0:
+        return NULL
+
+    cdef int32_t current_taxid = taxid
+    cdef TaxNode* node
+
+    # Traverse lineage upward looking for target rank
+    while current_idx >= 0:
+        node = &db.nodes[current_idx]
+
+        # Check if this node matches our target rank
+        if node.rank_id == target_rank_id:
+            # Return pointer to name in buffer
+            if node.name_offset >= 0:
+                return db.names_buffer + node.name_offset
+            else:
+                return NULL
+
+        # Move to parent
+        current_taxid = node.parent_taxid
+        if current_taxid < 0 or current_taxid > db.max_taxid:
+            break
+
+        current_idx = db.taxid_to_idx[current_taxid]
+
+    return NULL
 
 
 # =============================================================================

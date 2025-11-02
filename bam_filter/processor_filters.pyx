@@ -38,16 +38,29 @@ from bam_filter.processor_graph_ops cimport (
     WeightedGraph, GraphNode,
     create_weighted_graph, destroy_weighted_graph, add_edge,
     build_weighted_graph_from_alignments, prune_low_weight_edges,
-    calculate_graph_statistics
+    calculate_graph_statistics,
+    extract_neighbors_from_igraph
 )
-from bam_filter.processor_leiden_igraph cimport (
-    leiden_clustering,
-    LeidenResults,
+from bam_filter.processor_community_igraph cimport (
+    community_clustering,
+    CommunityResults,
 )
 from bam_filter.processor_igraph cimport *
 from bam_filter.processor_graph cimport write_graph_tsv
+from bam_filter.processor_taxonomy_filters cimport (
+    TaxonomyFilterConfig,
+    TaxonomyFilterStats,
+    weight_anomaly_scores_by_taxonomy,
+    apply_taxonomy_informed_filtering
+)
 from bam_filter.processor_graph_export cimport export_graph_graphml
 from bam_filter.processor_mapping cimport ReferenceMapping
+from bam_filter.taxonomy_db cimport TaxonomyDB
+from bam_filter.processor_enhanced_filters cimport apply_enhanced_filtering
+from bam_filter.processor_graph_taxonomy cimport (
+    detect_taxonomy_anomalies,
+    TaxonomyGraphConfig
+)
 cdef extern from "bam_filter/c_logging.h":
     void bf_nogil_logf_notime(const char* tag, const char* fmt, ...) nogil
 cdef extern from "htslib/sam.h":
@@ -448,32 +461,30 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
                                        ReadIndex* read_index,
                                        uint32_t array_size,
                                        int32_t min_read_count,
-                                       float score_threshold,
                                        bint verbose,
-                                       int use_leiden,
-                                       double leiden_resolution,
-                                       bint leiden_parallel,
-                                       int leiden_max_iterations,
+                                       double community_resolution,
+                                       int community_max_iterations,
                                        uint32_t graph_min_edge_weight,
                                        int32_t thread_count,
-                                       int32_t iforest_n_trees,
-                                       uint32_t iforest_subsample_size,
-                                       double iforest_contamination,
-                                       uint32_t iforest_random_seed,
-                                       uint32_t lof_k,
-                                       double lof_contamination,
-                                       double zscore_threshold,
+                                       int outlier_method,
                                        WeightedGraph* existing_graph,
                                        sam_hdr_t* bam_header,
                                        ReferenceMapping* mapping,
                                        const char* tsv_export_path,
                                        const char* graph_export_path,
-                                       int outlier_method) except -1 nogil:
-    """Apply cluster-aware filtering based on graph topology and Leiden clustering.
+                                       TaxonomyFilterConfig* taxonomy_filter_config,
+                                       TaxonomyFilterStats* taxonomy_stats_out,
+                                       TaxonomyDB* taxonomy_db,
+                                       float betweenness_threshold,
+                                       float cc_threshold,
+                                       uint32_t hub_degree_threshold,
+                                       bint strict_mode,
+                                       bint remove_cross_domain_edges,
+                                       bint flag_misannotations) except -1 nogil:
+    """Apply 3-tier enhanced filtering based on graph topology and taxonomy.
 
-    Uses igraph for graph construction, component detection, Leiden clustering,
-    and weighted clustering coefficient calculation. Applies broken stick model
-    to identify and remove promiscuous hub references within communities.
+    Integrates Community clustering, betweenness centrality, clustering coefficients,
+    and taxonomy coherence to identify and remove contamination.
 
     Parameters
     ----------
@@ -489,22 +500,18 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
         Size of pattern_data and ref_stats arrays
     min_read_count : int32_t
         Minimum read count filter threshold
-    score_threshold : float
-        Score threshold (unused, retained for API compatibility)
     verbose : bint
         Enable verbose logging
-    use_leiden : int
-        Enable Leiden clustering (currently always enabled)
-    leiden_resolution : double
-        Leiden resolution parameter
-    leiden_parallel : bint
-        Enable parallel Leiden (currently unused)
-    leiden_max_iterations : int
-        Maximum Leiden iterations
+    community_resolution : double
+        Community resolution parameter
+    community_max_iterations : int
+        Maximum Community iterations
     graph_min_edge_weight : uint32_t
         Minimum edge weight for graph construction
     thread_count : int32_t
         Thread count for parallel processing
+    outlier_method : int
+        Outlier detection method (MAD recommended)
     existing_graph : WeightedGraph*
         Pre-built graph (required)
     bam_header : sam_hdr_t*
@@ -515,6 +522,20 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
         Path for TSV output (NULL to skip)
     graph_export_path : const char*
         Path for GraphML output (NULL to skip)
+    taxonomy_filter_config : TaxonomyFilterConfig*
+        Taxonomy filtering configuration
+    taxonomy_stats_out : TaxonomyFilterStats*
+        Taxonomy filtering statistics (output)
+    taxonomy_db : TaxonomyDB*
+        Taxonomy database for coherence checking
+    betweenness_threshold : float
+        Threshold for bridge detection (e.g., 0.01)
+    cc_threshold : float
+        Threshold for hub detection (e.g., 0.3)
+    hub_degree_threshold : uint32_t
+        Minimum degree for hub classification (e.g., 5)
+    strict_mode : bint
+        Enable strict filtering mode
 
     Returns
     -------
@@ -524,41 +545,54 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
     Notes
     -----
     Workflow:
-    1. Verify pre-built igraph is provided
-    2. Run Leiden clustering with component detection
-    3. Calculate weighted clustering coefficients (Barrat's method)
-    4. Apply broken stick model to find CC threshold per community
-    5. Remove references above threshold (hubs), keep below (specific)
-    6. Compact alignments and rebuild read indices
-    7. Optionally export results to TSV and GraphML
+    1. Run Community clustering with component detection
+    2. Calculate betweenness centrality and clustering coefficients
+    3. Apply taxonomy-informed filtering (if enabled)
+    4. Apply 3-tier enhanced filtering:
+       - Tier 1: Structural role classification (PERIPHERAL/CORE/HUB/BRIDGE)
+       - Tier 2: Community coherence checking via taxonomy LCA
+       - Tier 3: Integrated decision matrix
+    5. Compact alignments and rebuild read indices
+    6. Export results to TSV and GraphML
     """
     
     if verbose:
         bf_nogil_logf_notime(b"CLUSTER", "Cluster-aware filtering with CC thresholding\n")
         bf_nogil_logf_notime(b"CLUSTER", "  Graph min edge weight: %u\n", graph_min_edge_weight)
         bf_nogil_logf_notime(b"CLUSTER", "  Min read count: %d\n", min_read_count)
-        bf_nogil_logf_notime(b"CLUSTER", "  Leiden resolution: %.2f\n", leiden_resolution)
-        bf_nogil_logf_notime(b"CLUSTER", "  Leiden max iterations: %d\n\n", leiden_max_iterations)
+        # Show algorithm-specific parameters
+        # Note: Resolution and max_iterations only apply to Community, not to LPA
+        # LPA will be used for graphs >= 10k nodes
+        if existing_graph.num_nodes >= 10000:
+            bf_nogil_logf_notime(b"CLUSTER", "  Algorithm: Label Propagation (LPA) - fast O(m) for large graphs\n")
+        else:
+            bf_nogil_logf_notime(b"CLUSTER", "  Algorithm: Leiden (community detection)\n")
+            bf_nogil_logf_notime(b"CLUSTER", "  Community resolution: %.2f\n", community_resolution)
+            bf_nogil_logf_notime(b"CLUSTER", "  Community max iterations: %d\n", community_max_iterations)
+        bf_nogil_logf_notime(b"CLUSTER", "\n")
 
     if not existing_graph or not existing_graph.igraph_handle:
         bf_nogil_logf_notime(b"CLUSTER", "ERROR: No pre-built igraph provided to cluster-aware filtering\n")
         return -1
 
-    cdef LeidenResults* leiden_results = leiden_clustering(
+    # Level 2 taxonomy filtering: Weight anomaly scores BEFORE Community clustering
+    # This array will be allocated and filled by community_clustering, but we need to
+    # create a placeholder anomaly_scores array that will be passed to weight_anomaly_scores_by_taxonomy
+    # Note: The actual anomaly score computation happens inside community_clustering, so we'll apply
+    # taxonomy weighting AFTER community_clustering returns the anomaly scores. This is handled by passing
+    # the taxonomy_filter_config to community_clustering.
+
+    if verbose:
+        bf_nogil_logf_notime(b"CLUSTER", "Calling community_clustering with %u nodes...\n", existing_graph.num_nodes)
+
+    cdef CommunityResults* community_results = community_clustering(
         existing_graph,
         ref_stats,
-        leiden_resolution,
-        leiden_max_iterations,
+        community_resolution,
+        community_max_iterations,
         verbose,
         thread_count,
         outlier_method,
-        iforest_n_trees,
-        iforest_subsample_size,
-        iforest_contamination,
-        iforest_random_seed,
-        lof_k,
-        lof_contamination,
-        zscore_threshold,
         existing_graph.tsv_exact_connection_counts,
         existing_graph.tsv_co_mapping_averages,
         existing_graph.tsv_max_co_mappings,
@@ -566,40 +600,180 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
         existing_graph.tsv_array_size
     )
 
-    if not leiden_results:
-        bf_nogil_logf_notime(b"CLUSTER", "ERROR: Leiden clustering failed\n")
+    if not community_results:
+        bf_nogil_logf_notime(b"CLUSTER", "ERROR: Community clustering failed\n")
         return -1
 
-    cdef char* keep_flag = leiden_results.keep_flag
+    cdef char* keep_flag = community_results.keep_flag
 
-    cdef uint32_t ref_idx_loop, leiden_nnodes
+    # Detect taxonomy anomalies using neighbor connectivity (Phase 6b)
+    # This requires that taxonomy IDs were already populated in Phase 5b
+    cdef TaxonomyGraphConfig tax_config
+    cdef uint32_t** neighbor_lists = NULL
+    cdef uint32_t* neighbor_counts = NULL
+    cdef uint32_t tax_ref_idx
+    cdef int extract_result = 0
+    cdef bint neighbors_from_igraph = False
+
+    if taxonomy_filter_config != NULL and taxonomy_filter_config.enabled and taxonomy_db != NULL:
+        if verbose:
+            bf_nogil_logf_notime(b"CLUSTER", "Detecting taxonomy anomalies using graph connectivity...\n")
+
+        # Configure taxonomy anomaly detection
+        # Use reasonable defaults for detection thresholds (not filtering thresholds)
+        tax_config.enabled = True
+        tax_config.min_rank_id_for_comparison = 6  # genus level
+        tax_config.cross_domain_threshold = 0.10  # Flag if >10% of neighbors are cross-domain
+        tax_config.kingdom_mismatch_threshold = 0.25  # Flag if >25% are kingdom mismatches
+        tax_config.genus_mismatch_threshold = 0.50  # Flag if >50% are genus+ mismatches
+
+        # Extract neighbor lists from existing_graph
+        # Two cases: nodes array exists, or extract from igraph
+        if existing_graph:
+            if existing_graph.nodes:
+                # Case 1: Full WeightedGraph with nodes array
+                neighbor_lists = <uint32_t**>malloc(array_size * sizeof(uint32_t*))
+                neighbor_counts = <uint32_t*>malloc(array_size * sizeof(uint32_t))
+                if neighbor_lists and neighbor_counts:
+                    for tax_ref_idx in range(array_size):
+                        neighbor_lists[tax_ref_idx] = existing_graph.nodes[tax_ref_idx].neighbors
+                        neighbor_counts[tax_ref_idx] = existing_graph.nodes[tax_ref_idx].degree
+                else:
+                    bf_nogil_logf_notime(b"CLUSTER", "WARNING: Failed to allocate neighbor arrays\n")
+            elif existing_graph.igraph_handle:
+                # Case 2: Extract from igraph (clustering mode)
+                extract_result = extract_neighbors_from_igraph(
+                    existing_graph, array_size,
+                    &neighbor_lists, &neighbor_counts, verbose)
+                if extract_result == 0:
+                    neighbors_from_igraph = True
+                else:
+                    bf_nogil_logf_notime(b"CLUSTER", "WARNING: Failed to extract neighbors from igraph\n")
+
+            # Run taxonomy anomaly detection if we have neighbor data
+            if neighbor_lists and neighbor_counts:
+                detect_taxonomy_anomalies(
+                    pattern_data,
+                    array_size,
+                    pool,
+                    taxonomy_db,
+                    &tax_config,
+                    neighbor_lists,
+                    neighbor_counts,
+                    <void*>existing_graph,
+                    verbose
+                )
+
+                # NOTE: neighbor_lists and neighbor_counts cleanup moved to AFTER
+                # apply_enhanced_filtering so they can be used for edge removal
+
+                if verbose:
+                    bf_nogil_logf_notime(b"CLUSTER", "Taxonomy anomaly detection complete\n")
+        else:
+            bf_nogil_logf_notime(b"CLUSTER", "WARNING: No graph available for taxonomy anomaly detection\n")
+
+    # Apply taxonomy-informed filtering (Levels 1 & 3) AFTER Community clustering
+    # Note: Level 2 (weighted anomaly scores) is skipped in this integration because
+    # anomaly scores are computed inside community_clustering. To fully integrate Level 2,
+    # we would need to modify community_clustering to accept taxonomy_filter_config.
+    cdef TaxonomyFilterStats taxonomy_stats
+    taxonomy_stats.strict_removed = 0
+    taxonomy_stats.weighted_count = 0
+    taxonomy_stats.second_chance_restored = 0
+
+    if taxonomy_filter_config != NULL and taxonomy_filter_config.enabled:
+        if verbose:
+            bf_nogil_logf_notime(b"CLUSTER", "Applying taxonomy-informed filtering...\n")
+
+        # Apply strict filtering (Level 1) and second-chance validation (Level 3)
+        taxonomy_stats = apply_taxonomy_informed_filtering(
+            pattern_data,
+            array_size,
+            keep_flag,
+            community_results.anomaly_scores,
+            existing_graph.tsv_exact_connection_counts,
+            taxonomy_filter_config,
+            verbose
+        )
+
+    cdef uint32_t ref_idx_loop, community_nnodes
     if pattern_data:
-        leiden_nnodes = 0
-        if leiden_results:
-            leiden_nnodes = leiden_results.num_nodes
+        community_nnodes = 0
+        if community_results:
+            community_nnodes = community_results.num_nodes
 
         for ref_idx_loop in range(array_size):
             if ref_idx_loop < pool.reference_count:
-                if ref_idx_loop < leiden_nnodes:
-                    pattern_data[ref_idx_loop].component_id = leiden_results.component_membership[ref_idx_loop]
-                    pattern_data[ref_idx_loop].node_degree = leiden_results.node_degree[ref_idx_loop]
-                    pattern_data[ref_idx_loop].leiden_community_id = leiden_results.community_membership[ref_idx_loop]
-                    pattern_data[ref_idx_loop].leiden_community_cc = leiden_results.community_cc_values[ref_idx_loop]
-                    pattern_data[ref_idx_loop].leiden_individual_cc = leiden_results.individual_cc_values[ref_idx_loop]
-                    pattern_data[ref_idx_loop].leiden_cc_threshold = leiden_results.cc_threshold_values[ref_idx_loop]
-                    pattern_data[ref_idx_loop].leiden_keep_flag = leiden_results.keep_flag[ref_idx_loop]
-                    pattern_data[ref_idx_loop].leiden_anomaly_score = leiden_results.anomaly_scores[ref_idx_loop]
-                    pattern_data[ref_idx_loop].betweenness_centrality = leiden_results.betweenness_centrality[ref_idx_loop]
+                if ref_idx_loop < community_nnodes:
+                    pattern_data[ref_idx_loop].component_id = community_results.component_membership[ref_idx_loop]
+                    pattern_data[ref_idx_loop].node_degree = community_results.node_degree[ref_idx_loop]
+                    # Store original_degree from graph (before pruning) for pruned isolated node detection
+                    if existing_graph and existing_graph.nodes and ref_idx_loop < existing_graph.num_nodes:
+                        pattern_data[ref_idx_loop].original_degree = existing_graph.nodes[ref_idx_loop].original_degree
+                    else:
+                        pattern_data[ref_idx_loop].original_degree = pattern_data[ref_idx_loop].node_degree
+                    pattern_data[ref_idx_loop].community_id = community_results.community_membership[ref_idx_loop]
+                    pattern_data[ref_idx_loop].community_cc = community_results.community_cc_values[ref_idx_loop]
+                    pattern_data[ref_idx_loop].community_individual_cc = community_results.individual_cc_values[ref_idx_loop]
+                    pattern_data[ref_idx_loop].community_cc_threshold = community_results.cc_threshold_values[ref_idx_loop]
+                    pattern_data[ref_idx_loop].community_keep_flag = community_results.keep_flag[ref_idx_loop]
+                    pattern_data[ref_idx_loop].community_anomaly_score = community_results.anomaly_scores[ref_idx_loop]
+                    pattern_data[ref_idx_loop].betweenness_centrality = community_results.betweenness_centrality[ref_idx_loop]
+                    pattern_data[ref_idx_loop].num_neighbor_communities = community_results.num_neighbor_communities[ref_idx_loop]
                 else:
                     pattern_data[ref_idx_loop].component_id = UINT32_MAX
                     pattern_data[ref_idx_loop].node_degree = 0
-                    pattern_data[ref_idx_loop].leiden_community_id = UINT32_MAX
-                    pattern_data[ref_idx_loop].leiden_community_cc = 0.0
-                    pattern_data[ref_idx_loop].leiden_individual_cc = 0.0
-                    pattern_data[ref_idx_loop].leiden_cc_threshold = 0.0
-                    pattern_data[ref_idx_loop].leiden_keep_flag = 1
-                    pattern_data[ref_idx_loop].leiden_anomaly_score = 0.0
+                    pattern_data[ref_idx_loop].original_degree = 0
+                    pattern_data[ref_idx_loop].community_id = UINT32_MAX
+                    pattern_data[ref_idx_loop].community_cc = 0.0
+                    pattern_data[ref_idx_loop].community_individual_cc = 0.0
+                    pattern_data[ref_idx_loop].community_cc_threshold = 0.0
+                    pattern_data[ref_idx_loop].community_keep_flag = 1
+                    pattern_data[ref_idx_loop].community_anomaly_score = 0.0
                     pattern_data[ref_idx_loop].betweenness_centrality = 0.0
+                    pattern_data[ref_idx_loop].num_neighbor_communities = 0
+
+    # Apply enhanced 3-tier filtering (NEW - includes bridge detection!)
+    if verbose:
+        bf_nogil_logf_notime(b"CLUSTER", "\\nApplying enhanced 3-tier filtering...\\n")
+
+    # Use thresholds passed as function parameters
+    # Pass neighbor data for edge removal (re-extract from graph if needed)
+    cdef char* alignment_keep_flags = NULL
+    if apply_enhanced_filtering(
+        pattern_data,
+        ref_stats,
+        array_size,
+        keep_flag,
+        taxonomy_db,
+        betweenness_threshold,
+        cc_threshold,
+        hub_degree_threshold,
+        strict_mode,
+        verbose,
+        <void*>pool,
+        neighbor_lists,
+        neighbor_counts,
+        remove_cross_domain_edges,  # enable_edge_removal from args
+        flag_misannotations,
+        &alignment_keep_flags  # Get alignment flags for combined compaction
+    ) != 0:
+        bf_nogil_logf_notime(b"CLUSTER", "ERROR: Enhanced filtering failed\\n")
+        # Continue anyway, don't fail completely
+
+    # Cleanup neighbor lists (after edge removal is complete)
+    if neighbor_lists != NULL and neighbor_counts != NULL:
+        if neighbors_from_igraph:
+            # Deep free - we allocated individual arrays
+            for tax_ref_idx in range(array_size):
+                if neighbor_lists[tax_ref_idx]:
+                    free(neighbor_lists[tax_ref_idx])
+        # Free outer arrays
+        free(neighbor_lists)
+        free(neighbor_counts)
+        neighbor_lists = NULL
+        neighbor_counts = NULL
+
     cdef uint32_t ref_idx
     cdef int64_t refs_kept = 0, refs_removed = 0
     
@@ -625,33 +799,62 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
     cdef int64_t alignment_idx, new_alignment_idx = 0
     cdef uint32_t ref_id
     cdef int64_t surviving_alignments = 0
+    cdef int64_t edge_removed_count = 0
+    cdef int64_t ref_removed_count = 0
 
+    # Count surviving alignments (must pass BOTH filters)
     for alignment_idx in range(pool.alignment_count):
         ref_id = pool.alignments[alignment_idx].reference_index
-        if ref_id < array_size and keep_flag[ref_id]:
-            surviving_alignments += 1
+
+        # Check reference filter
+        if ref_id >= array_size or not keep_flag[ref_id]:
+            ref_removed_count += 1
+            continue
+
+        # Check edge removal filter (if enabled)
+        if alignment_keep_flags != NULL and not alignment_keep_flags[alignment_idx]:
+            edge_removed_count += 1
+            continue
+
+        surviving_alignments += 1
 
     if surviving_alignments == 0:
         bf_nogil_logf_notime(b"CLUSTER", "ERROR: No alignments survive cluster-aware filtering\n")
+        if alignment_keep_flags: free(alignment_keep_flags)
         free(keep_flag)
         return -1
 
     cdef float* new_zp_values = <float*>malloc(surviving_alignments * sizeof(float))
     if not new_zp_values:
+        if alignment_keep_flags: free(alignment_keep_flags)
         free(keep_flag)
         return -1
+
+    # COMBINED COMPACTION: Apply both filters in single pass
     new_alignment_idx = 0
     for alignment_idx in range(pool.alignment_count):
         ref_id = pool.alignments[alignment_idx].reference_index
-        
-        if ref_id < array_size and keep_flag[ref_id]:
-            if new_alignment_idx != alignment_idx:
-                pool.alignments[new_alignment_idx] = pool.alignments[alignment_idx]
-            
-            if pool.precomputed_zp_values:
-                new_zp_values[new_alignment_idx] = pool.precomputed_zp_values[alignment_idx]
-            
-            new_alignment_idx += 1
+
+        # Check reference filter
+        if ref_id >= array_size or not keep_flag[ref_id]:
+            continue
+
+        # Check edge removal filter (if enabled)
+        if alignment_keep_flags != NULL and not alignment_keep_flags[alignment_idx]:
+            continue
+
+        # Alignment survives both filters - keep it
+        if new_alignment_idx != alignment_idx:
+            pool.alignments[new_alignment_idx] = pool.alignments[alignment_idx]
+
+        if pool.precomputed_zp_values:
+            new_zp_values[new_alignment_idx] = pool.precomputed_zp_values[alignment_idx]
+
+        new_alignment_idx += 1
+
+    # Free alignment_keep_flags now that we're done with it
+    if alignment_keep_flags:
+        free(alignment_keep_flags)
 
     if pool.precomputed_zp_values:
         free(pool.precomputed_zp_values)
@@ -661,9 +864,14 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
     pool.alignment_count = new_alignment_idx
 
     if verbose:
-        bf_nogil_logf_notime(b"CLUSTER", "\n=== Alignment compaction ===\n")
-        bf_nogil_logf_notime(b"CLUSTER", "  Alignments removed: %ld\n", alignments_removed)
-        bf_nogil_logf_notime(b"CLUSTER", "  Alignments kept: %ld\n", pool.alignment_count)
+        bf_nogil_logf_notime(b"CLUSTER", "\n=== COMBINED ALIGNMENT COMPACTION ===\n")
+        bf_nogil_logf_notime(b"CLUSTER", "  Removed by reference filtering: %ld\n", ref_removed_count)
+        bf_nogil_logf_notime(b"CLUSTER", "  Removed by edge filtering:      %ld\n", edge_removed_count)
+        bf_nogil_logf_notime(b"CLUSTER", "  Total alignments removed:       %ld\n", alignments_removed)
+        bf_nogil_logf_notime(b"CLUSTER", "  Alignments kept:                %ld\n", pool.alignment_count)
+        bf_nogil_logf_notime(b"CLUSTER", "  Read loss: %.1f%%\n",
+            100.0 * <double>alignments_removed / <double>(pool.alignment_count + alignments_removed)
+        )
 
     memset(pool.read_alignment_counts, 0, pool.unique_read_count * sizeof(uint32_t))
 
@@ -698,7 +906,7 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
 
     if tsv_export_path and existing_graph:
         if verbose:
-            bf_nogil_logf_notime(b"CLUSTER", "Writing TSV with Leiden results to: %s\n", tsv_export_path)
+            bf_nogil_logf_notime(b"CLUSTER", "Writing TSV with Community results to: %s\n", tsv_export_path)
 
     if write_graph_tsv(pool, bam_header, mapping,
                           pattern_data, ref_stats,
@@ -717,8 +925,9 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
                           existing_graph.tsv_min_read_count,
               True,
               outlier_method,
-              tsv_export_path) != 0:
-            bf_nogil_logf_notime(b"CLUSTER", "ERROR: Failed to write graph analysis TSV with Leiden results\n")
+              tsv_export_path,
+              taxonomy_db) != 0:
+            bf_nogil_logf_notime(b"CLUSTER", "ERROR: Failed to write graph analysis TSV with Community results\n")
 
     if graph_export_path and existing_graph:
         if verbose:
@@ -726,28 +935,32 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
 
         if export_graph_graphml(existing_graph, pool, bam_header, mapping,
                                pattern_data, ref_stats,
-                               graph_export_path, verbose, outlier_method) != 0:
+                               graph_export_path, verbose, outlier_method, taxonomy_db) != 0:
             bf_nogil_logf_notime(b"CLUSTER", "ERROR: Failed to export graph to GraphML\n")
 
-    if leiden_results:
-        if leiden_results.keep_flag:
-            free(leiden_results.keep_flag)
-        if leiden_results.community_membership:
-            free(leiden_results.community_membership)
-        if leiden_results.component_membership:
-            free(leiden_results.component_membership)
-        if leiden_results.node_degree:
-            free(leiden_results.node_degree)
-        if leiden_results.community_cc_values:
-            free(leiden_results.community_cc_values)
-        if leiden_results.individual_cc_values:
-            free(leiden_results.individual_cc_values)
-        if leiden_results.cc_threshold_values:
-            free(leiden_results.cc_threshold_values)
-        if leiden_results.anomaly_scores:
-            free(leiden_results.anomaly_scores)
-        if leiden_results.betweenness_centrality:
-            free(leiden_results.betweenness_centrality)
-        free(leiden_results)
+    if community_results:
+        if community_results.keep_flag:
+            free(community_results.keep_flag)
+        if community_results.community_membership:
+            free(community_results.community_membership)
+        if community_results.component_membership:
+            free(community_results.component_membership)
+        if community_results.node_degree:
+            free(community_results.node_degree)
+        if community_results.community_cc_values:
+            free(community_results.community_cc_values)
+        if community_results.individual_cc_values:
+            free(community_results.individual_cc_values)
+        if community_results.cc_threshold_values:
+            free(community_results.cc_threshold_values)
+        if community_results.anomaly_scores:
+            free(community_results.anomaly_scores)
+        if community_results.betweenness_centrality:
+            free(community_results.betweenness_centrality)
+        free(community_results)
+
+    # Populate output parameter with taxonomy filtering statistics
+    if taxonomy_stats_out != NULL:
+        taxonomy_stats_out[0] = taxonomy_stats
 
     return 0

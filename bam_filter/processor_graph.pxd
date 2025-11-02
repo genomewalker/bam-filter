@@ -12,10 +12,13 @@ Notes
     be shared across multiple Cython modules. Keep changes backward
     compatible with other cimports unless you coordinate broader updates.
 """
-from libc.stdint cimport uint32_t, uint64_t, int32_t, int64_t
+from libc.stdint cimport uint32_t, uint64_t, int32_t, int64_t, uint8_t, uint16_t
 
 # Import WeightedGraph from processor_graph_ops
 from bam_filter.processor_graph_ops cimport WeightedGraph
+
+# Import TaxonomyDB for taxonomy-aware graph analysis
+from bam_filter.taxonomy_db cimport TaxonomyDB
 
 # ==============================================================================
 # ==============================================================================
@@ -23,7 +26,7 @@ from bam_filter.processor_graph_ops cimport WeightedGraph
 #
 # Structure organization:
 # - GraphMetrics: connection_count, avg_comappings_per_read, max_comappings, etc.
-# - ReferencePattern: graph (GraphMetrics), component_id, unique_read_count, leiden fields
+# - ReferencePattern: graph (GraphMetrics), component_id, unique_read_count, community fields
 # ==============================================================================
 
 
@@ -47,18 +50,19 @@ cdef struct ReferencePattern:
 
     # Network metrics
     GraphMetrics graph                 # graph-based metrics
-    uint32_t node_degree               # Node degree (number of edges) from igraph
+    uint32_t node_degree               # Node degree (number of edges) from igraph (after pruning)
+    uint32_t original_degree           # Degree before edge pruning (for detecting pruned isolated nodes)
 
     # Read classification
     uint32_t unique_read_count         # reads mapping only to this reference
 
-    # Leiden clustering results
-    uint32_t leiden_community_id       # Leiden community ID
-    float leiden_community_cc          # Average clustering coefficient for this reference's community
-    float leiden_individual_cc         # Individual clustering coefficient for this reference (Barrat's method)
-    float leiden_cc_threshold          # Broken-stick threshold used for filtering this reference's community
-    char leiden_keep_flag              # 1=keep, 0=remove from Leiden filtering
-    float leiden_anomaly_score         # Anomaly score from multi-metric outlier detection (0=normal, 1=anomalous)
+    # Community clustering results
+    uint32_t community_id       # Community ID assigned by the detection algorithm
+    float community_cc          # Average clustering coefficient for this reference's community
+    float community_individual_cc         # Individual clustering coefficient for this reference (Barrat's method)
+    float community_cc_threshold          # Broken-stick threshold used for filtering this reference's community
+    char community_keep_flag              # 1=keep, 0=remove from Community filtering
+    float community_anomaly_score         # Anomaly score from multi-metric outlier detection (0=normal, 1=anomalous)
     float betweenness_centrality       # Betweenness centrality (bridge-ness metric from igraph)
 
     # Taxonomy information
@@ -66,6 +70,30 @@ cdef struct ReferencePattern:
     int32_t taxid_rank_id              # Rank ID of this taxid (for quick comparisons)
     int32_t taxid_depth                # Depth in taxonomy tree
     char taxonomy_flag                 # Flag indicating taxonomy-based anomaly: 0=normal, 1=potential_contamination, 2=cross_domain, 3=kingdom_mismatch
+
+    # Per-rank taxonomy mismatch counts (for analyzing purity dynamics)
+    uint16_t tax_neighbors_total       # Total neighbors checked (for calculating fractions)
+    uint16_t tax_mismatch_domain       # Neighbors where LCA ≤ domain/superkingdom (most severe)
+    uint16_t tax_mismatch_kingdom      # Neighbors where LCA = kingdom
+    uint16_t tax_mismatch_phylum       # Neighbors where LCA = phylum
+    uint16_t tax_mismatch_class        # Neighbors where LCA = class
+    uint16_t tax_mismatch_order        # Neighbors where LCA = order
+    uint16_t tax_mismatch_family       # Neighbors where LCA = family
+    uint16_t tax_match_genus_below     # Neighbors where LCA ≥ genus (good matches)
+
+    # 3-Tier Enhanced Filtering Results
+    char structural_role               # 0=PERIPHERAL, 1=CORE, 2=HUB, 3=BRIDGE
+    char community_coherent            # 0=incoherent, 1=coherent (from Tier 2)
+    char filter_decision               # 0=KEEP, 1=REMOVE, 2=REVIEW (from Tier 3)
+    uint32_t num_neighbor_communities  # Number of distinct communities among neighbors
+    uint8_t taxonomy_outlier_score     # 0-100 score indicating likelihood of database misannotation
+
+    # Misannotation Detection (for database curation)
+    uint8_t misannotation_flag         # 0=clean, 1=warning, 2=likely, 3=confident
+    float misannotation_confidence     # 0.0-1.0 confidence score
+    uint32_t cross_domain_edges_before # Count of cross-domain edges before removal
+    uint32_t edges_after_removal       # Edge count after cross-domain removal
+    float cross_domain_fraction        # Fraction of edges that were cross-domain
 
 
 cdef struct DatasetSummaryStats:
@@ -223,7 +251,7 @@ cdef WeightedGraph* analyze_reference_graph(MemoryPool* pool, ReferencePattern* 
                                            int32_t min_read_count, EMAlgorithmConfig* config,
                                            sam_hdr_t* bam_header, ReferenceMapping* mapping,
                                            bint verbose, bint build_igraph, const char* tsv_export_path,
-                                           uint32_t graph_min_edge_weight) noexcept nogil
+                                           uint32_t graph_min_edge_weight, TaxonomyDB* taxonomy_db) noexcept nogil
 
 # Helper functions for cluster-aware filtering
 cdef ReadIndex* build_read_index_parallel(MemoryPool* pool, uint32_t array_size, int num_threads) noexcept nogil
@@ -247,7 +275,8 @@ cdef int write_graph_tsv(MemoryPool* pool, sam_hdr_t* bam_header,
                         double* neighbor_multimap_avg, double* neighbor_connections_avg,
                         uint32_t* neighbor_counts, uint32_t array_size,
                         double dataset_median_connections, int32_t min_read_count,
-                        bint include_clustering, int outlier_method, const char* tsv_path) noexcept nogil
+                        bint include_clustering, int outlier_method, const char* tsv_path,
+                        TaxonomyDB* taxonomy_db) noexcept nogil
 
 
 cdef int _uint32_compare(const void* a, const void* b) noexcept nogil

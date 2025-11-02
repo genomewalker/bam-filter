@@ -7,6 +7,8 @@ from bam_filter.processor_graph cimport ReferencePattern, ReferenceStats, GraphM
 from bam_filter.processor_types cimport EMAlgorithmConfig
 from bam_filter.processor_graph_ops cimport WeightedGraph
 from bam_filter.processor_mapping cimport ReferenceMapping
+from bam_filter.processor_taxonomy_filters cimport TaxonomyFilterConfig, TaxonomyFilterStats
+from bam_filter.taxonomy_db cimport TaxonomyDB
 
 cdef extern from "htslib/sam.h":
     ctypedef struct sam_hdr_t
@@ -20,24 +22,23 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
                                        ReadIndex* read_index,
                                        uint32_t array_size,
                                        int32_t min_read_count,
-                                       float score_threshold,
                                        bint verbose,
-                                       int use_leiden,
-                                       double leiden_resolution,
-                                       bint leiden_parallel,
-                                       int leiden_max_iterations,
+                                       double community_resolution,
+                                       int community_max_iterations,
                                        uint32_t graph_min_edge_weight,
                                        int32_t thread_count,
-                                       int32_t iforest_n_trees,
-                                       uint32_t iforest_subsample_size,
-                                       double iforest_contamination,
-                                       uint32_t iforest_random_seed,
-                                       uint32_t lof_k,
-                                       double lof_contamination,
-                                       double zscore_threshold,
+                                       int outlier_method,
                                        WeightedGraph* existing_graph,
                                        sam_hdr_t* bam_header,
                                        ReferenceMapping* mapping,
                                        const char* tsv_export_path,
                                        const char* graph_export_path,
-                                       int outlier_method) except -1 nogil
+                                       TaxonomyFilterConfig* taxonomy_filter_config,
+                                       TaxonomyFilterStats* taxonomy_stats_out,
+                                       TaxonomyDB* taxonomy_db,
+                                       float betweenness_threshold,
+                                       float cc_threshold,
+                                       uint32_t hub_degree_threshold,
+                                       bint strict_mode,
+                                       bint remove_cross_domain_edges,
+                                       bint flag_misannotations) except -1 nogil

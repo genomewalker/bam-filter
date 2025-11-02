@@ -35,6 +35,7 @@ from .processor_memory cimport create_memory_pool, destroy_memory_pool, shrink_m
 from .processor_fast_math cimport stable_log_sum_exp, safe_normalize_weights
 from .processor_types cimport PrecomputedWeights, EMAlgorithmConfig
 from .processor_graph_ops cimport WeightedGraph, destroy_weighted_graph, pick_min_edge_weight_broken_stick
+from .processor_igraph cimport igraph_t, igraph_vcount, igraph_ecount
 
 from .processor_batch cimport (
     BatchAlignment,
@@ -57,6 +58,14 @@ from .processor_em cimport (
 from .processor_filters cimport (
     apply_probability_filtering,
     apply_cluster_aware_filtering
+)
+
+from .processor_taxonomy_filters cimport (
+    TaxonomyFilterStats
+)
+
+from .processor_graph_ops cimport (
+    extract_neighbors_from_igraph
 )
 
 from .processor_stats cimport (
@@ -123,10 +132,15 @@ from .processor_graph_taxonomy cimport (
     detect_taxonomy_anomalies
 )
 
+from .processor_taxonomy_filters cimport (
+    TaxonomyFilterConfig
+)
+
 from .taxonomy_db cimport (
     TaxonomyDB, AccessionMap,
     TaxonomyDatabase, AccessionMapping
 )
+from .taxonomy_db import load_accession_map_from_file
 
 from .reference_lengths cimport (
     TSVReferenceMap,
@@ -145,16 +159,16 @@ from bam_filter import logging as bf_logging
 LOG_TAG = "PROCESS"
 
 
-def _info(message: str) -> None:
-    bf_logging.log(LOG_TAG, "%s", message)
+def _info(message: str, *args) -> None:
+    bf_logging.log(LOG_TAG, message, *args)
 
 
-def _warn(message: str) -> None:
-    bf_logging.warn("%s: %s", LOG_TAG, message)
+def _warn(message: str, *args) -> None:
+    bf_logging.warn(message, *args)
 
 
-def _error(message: str) -> None:
-    bf_logging.error("%s: %s", LOG_TAG, message)
+def _error(message: str, *args) -> None:
+    bf_logging.error(message, *args)
 
 
 def _debug(level: int, message: str) -> None:
@@ -313,17 +327,9 @@ cdef score_alignments(
     graph_min_edge_weight=2,
     graph_auto_tol=0.10,
     graph_global_tail=0.99,
-    # Outlier detection parameter defaults (threaded into Leiden/outlier routines)
-    iforest_n_trees=100,
-    iforest_subsample_size=0,
-    leiden_anomaly_threshold=-1.0,
-    iforest_random_seed=12345,
-    lof_k=20,
-    lof_contamination=0.1,
-    zscore_threshold=3.0,
     clustering=False,
-    leiden_resolution=1.0,
-    leiden_max_iterations=10,
+    community_resolution=1.0,
+    community_max_iterations=10,
     outlier_method="mad",
     graph_export=None,
     # Taxonomy parameters
@@ -333,6 +339,16 @@ cdef score_alignments(
     taxonomy_cross_domain_threshold=0.10,
     taxonomy_kingdom_threshold=0.25,
     taxonomy_genus_threshold=0.50,
+    # Taxonomy-informed filtering parameters
+    taxonomy_filter_enabled=False,
+    taxonomy_strict_filter=True,
+    taxonomy_strict_min_connections=5,
+    taxonomy_weighted_outlier=True,
+    taxonomy_anomaly_weight=2.0,
+    taxonomy_second_chance=True,
+    taxonomy_second_chance_cc=0.3,
+    remove_cross_domain_edges=False,
+    flag_misannotations=False,
 ):
     """Core BAM alignment scoring and filtering engine.
 
@@ -355,7 +371,7 @@ cdef score_alignments(
     use_squarem_acceleration : bool
         Enable SQUAREM acceleration for EM (Varadhan & Roland 2008)
     clustering : bool
-        Enable Leiden clustering for cluster-aware filtering
+        Enable Community clustering for cluster-aware filtering
     graph_export : str, optional
         Export graph to GraphML format
 
@@ -510,13 +526,22 @@ cdef score_alignments(
     cdef double pipeline_start = 0.0
     cdef double stage_timer = 0.0
 
+    # Taxonomy filtering statistics
+    cdef TaxonomyFilterStats taxonomy_stats
+
     # Taxonomy integration variables
     cdef TaxonomyDB* taxdb_c = NULL
     cdef AccessionMap* accmap_c = NULL
+    cdef TaxonomyDatabase taxdb_obj
+    cdef AccessionMapping accmap_obj
     cdef TaxonomyGraphConfig tax_config
     cdef uint32_t** neighbor_lists_tax = NULL
     cdef uint32_t* neighbor_counts_tax = NULL
+    cdef bint neighbor_lists_allocated_from_igraph = False  # Track if we need deep free
     cdef double taxonomy_stage_timer = 0.0
+
+    # Taxonomy-informed filtering variables
+    cdef TaxonomyFilterConfig taxonomy_filter_config
 
     # Cluster filtering variables
     cdef ReferenceStats* ref_stats = NULL
@@ -524,10 +549,10 @@ cdef score_alignments(
     cdef WeightedGraph* filtered_graph = NULL
     cdef int cluster_result
     cdef int verbose_c  # C int version of verbose for nogil contexts
-    cdef int use_leiden_c  # C int version for clustering algorithm choice (0=union-find, 1=leiden)
-    cdef double leiden_res_c  # C double for leiden_resolution
-    cdef int leiden_parallel_c  # C int for leiden_parallel
-    cdef int leiden_max_iter_c  # C int for leiden_max_iterations
+    cdef int use_community_c  # C int version for clustering algorithm choice (0=union-find, 1=Leiden)
+    cdef double community_res_c  # C double for community_resolution
+    cdef int community_parallel_c  # C int for community_parallel
+    cdef int community_max_iter_c  # C int for community_max_iterations
     cdef int outlier_method_c  # C int for outlier_method (0=MAD, 1=IQR, 2=IFOREST, 3=LOF, 4=ZSCORE)
     cdef uint32_t graph_min_edge_weight_c  # C uint32_t for graph_min_edge_weight
     cdef double graph_auto_tol_c  # C double copy of graph_auto_tol
@@ -581,6 +606,21 @@ cdef score_alignments(
             graph_min_edge_weight_c = <uint32_t>graph_min_edge_weight  # Use specified value
             if verbose:
                 bf_logging.log("GRAPH", f"Mode chosen: explicit value. CLI value={graph_min_edge_weight}. threshold={graph_min_edge_weight_c}")
+
+        # Configure taxonomy-informed filtering
+        taxonomy_filter_config.enabled = taxonomy_filter_enabled
+        taxonomy_filter_config.enable_strict_filtering = taxonomy_strict_filter and (not remove_cross_domain_edges)
+        taxonomy_filter_config.strict_min_connections = <uint32_t>taxonomy_strict_min_connections
+        taxonomy_filter_config.enable_weighted_outlier_detection = taxonomy_weighted_outlier
+        taxonomy_filter_config.taxonomy_anomaly_weight = <float>taxonomy_anomaly_weight
+        taxonomy_filter_config.enable_second_chance = taxonomy_second_chance and taxonomy_filter_config.enable_strict_filtering
+        taxonomy_filter_config.second_chance_cc_threshold = <float>taxonomy_second_chance_cc
+
+        # We'll set taxonomy_enabled on stats once the memory pool exists
+
+        if verbose:
+            _info("Taxonomy filtering config: enabled=%s, strict=%s, weighted=%s, second_chance=%s",
+                  taxonomy_filter_enabled, taxonomy_strict_filter, taxonomy_weighted_outlier, taxonomy_second_chance)
 
         if output_bam:
             output_bam_bytes = output_bam.encode('utf-8')
@@ -917,6 +957,9 @@ cdef score_alignments(
             if not memory_pool:
                 raise MemoryError("Failed to create memory pool")
 
+            if memory_pool.stats != NULL:
+                memory_pool.stats.taxonomy_enabled = 1 if taxonomy_filter_config.enabled else 0
+
             if verbose:
                 _info("Transferring alignments to memory pool")
 
@@ -994,7 +1037,7 @@ cdef score_alignments(
                     memory_pool.stats.post_probability_references = mapping.n_retained_refs
 
             # Allocate pattern data for graph analysis (only used when TSV/graph requested)
-            # Use calloc to zero-initialize Leiden fields (prevents garbage values in TSV)
+            # Use calloc to zero-initialize Community fields (prevents garbage values in TSV)
             pattern_data = <ReferencePattern*>calloc(memory_pool.reference_count, sizeof(ReferencePattern))
             if not pattern_data:
                 destroy_reference_mapping(mapping)
@@ -1055,8 +1098,16 @@ cdef score_alignments(
                 # Now run graph analysis which may build an igraph using the selected threshold
                 filtered_graph = analyze_reference_graph(memory_pool, pattern_data, em_config.minimum_read_coverage,
                                           &em_config, bam_header, mapping, verbose, clustering, tsv_file_path_c,
-                                          graph_min_edge_weight_c)
+                                          graph_min_edge_weight_c, NULL)
                 _log_stage("Reference graph analysis", stage_timer)
+
+                # Debug: Log what we received
+                if verbose:
+                    import sys
+                    print(f"[DEBUG] processor.pyx: Checking taxonomy parameters:", file=sys.stderr)
+                    print(f"[DEBUG]   taxonomy_db = {taxonomy_db}", file=sys.stderr)
+                    print(f"[DEBUG]   taxonomy_accession_map = {taxonomy_accession_map}", file=sys.stderr)
+                    sys.stderr.flush()
 
                 # Taxonomy-aware graph analysis (if databases provided)
                 if taxonomy_db is not None and taxonomy_accession_map is not None:
@@ -1066,49 +1117,57 @@ cdef score_alignments(
                     sys.stderr.flush()
                     taxonomy_stage_timer = bf_monotonic_seconds()
 
-                    # Extract C-level pointers from Python objects
-                    print("[DEBUG] Extracting C-level taxonomy database pointer...", flush=True)
-                    print(f"[DEBUG] taxonomy_db type: {type(taxonomy_db)}", flush=True)
-                    taxdb_c = (<TaxonomyDatabase?>taxonomy_db).db
-                    print("[DEBUG] Successfully extracted taxdb_c pointer", flush=True)
+                    # Load taxonomy database from path
+                    from bam_filter.taxonomy_db import TaxonomyDatabase, load_accession_map_from_file
 
-                    # Check if accession_map is a path (string) or already loaded object
-                    print(f"[DEBUG] Checking accession_map type: {type(taxonomy_accession_map)}", flush=True)
-                    if isinstance(taxonomy_accession_map, str):
-                        # Load accession map with filtering for only the references in the graph
-                        print(f"[DEBUG] Importing load_accession_map_from_file...", flush=True)
-                        from bam_filter.taxonomy_db import load_accession_map_from_file
-                        print(f"[DEBUG] Import successful", flush=True)
+                    if verbose:
+                        print(f"[DEBUG] Loading taxonomy database from: {taxonomy_db}", flush=True)
 
-                        print(f"[DEBUG] Extracting {memory_pool.reference_count} reference accessions for filtering...", flush=True)
+                    _info("Loading taxonomy database from %s", taxonomy_db)
+                    try:
+                        taxdb_obj = TaxonomyDatabase.from_parquet(taxonomy_db)
+                        _info("  Loaded taxonomy: %d nodes", taxdb_obj.n_nodes)
+                    except Exception as e:
+                        _error("Failed to load taxonomy database: %s", str(e))
+                        if verbose:
+                            import traceback
+                            traceback.print_exc()
+                        raise
 
-                        # Extract reference names from BAM header using the same approach as TSV writing
-                        print(f"[DEBUG] Mapping info: n_retained_refs={mapping.n_retained_refs if mapping != NULL else 0}", flush=True)
-                        reference_accessions = []
-                        print(f"[DEBUG] Starting loop through {memory_pool.reference_count} references...", flush=True)
-                        for ref_idx in range(memory_pool.reference_count):
-                            # Use mapping.new_to_old_tid to get original tid with proper bounds checking
-                            if mapping != NULL and mapping.new_to_old_tid != NULL and ref_idx < mapping.n_retained_refs:
-                                orig_tid = mapping.new_to_old_tid[ref_idx]
-                            else:
-                                orig_tid = ref_idx
-                            ref_name = sam_hdr_tid2name(bam_header, orig_tid)
-                            if ref_name != NULL:
-                                ref_name_str = ref_name.decode('utf-8')
-                                # Extract accession from reference name (keep first word, may include version)
-                                if len(ref_name_str) > 0:
-                                    tokens = ref_name_str.split()
-                                    if len(tokens) > 0:
-                                        acc = tokens[0]
-                                        reference_accessions.append(acc)
+                    # Extract C pointer from Python object
+                    taxdb_c = taxdb_obj.db
 
-                        print(f"[DEBUG] Finished extracting {len(reference_accessions)} accessions", flush=True)
-                        print(f"[DEBUG] Calling load_accession_map_from_file...", flush=True)
+                    # Load accession map with reference filtering
+                    # Extract reference accessions for filtering
+                    _info("Extracting reference accessions for filtered loading...")
+                    reference_accessions = []
+                    for ref_idx in range(memory_pool.reference_count):
+                        if mapping != NULL and mapping.new_to_old_tid != NULL and ref_idx < mapping.n_retained_refs:
+                            orig_tid = mapping.new_to_old_tid[ref_idx]
+                        else:
+                            orig_tid = ref_idx
+                        ref_name = sam_hdr_tid2name(bam_header, orig_tid)
+                        if ref_name != NULL:
+                            ref_name_str = ref_name.decode('utf-8')
+                            if len(ref_name_str) > 0:
+                                tokens = ref_name_str.split()
+                                if len(tokens) > 0:
+                                    reference_accessions.append(tokens[0])
+
+                    _info("Loading accession map for %d references...", len(reference_accessions))
+
+                    try:
                         accmap_obj = load_accession_map_from_file(taxonomy_accession_map, accession_filter=reference_accessions)
-                        _info(f"Accession map loaded successfully")
-                        accmap_c = (<AccessionMapping?>accmap_obj).amap
-                    else:
-                        accmap_c = (<AccessionMapping?>taxonomy_accession_map).amap
+                        _info("Accession map loaded successfully")
+                    except Exception as e:
+                        _error("Failed to load accession map: %s", str(e))
+                        if verbose:
+                            import traceback
+                            traceback.print_exc()
+                        raise
+
+                    # Extract C pointer from Python object
+                    accmap_c = accmap_obj.amap
 
                     # Configure taxonomy analysis
                     tax_config.enabled = True
@@ -1117,11 +1176,11 @@ cdef score_alignments(
                     tax_config.kingdom_mismatch_threshold = taxonomy_kingdom_threshold
                     tax_config.genus_mismatch_threshold = taxonomy_genus_threshold
 
-                    # For anomaly detection, we need neighbor lists from the graph
-                    # This is a simplified approach - ideally we'd extract from the graph structure
-                    # For now, we'll pass NULL and the detection will work at reference level
+                    # Phase 5b: Basic taxonomy enrichment (just map accessions to taxids)
+                    # Anomaly detection will happen in Phase 6 after Community clustering
+                    if verbose:
+                        _info("Enriching references with taxonomy IDs (anomaly detection deferred to Phase 6)...")
 
-                    # Enrich patterns with taxonomy
                     with nogil:
                         enrich_patterns_with_taxonomy(
                             pattern_data,
@@ -1133,22 +1192,10 @@ cdef score_alignments(
                             verbose_c  # Use C int version
                         )
 
-                        # Detect taxonomy anomalies
-                        detect_taxonomy_anomalies(
-                            pattern_data,
-                            memory_pool.reference_count,
-                            memory_pool,
-                            taxdb_c,
-                            &tax_config,
-                            neighbor_lists_tax,
-                            neighbor_counts_tax,
-                            verbose_c  # Use C int version
-                        )
+                    _log_stage("Taxonomy ID enrichment", taxonomy_stage_timer)
 
-                    _log_stage("Taxonomy enrichment and anomaly detection", taxonomy_stage_timer)
-
-                # If clustering (igraph + Leiden) was requested, a non-NULL filtered_graph
-                # is required because it contains the cached igraph/weights used by Leiden.
+                # If clustering (igraph + Community) was requested, a non-NULL filtered_graph
+                # is required because it contains the cached igraph/weights used by Community.
                 # For TSV-only runs we allow analyze_reference_graph to return NULL
                 # (it may compute and write TSV metrics without allocating an igraph).
                 if clustering and not filtered_graph:
@@ -1184,16 +1231,40 @@ cdef score_alignments(
 
             aligns_filtered_information = 0
             if clustering:
-                _announce_stage("Phase 6: Graph Filtering", "Applying cluster-aware refinement using Leiden algorithm")
-                if verbose:
-                    _info("Applying cluster-aware filtering")
+                # Determine which algorithm will be used based on graph size
+                if filtered_graph and filtered_graph.num_nodes >= 10000:
+                    _announce_stage("Phase 6: Graph Filtering", "Applying cluster-aware refinement using Label Propagation Algorithm (fast, for large graphs)")
+                else:
+                    _announce_stage("Phase 6: Graph Filtering", "Applying cluster-aware refinement using Community algorithm")
+
+                # Validate filtered_graph before proceeding
+                if not filtered_graph:
+                    raise RuntimeError("filtered_graph is NULL at Phase 6 start")
+
+                _info(f"graph_filtering: using_cached_igraph handle={<unsigned long>filtered_graph.igraph_handle:x} weights={<unsigned long>filtered_graph.weights_handle:x} nodes={filtered_graph.num_nodes}")
+
+                if not filtered_graph.igraph_handle:
+                    raise RuntimeError("filtered_graph.igraph_handle is NULL at Phase 6 start")
+                if not filtered_graph.weights_handle:
+                    raise RuntimeError("filtered_graph.weights_handle is NULL at Phase 6 start")
+
+                # Validate TSV arrays that community_clustering will access
+                _info(f"graph_filtering: checking_tsv_arrays exact_conn={<unsigned long>filtered_graph.tsv_exact_connection_counts:x} co_mapping={<unsigned long>filtered_graph.tsv_co_mapping_averages:x}")
+                if not filtered_graph.tsv_exact_connection_counts:
+                    raise RuntimeError("filtered_graph.tsv_exact_connection_counts is NULL")
+                if not filtered_graph.tsv_co_mapping_averages:
+                    raise RuntimeError("filtered_graph.tsv_co_mapping_averages is NULL")
+                if not filtered_graph.tsv_max_co_mappings:
+                    raise RuntimeError("filtered_graph.tsv_max_co_mappings is NULL")
+                if not filtered_graph.tsv_neighbor_multimap_avg:
+                    raise RuntimeError("filtered_graph.tsv_neighbor_multimap_avg is NULL")
+
+                _info("graph_filtering: all_tsv_arrays_valid")
 
                 # Build required data structures for cluster-aware filtering
-                if verbose:
-                    _info(f"Building data structures for cluster analysis...")
-                
                 # Allocate and calculate reference statistics / read_index if not already present
                 if not ref_stats:
+                    _info(f"graph_filtering: calculating_reference_stats refs={memory_pool.reference_count}")
                     ref_stats = <ReferenceStats*>malloc(memory_pool.reference_count * sizeof(ReferenceStats))
                     if not ref_stats:
                         free(pattern_data)
@@ -1203,7 +1274,10 @@ cdef score_alignments(
                     with nogil:
                         calculate_reference_stats(memory_pool, bam_header, ref_stats)
 
+                    _info("graph_filtering: reference_stats_complete")
+
                 if not read_index:
+                    _info(f"graph_filtering: building_read_index refs={memory_pool.reference_count} threads={num_threads_c}")
                     with nogil:
                         read_index = build_read_index_parallel(memory_pool, memory_pool.reference_count, num_threads_c)
 
@@ -1214,9 +1288,8 @@ cdef score_alignments(
                         free(pattern_data)
                         destroy_reference_mapping(mapping)
                         raise RuntimeError("Failed to build read index for cluster filtering")
-                
-                if verbose:
-                    _info(f"Applying cluster-aware filtering...")
+
+                    _info("graph_filtering: read_index_complete")
 
                 # If user selected auto (0), ensure we have a concrete threshold.
                 # Prefer the earlier selection (if we ran broken-stick prior to igraph build).
@@ -1241,38 +1314,59 @@ cdef score_alignments(
                         if verbose:
                             bf_logging.log("GRAPH", f"Using previously selected auto threshold = {graph_min_edge_weight_c}")
                 
-                # Convert clustering flag to C int: if clustering enabled, use Leiden (default)
-                use_leiden_c = 1 if clustering else 0
-                leiden_res_c = leiden_resolution if leiden_resolution else 1.0
-                leiden_parallel_c = 0
-                leiden_max_iter_c = leiden_max_iterations if leiden_max_iterations else 10
+                # Convert clustering flag to C int: if clustering enabled, use Community (default)
+                use_community_c = 1 if clustering else 0
+                community_res_c = community_resolution if community_resolution else 1.0
+                community_parallel_c = 0
+                community_max_iter_c = community_max_iterations if community_max_iterations else 10
                 # Note: graph_min_edge_weight_c and outlier_method_c already assigned at start of try block
 
-                # Apply cluster-aware filtering (includes TSV writing after Leiden)
+                # Apply cluster-aware filtering (includes TSV writing after Community)
                 stage_timer = bf_monotonic_seconds()
-                # leiden_anomaly_threshold < 0 indicates auto per-community thresholding.
-                leiden_anomaly_threshold_arg = float(leiden_anomaly_threshold)
+
+                # Validate pointers before clustering (filtered_graph can be NULL - will be rebuilt)
+                _info(f"graph_filtering: validating_pointers memory_pool={<unsigned long>memory_pool:x} pattern_data={<unsigned long>pattern_data:x} ref_stats={<unsigned long>ref_stats:x} read_index={<unsigned long>read_index:x} filtered_graph={<unsigned long>filtered_graph:x}")
+                if not memory_pool:
+                    raise RuntimeError("memory_pool is NULL before clustering")
+                if not pattern_data:
+                    raise RuntimeError("pattern_data is NULL before clustering")
+                if not ref_stats:
+                    raise RuntimeError("ref_stats is NULL before clustering")
+                if not read_index:
+                    raise RuntimeError("read_index is NULL before clustering")
+                # Note: filtered_graph can be NULL here - it will be rebuilt inside apply_cluster_aware_filtering()
+                _info("graph_filtering: pointer_validation_passed")
+
+                # Initialize taxonomy filtering statistics
+                taxonomy_stats.strict_removed = 0
+                taxonomy_stats.weighted_count = 0
+                taxonomy_stats.second_chance_restored = 0
+
+                remove_cross_domain_edges_c = 1 if remove_cross_domain_edges else 0
+                flag_misannotations_c = 1 if flag_misannotations else 0
 
                 cluster_result = apply_cluster_aware_filtering(
                     memory_pool, pattern_data, ref_stats, read_index,
                     memory_pool.reference_count, em_config.minimum_read_coverage,
-                    em_config.information_threshold, verbose_c,
-                    use_leiden_c, leiden_res_c, leiden_parallel_c, leiden_max_iter_c,
+                    verbose_c,
+                    community_res_c, community_max_iter_c,
                     graph_min_edge_weight_c,
                     num_threads_c,
-                    <int32_t>iforest_n_trees,
-                    <uint32_t>iforest_subsample_size,
-                    <double>leiden_anomaly_threshold_arg,
-                    <uint32_t>iforest_random_seed,
-                    <uint32_t>lof_k,
-                    <double>lof_contamination,
-                    <double>zscore_threshold,
+                    outlier_method_c,  # Outlier detection method (0=MAD, 1=IQR)
                     filtered_graph,  # Pass the pre-built filtered graph
                     bam_header,       # For TSV writing
                     mapping,          # For TSV writing
-                    tsv_file_path_c,  # TSV will be written after Leiden completes
+                    tsv_file_path_c,  # TSV will be written after Community completes
                     graph_export_path_c,  # GraphML export path
-                    outlier_method_c  # Outlier detection method (0=MAD, 1=IQR)
+                    &taxonomy_filter_config,  # Taxonomy filter config
+                    &taxonomy_stats,  # Output: taxonomy filtering statistics
+                    taxdb_c,  # Taxonomy database for lineage information
+                    0.01,  # betweenness_threshold: bridge detection
+                    0.3,   # cc_threshold: hub detection
+                    5,     # hub_degree_threshold: minimum degree for hub/core
+                    False,  # strict_mode: non-strict by default
+                    remove_cross_domain_edges_c,  # Edge removal toggle
+                    flag_misannotations_c  # Misannotation detection toggle
                 )
                 
                 # Clean up structures
@@ -1285,7 +1379,13 @@ cdef score_alignments(
                     free(pattern_data)
                     destroy_reference_mapping(mapping)
                     raise RuntimeError("Cluster-aware filtering failed")
-                
+
+                # Store taxonomy filtering statistics in memory pool stats
+                if memory_pool.stats != NULL:
+                    memory_pool.stats.taxonomy_strict_removed = taxonomy_stats.strict_removed
+                    memory_pool.stats.taxonomy_weighted_count = taxonomy_stats.weighted_count
+                    memory_pool.stats.taxonomy_second_chance_restored = taxonomy_stats.second_chance_restored
+
                 # For cluster filtering, track total alignments removed as information-based filtering
                 # since cluster filtering is an information-theoretic approach
                 aligns_filtered_information = alignments_before_filtering - memory_pool.alignment_count
@@ -1533,17 +1633,9 @@ def process_bam_with_em(
     
     # Clustering parameters
     clustering=False,  # Enable clustering/community detection (requires reference_stats_tsv)
-    leiden_resolution=1.0,
-    leiden_max_iterations=10,
-    outlier_method="mad",  # "mad", "iqr", "iforest", "lof", or "zscore" - Statistical outlier detection method
-    # Outlier detector CLI-exposed parameters
-    iforest_n_trees=100,
-    iforest_subsample_size=0,
-    leiden_anomaly_threshold=-1.0,
-    iforest_random_seed=12345,
-    lof_k=20,
-    lof_contamination=0.1,
-    zscore_threshold=3.0,
+    community_resolution=1.0,
+    community_max_iterations=10,
+    outlier_method="mad",  # "mad" or "iqr" - Statistical outlier detection method
 
     # Graph export
     graph_export=None,  # Export graph to GraphML format (optional)
@@ -1555,6 +1647,17 @@ def process_bam_with_em(
     taxonomy_cross_domain_threshold=0.10,
     taxonomy_kingdom_threshold=0.25,
     taxonomy_genus_threshold=0.50,
+    # Taxonomy-informed filtering parameters
+    taxonomy_filter_enabled=False,
+    taxonomy_strict_filter=True,
+    taxonomy_strict_min_connections=5,
+    taxonomy_weighted_outlier=True,
+    taxonomy_anomaly_weight=2.0,
+    taxonomy_second_chance=True,
+    taxonomy_second_chance_cc=0.3,
+    # Edge removal and misannotation detection
+    remove_cross_domain_edges=False,
+    flag_misannotations=False,
 ):
     """
     High-level entry point to process a BAM file with the EM-based pipeline.
@@ -1575,7 +1678,7 @@ def process_bam_with_em(
         If True, compute Post-Mortem Damage (PMD) scores and include them
         in scoring and output tags.
     clustering : bool
-        Enable Leiden clustering and cluster-aware filtering when reference
+        Enable Community clustering and cluster-aware filtering when reference
         statistics are available.
     reference_lengths_tsv : str, optional
         TSV mapping of reference name -> length used to override header lengths.
@@ -1670,17 +1773,9 @@ def process_bam_with_em(
             graph_min_edge_weight=graph_min_edge_weight,
             graph_auto_tol=graph_auto_tol,
             graph_global_tail=graph_global_tail,
-            # Thread outlier parameters
-            iforest_n_trees=iforest_n_trees,
-            iforest_subsample_size=iforest_subsample_size,
-            leiden_anomaly_threshold=leiden_anomaly_threshold,
-            iforest_random_seed=iforest_random_seed,
-            lof_k=lof_k,
-            lof_contamination=lof_contamination,
-            zscore_threshold=zscore_threshold,
             clustering=clustering,
-            leiden_resolution=leiden_resolution,
-            leiden_max_iterations=leiden_max_iterations,
+            community_resolution=community_resolution,
+            community_max_iterations=community_max_iterations,
             outlier_method=outlier_method,
             graph_export=graph_export,
             taxonomy_db=taxonomy_db,
@@ -1689,6 +1784,15 @@ def process_bam_with_em(
             taxonomy_cross_domain_threshold=taxonomy_cross_domain_threshold,
             taxonomy_kingdom_threshold=taxonomy_kingdom_threshold,
             taxonomy_genus_threshold=taxonomy_genus_threshold,
+            taxonomy_filter_enabled=taxonomy_filter_enabled,
+            taxonomy_strict_filter=taxonomy_strict_filter,
+            taxonomy_strict_min_connections=taxonomy_strict_min_connections,
+            taxonomy_weighted_outlier=taxonomy_weighted_outlier,
+            taxonomy_anomaly_weight=taxonomy_anomaly_weight,
+            taxonomy_second_chance=taxonomy_second_chance,
+            taxonomy_second_chance_cc=taxonomy_second_chance_cc,
+            remove_cross_domain_edges=remove_cross_domain_edges,
+            flag_misannotations=flag_misannotations,
         )
 
         processing_time = bf_monotonic_seconds() - clock_start

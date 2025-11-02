@@ -15,7 +15,7 @@ see <https://www.gnu.org/licenses/>.
 from bam_filter.reassign import reassign
 from bam_filter.filter import filter_references
 from bam_filter.lca import do_lca
-from bam_filter.build_taxonomy import build_taxonomy
+from bam_filter.taxonomy_build import build_taxonomy
 from bam_filter.utils import (
     get_arguments,
 )
