@@ -692,14 +692,14 @@ help_msg = {
     "community_resolution": "Resolution parameter for community detection (Leiden γ). Lower=larger communities, higher=smaller communities.",
     "community_max_iterations": "Maximum iterations for the community detection refinement loop (default: 10).",
     "community_parallel": "Enable parallel processing in the community move phase for speed (experimental, Leiden-only).",
-    "outlier_method": "Statistical outlier detection method for clustering coefficient filtering: 'mad' (Median Absolute Deviation, default - robust univariate, uses modified z-score > 3.5) or 'iqr' (Interquartile Range - standard boxplot method, Q1-1.5*IQR). Both methods only flag extreme statistical outliers within each community. Complex multi-metric methods (iforest/lof/zscore) have been replaced by the 3-tier enhanced filtering system which uses betweenness centrality, clustering coefficients, and taxonomy coherence for contamination detection.",
+    "outlier_method": "Outlier test for clustering coefficients: 'mad' (Median Absolute Deviation, default) or 'iqr' (Interquartile Range). These rules flag structural outliers; multi-metric checks live in the tiered filtering pipeline.",
 }
 
 from difflib import get_close_matches, SequenceMatcher
 
 
 class SubcommandHelpFormatter(argparse.ArgumentParser):
-    def _similarity_score(self, a, b):
+    def _match_score(self, a, b):
         # Remove leading dashes for comparison
         a = a.lstrip("-")
         b = b.lstrip("-")
@@ -709,14 +709,14 @@ class SubcommandHelpFormatter(argparse.ArgumentParser):
         # Remove leading dashes from the argument for comparison
         clean_arg = arg.lstrip("-")
 
-        # Calculate similarity scores for all possibilities
+        # Calculate match scores for all possibilities
         matches = []
         for p in possibilities:
-            score = self._similarity_score(arg, p)
+            score = self._match_score(arg, p)
             if score > cutoff:
                 matches.append((p, score))
 
-        # Sort by similarity score and take top N
+        # Sort by match score and take top N
         matches.sort(key=lambda x: x[1], reverse=True)
         best_matches = [m[0] for m in matches[:n]]
 
