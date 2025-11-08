@@ -58,11 +58,12 @@ cdef LCACache* create_lca_cache(TaxonomyDB* db, int32_t* cached_taxids, int32_t 
 cdef void free_lca_cache(LCACache* cache) nogil
 
 # Core LCA computation (nogil for parallel usage)
-cdef int32_t compute_lca_nogil(TaxonomyDB* db, int32_t taxid1, int32_t taxid2) nogil
+cdef int32_t compute_lca_nogil(TaxonomyDB* db, int32_t taxid1, int32_t taxid2) noexcept nogil
+cdef int32_t compute_lca_for_array_nogil(TaxonomyDB* db, int32_t* taxids, int32_t n) noexcept nogil
 cdef int32_t query_lca_cache(LCACache* cache, int32_t taxid1, int32_t taxid2) nogil
 
 # DuckDB-backed accession lookup
-cdef int32_t lookup_taxid_duckdb(AccessionMap* amap, const char* accession) nogil except -2
+cdef int32_t lookup_taxid_duckdb(AccessionMap* amap, const char* accession) except -2 nogil
 
 # Lineage string generation (Greengenes-style)
 cdef int build_lineage_string_nogil(TaxonomyDB* db, int32_t taxid, char* buffer, int32_t buffer_size) noexcept nogil

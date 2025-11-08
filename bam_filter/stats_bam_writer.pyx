@@ -247,7 +247,7 @@ cdef int write_filtered_bam_streaming(
     for new_tid in range(mapping.n_retained_refs):
         old_tid = ref_filter.reverse_mapping[new_tid]
         set_uint32_at(new_to_old, new_tid, <uint32_t>old_tid)
-    set_uint32_at(old_to_new, <int>old_tid, <uint32_t>new_tid)
+        set_uint32_at(old_to_new, <int>old_tid, <uint32_t>new_tid)
 
     filtered_header = create_filtered_header_efficient(original_header, mapping)
 

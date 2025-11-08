@@ -26,6 +26,8 @@ cdef extern from "igraph.h":
     
     ctypedef double igraph_real_t
     ctypedef long int igraph_integer_t
+    # Alias type for signed integers used in igraph headers
+    ctypedef igraph_integer_t igraph_int_t
     
     # Error type for newer igraph
     ctypedef int igraph_error_t
@@ -63,26 +65,32 @@ cdef extern from "igraph.h":
     # Edge weights
     int igraph_es_all(igraph_es_t *es, igraph_edgeseq_type_t type) nogil
     
-    # Community detection - Leiden algorithm (actual API signature)
-    igraph_error_t igraph_community_leiden(const igraph_t *graph,
-                                          const igraph_vector_t *edge_weights,
-                                          const igraph_vector_t *node_weights,
-                                          igraph_real_t resolution_parameter,
-                                          igraph_real_t beta,
-                                          igraph_bool_t start,
-                                          igraph_integer_t n_iterations,
-                                          igraph_vector_int_t *membership,
-                                          igraph_integer_t *nb_clusters,
-                                          igraph_real_t *quality) nogil
+    # Community detection - Leiden algorithm (actual API signature from igraph_community.h)
+    igraph_error_t igraph_community_leiden(
+        const igraph_t *graph,
+        const igraph_vector_t *edge_weights,
+        const igraph_vector_t *vertex_out_weights,
+        const igraph_vector_t *vertex_in_weights,
+        igraph_real_t resolution,
+        igraph_real_t beta,
+        igraph_bool_t start,
+        igraph_int_t n_iterations,
+        igraph_vector_int_t *membership,
+        igraph_int_t *nb_clusters,
+        igraph_real_t *quality) nogil
 
     # Community detection - Label Propagation Algorithm (LPA)
     # Fast O(m) algorithm for large graphs
+    ctypedef enum igraph_lpa_variant_t:
+        IGRAPH_LPA_STANDARD = 0
+        IGRAPH_LPA_VARIANT_1 = 1
     igraph_error_t igraph_community_label_propagation(const igraph_t *graph,
                                                       igraph_vector_int_t *membership,
                                                       igraph_neimode_t mode,
                                                       const igraph_vector_t *weights,
                                                       const igraph_vector_int_t *initial,
-                                                      const igraph_vector_bool_t *fixed) nogil
+                                                      const igraph_vector_bool_t *fixed,
+                                                      igraph_lpa_variant_t variant) nogil
 
     # Connected components / clusters (returns number of components in cno)
     ctypedef enum igraph_connectedness_t:
@@ -94,6 +102,13 @@ cdef extern from "igraph.h":
                                    igraph_vector_int_t *csize,
                                    igraph_integer_t *cno,
                                    igraph_connectedness_t mode) nogil
+
+    # Newer igraph versions expose connected components via igraph_connected_components
+    igraph_error_t igraph_connected_components(const igraph_t *graph,
+                                               igraph_vector_int_t *membership,
+                                               igraph_vector_int_t *csize,
+                                               igraph_int_t *no,
+                                               igraph_connectedness_t mode) nogil
     
     # Transitivity / clustering (Barrat weighted clustering)
     ctypedef enum igraph_transitivity_mode_t:
@@ -117,24 +132,31 @@ cdef extern from "igraph.h":
         IGRAPH_OUT = 1
         IGRAPH_IN = 2
         IGRAPH_ALL = 3
+
+    # Loop handling enum - newer igraph uses an enum for loops rather than a bool
+    ctypedef enum igraph_loops_t:
+        IGRAPH_NO_LOOPS = 0
+        IGRAPH_LOOPS = 1
     
     igraph_error_t igraph_degree(const igraph_t *graph,
                                  igraph_vector_int_t *res,
                                  igraph_vs_t vids,
                                  igraph_neimode_t mode,
-                                 igraph_bool_t loops) nogil
+                                 igraph_loops_t loops) nogil
     
     igraph_error_t igraph_strength(const igraph_t *graph,
                                    igraph_vector_t *res,
                                    igraph_vs_t vids,
                                    igraph_neimode_t mode,
-                                   igraph_bool_t loops,
+                                   igraph_loops_t loops,
                                    const igraph_vector_t *weights) nogil
     
     igraph_error_t igraph_neighbors(const igraph_t *graph,
                                     igraph_vector_int_t *neis,
                                     igraph_integer_t vid,
-                                    igraph_neimode_t mode) nogil
+                                    igraph_neimode_t mode,
+                                    igraph_loops_t loops,
+                                    igraph_bool_t sorted) nogil
     
     igraph_error_t igraph_get_eid(const igraph_t *graph,
                                   igraph_integer_t *eid,
@@ -210,6 +232,9 @@ cdef extern from "igraph.h":
                                           igraph_subgraph_implementation_t impl) nogil
     
     # Betweenness centrality
-    igraph_error_t igraph_betweenness(const igraph_t *graph, igraph_vector_t *res,
-                                     const igraph_vs_t vids, igraph_bool_t directed,
-                                     const igraph_vector_t *weights) nogil
+    igraph_error_t igraph_betweenness(const igraph_t *graph,
+                                     const igraph_vector_t *weights,
+                                     igraph_vector_t *res,
+                                     igraph_vs_t vids,
+                                     igraph_bool_t directed,
+                                     igraph_bool_t normalized) nogil

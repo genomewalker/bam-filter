@@ -18,6 +18,7 @@ assigning sequential read IDs during parallel batch processing.
 
 from libc.stdint cimport int64_t, uint32_t
 from libc.stdlib cimport malloc, free
+from libc.string cimport strdup
 
 
 cdef int64_t compute_read_name_hash(const char* read_name) noexcept nogil:
@@ -46,6 +47,7 @@ cdef int64_t compute_read_name_hash(const char* read_name) noexcept nogil:
 
 cdef struct ThreadLocalHashMap:
     kh_seqid_map_t* hash_to_id_map
+    kh_seqid_name_map_t* hash_to_name_map
     uint32_t next_local_id
 
 
@@ -61,8 +63,9 @@ cdef ThreadLocalHashMap* create_thread_local_hash_map() except NULL nogil:
     if not map:
         return NULL
     map.hash_to_id_map = kh_init_seqid_map()
+    map.hash_to_name_map = kh_init_seqid_name_map()
     map.next_local_id = 0
-    if not map.hash_to_id_map:
+    if not map.hash_to_id_map or not map.hash_to_name_map:
         free(map)
         return NULL
     return map
@@ -76,10 +79,22 @@ cdef void destroy_thread_local_hash_map(ThreadLocalHashMap* map) noexcept nogil:
     map : ThreadLocalHashMap*
         Hash map to destroy (safe to pass NULL)
     """
+    cdef khint_t _k
+    cdef char* _nm
     if not map:
         return
     if map.hash_to_id_map:
         kh_destroy_seqid_map(map.hash_to_id_map)
+    # free stored names
+    if map.hash_to_name_map:
+        _k = 0
+        while _k < kh_end_seqid_name_map(map.hash_to_name_map):
+            if kh_exist_seqid_name_map(map.hash_to_name_map, _k):
+                _nm = kh_val_seqid_name_map_wrap(map.hash_to_name_map, _k)[0]
+                if _nm != NULL:
+                    free(_nm)
+            _k += 1
+        kh_destroy_seqid_name_map(map.hash_to_name_map)
     free(map)
 
 

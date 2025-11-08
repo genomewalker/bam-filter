@@ -90,6 +90,7 @@ from bam_filter.stats_helpers cimport (
     compare_int32,
     compare_double,
     mode_from_sorted,
+    calculate_dust_score,
 )
 
 from typing import Any
@@ -158,6 +159,12 @@ cdef extern from "seqid_khash.h":
     void kh_destroy_seqid_map(kh_seqid_map_t*) nogil
     khint_t kh_put_seqid_map(kh_seqid_map_t*, khint64_t, int*) nogil
     khint_t kh_size(kh_seqid_map_t*) nogil
+
+cdef extern from "taxonomy_khash.h":
+    ctypedef struct kh_str_t:
+        pass
+    khint_t kh_get_str(const kh_str_t* h, const char* key) nogil
+    khint_t kh_end(const kh_str_t* h) nogil
 
 # Import htslib types and functions from centralized header
 from bam_filter.processor_types cimport (
@@ -448,7 +455,8 @@ cdef int calculate_reference_stats(
     int trim_ends,
     int trim_min,
     int trim_max,
-    bint verbose
+    bint verbose,
+    kh_str_t* trusted_reads_hash
 ) nogil:
     """Compute detailed per-reference statistics from BAM alignments.
 
@@ -480,6 +488,9 @@ cdef int calculate_reference_stats(
         Parameters controlling TAD/coverage trimming.
     verbose : bint
         When True, emit additional progress information via nogil logging.
+    trusted_reads_hash : kh_str_t*
+        Optional hash set of read names to include; alignments whose read names
+        are absent are skipped when provided.
 
     Returns
     -------
@@ -534,13 +545,15 @@ cdef int calculate_reference_stats(
     cdef double nm_mean = 0.0, nm_M2 = 0.0
     cdef double mapq_mean = 0.0, mapq_M2 = 0.0
     cdef double ani_mean = 0.0, ani_M2 = 0.0
+    cdef double dust_mean_acc = 0.0, dust_M2 = 0.0
     cdef double gc_mean = 0.0, gc_M2 = 0.0
     cdef int64_t qaln_count = 0, as_count = 0, nm_count = 0, mapq_count = 0, gc_count = 0
     
     # Main processing loop - SINGLE PASS
     cdef int ret = 0
     cdef int32_t read_length, gc_bases, nm_val, mapq_val
-    cdef double ani, qaln_len, as_val, gc_percent
+    cdef double ani, qaln_len, as_val, gc_percent, dust_val
+    cdef int64_t dust_count = 0
     cdef double delta  # Reused for all Welford calculations
     cdef int64_t start_pos, end_pos, i  # Add missing 'i' variable
     cdef char* qname
@@ -590,6 +603,13 @@ cdef int calculate_reference_stats(
         # Calculate GC content in one pass
         gc_bases = count_gc_bases(b)
         gc_percent = (<double>gc_bases / read_length) * 100.0
+
+        # Calculate DUST score (normalized 0-1)
+        dust_val = calculate_dust_score(b)
+        dust_count += 1
+        delta = dust_val - dust_mean_acc
+        dust_mean_acc += delta / dust_count
+        dust_M2 += delta * (dust_val - dust_mean_acc)
         
         # Calculate query alignment length once
         qaln_len = get_query_alignment_length(b)
@@ -600,6 +620,9 @@ cdef int calculate_reference_stats(
         
         # Get read name once for unique tracking
         qname = bam_get_qname(b)
+        if trusted_reads_hash != NULL:
+            if kh_get_str(trusted_reads_hash, qname) == kh_end(trusted_reads_hash):
+                continue
         key = fnv1a_hash_read_id(qname)
         kh_put_seqid_map(unique_reads_map, key, &ret_val)
         
@@ -719,6 +742,12 @@ cdef int calculate_reference_stats(
     stats.gc_content_mean = gc_mean
     stats.gc_content_std = sqrt(gc_M2 / (gc_count - 1)) if gc_count > 1 else 0.0
     stats.gc_content_total = (<double>total_gc_bases / total_read_length) * 100.0
+    if dust_count > 0:
+        stats.dust_mean = dust_mean_acc
+        stats.dust_std = sqrt(dust_M2 / (dust_count - 1)) if dust_count > 1 else 0.0
+    else:
+        stats.dust_mean = 0.0
+        stats.dust_std = 0.0
     
     # Calculate median/mode (requires sorting - unavoidable)
     # Fix integer division for array indexing
@@ -887,7 +916,8 @@ cdef int process_batches(
                 global_ref_stats, ref_unique_reads,
                 min_read_ani_c, min_read_length_c, max_read_length_c,
                 scale, trim_ends, trim_min, trim_max,
-                verbose
+                verbose,
+                NULL
             )
             if ret != 0:
                 break
@@ -907,7 +937,8 @@ cdef int process_batches(
                 global_ref_stats, ref_unique_reads,
                 min_read_ani_c, min_read_length_c, max_read_length_c,
                 scale, trim_ends, trim_min, trim_max,
-                verbose
+                verbose,
+                NULL
             )
 
         # After the parallel region, inspect batch error codes and report first error if any.
@@ -1055,7 +1086,8 @@ cdef int process_reference_batch(
     int trim_ends,
     int trim_min,
     int trim_max,
-    bint verbose
+    bint verbose,
+    kh_str_t* trusted_reads_hash
 ) nogil:
     """Process a single batch of references."""
     # htsfile is now passed in, already opened for this thread
@@ -1075,7 +1107,8 @@ cdef int process_reference_batch(
             ref_unique_reads[tid].unique_reads_map,
             min_read_ani_c, min_read_length_c, max_read_length_c,
             scale, trim_ends, trim_min, trim_max,
-            verbose
+            verbose,
+            trusted_reads_hash
         )
 
         # Free unique_reads_map for this reference immediately after processing

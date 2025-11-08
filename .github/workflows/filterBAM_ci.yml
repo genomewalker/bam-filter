@@ -8,7 +8,7 @@ on:
 
 jobs:
   tests:
-    name: Tests (Ubuntu, Python 3.9)
+    name: Tests (Ubuntu, Python 3.12)
     runs-on: ubuntu-latest
     if: ${{ !(github.event_name == 'push' && contains(github.event.head_commit.message || '', '[skip_ci]')) && !(github.event_name == 'pull_request' && contains(github.event.pull_request.title || '', '[skip_ci]')) }}
     defaults:

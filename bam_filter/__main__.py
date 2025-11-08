@@ -16,6 +16,7 @@ from bam_filter.reassign import reassign
 from bam_filter.filter import filter_references
 from bam_filter.lca import do_lca
 from bam_filter.taxonomy_build import build_taxonomy
+from bam_filter.bam_to_parquet import do_bam_to_parquet
 from bam_filter.utils import (
     get_arguments,
 )
@@ -35,6 +36,8 @@ def main():
         do_lca(args)
     elif args.action == "build-taxonomy":
         build_taxonomy(args)
+    elif args.action == "to-parquet":
+        do_bam_to_parquet(args)
 
 
 if __name__ == "__main__":

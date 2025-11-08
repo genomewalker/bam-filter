@@ -68,6 +68,8 @@ cdef int write_stats_to_file(
         "gc_content_mean\t"
         "gc_content_std\t"
         "gc_content_total\t"
+        "dust_mean\t"
+        "dust_std\t"
         "read_aligned_length\t"
         "read_aln_score\t"
         "mapping_quality\t"
@@ -112,6 +114,8 @@ cdef int write_stats_to_file(
         "%d\t"
         "%d\t"
         "%d\t"
+        "%.4f\t"
+        "%.4f\t"
         "%.4f\t"
         "%.4f\t"
         "%.4f\t"
@@ -175,6 +179,8 @@ cdef int write_stats_to_file(
                     stats.gc_content_mean,
                     stats.gc_content_std,
                     stats.gc_content_total,
+                    stats.dust_mean,
+                    stats.dust_std,
                     stats.aligned_length_mean,
                     stats.aln_score_mean,
                     stats.mapq_mean,
@@ -226,6 +232,8 @@ cdef int write_stats_to_file(
                     stats.gc_content_mean,
                     stats.gc_content_std,
                     stats.gc_content_total,
+                    stats.dust_mean,
+                    stats.dust_std,
                     stats.aligned_length_mean,
                     stats.aln_score_mean,
                     stats.mapq_mean,
@@ -336,6 +344,8 @@ cdef int write_stats_to_gzfile(
         "gc_content_mean\t"
         "gc_content_std\t"
         "gc_content_total\t"
+        "dust_mean\t"
+        "dust_std\t"
         "read_aligned_length\t"
         "read_aln_score\t"
         "mapping_quality\t"
@@ -374,6 +384,7 @@ cdef int write_stats_to_gzfile(
         "%s\t"
         "%lld\t"
         "%lld\t"
+        "%.4f\t"
         "%.4f\t"
         "%.4f\t"
         "%d\t"
@@ -443,6 +454,8 @@ cdef int write_stats_to_gzfile(
                     stats.gc_content_mean,
                     stats.gc_content_std,
                     stats.gc_content_total,
+                    stats.dust_mean,
+                    stats.dust_std,
                     stats.aligned_length_mean,
                     stats.aln_score_mean,
                     stats.mapq_mean,
@@ -494,6 +507,8 @@ cdef int write_stats_to_gzfile(
                     stats.gc_content_mean,
                     stats.gc_content_std,
                     stats.gc_content_total,
+                    stats.dust_mean,
+                    stats.dust_std,
                     stats.aligned_length_mean,
                     stats.aln_score_mean,
                     stats.mapq_mean,

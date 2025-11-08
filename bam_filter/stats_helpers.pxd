@@ -30,6 +30,7 @@ cdef int count_gc_bases(bam1_t* b) noexcept nogil
 cdef float compute_ani(bam1_t* b) noexcept nogil
 cdef int extract_aux_int(uint8_t* aux) noexcept nogil
 cdef int64_t fnv1a_hash_read_id(char* qname) noexcept nogil
+cdef double calculate_dust_score(bam1_t* b) noexcept nogil
 
 cdef int compare_int32(const void* a, const void* b) noexcept nogil
 cdef int compare_double(const void* a, const void* b) noexcept nogil

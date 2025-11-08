@@ -29,6 +29,8 @@ cdef extern from "htslib/sam.h":
     int bam_aux2i(const uint8_t *s) nogil
     char* bam_get_qname(bam1_t* b) nogil
     int32_t bam_endpos(bam1_t* b) nogil
+    uint8_t* bam_get_seq(bam1_t* b) nogil
+    int bam_seqi(const uint8_t* s, int i) nogil
 
 # Lookup table for GC content calculation (A=0, C=1, G=1, T=0)
 # Define it here so the C symbol is emitted once; other modules cimport
@@ -187,3 +189,59 @@ cdef int64_t fnv1a_hash_read_id(char* qname) noexcept nogil:
     return <int64_t>hash_val
 
 
+cdef inline int _base_to_idx(int b) noexcept nogil:
+    if b == 1:
+        return 0  # A
+    elif b == 2:
+        return 1  # C
+    elif b == 4:
+        return 2  # G
+    elif b == 8:
+        return 3  # T
+    else:
+        return -1
+
+cdef double calculate_dust_score(bam1_t* b) noexcept nogil:
+    """
+    Compute a normalized DUST score (0-1) for a read.
+    0 = high complexity, 1 = extremely repetitive.
+    """
+    if b == NULL or b.core.l_qseq < 3:
+        return 0.0
+
+    cdef int triplets_capacity = 64  # 4^3 combinations
+    cdef int counts[64]
+    cdef int i
+    for i in range(64):
+        counts[i] = 0
+
+    cdef uint8_t* seq = bam_get_seq(b)
+    cdef int base0, base1, base2
+    cdef int trip_key
+    cdef int valid_triplets = 0
+    cdef int read_len = b.core.l_qseq
+
+    for i in range(read_len - 2):
+        base0 = _base_to_idx(bam_seqi(seq, i))
+        base1 = _base_to_idx(bam_seqi(seq, i + 1))
+        base2 = _base_to_idx(bam_seqi(seq, i + 2))
+        if base0 < 0 or base1 < 0 or base2 < 0:
+            continue  # skip ambiguous bases
+        trip_key = base0 * 16 + base1 * 4 + base2
+        counts[trip_key] += 1
+        valid_triplets += 1
+
+    if valid_triplets <= 1:
+        return 0.0
+
+    cdef double score = 0.0
+    cdef double c
+    for i in range(64):
+        if counts[i] > 1:
+            c = <double>counts[i]
+            score += (c * (c - 1.0)) / 2.0
+
+    cdef double denom = (<double>valid_triplets * (valid_triplets - 1.0)) / 2.0
+    if denom <= 0.0:
+        return 0.0
+    return score / denom

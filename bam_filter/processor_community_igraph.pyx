@@ -269,7 +269,7 @@ cdef int process_single_community_global(
         if ret == IGRAPH_SUCCESS:
             ret = igraph_vs_all(&vs_sub_all)
             if ret == IGRAPH_SUCCESS:
-                ret = igraph_degree(&subgraph, &subgraph_degrees, vs_sub_all, IGRAPH_ALL, 0)
+                ret = igraph_degree(&subgraph, &subgraph_degrees, vs_sub_all, IGRAPH_ALL, IGRAPH_NO_LOOPS)
                 igraph_vs_destroy(&vs_sub_all)
                 if ret == IGRAPH_SUCCESS:
                     # Export subgraph degrees (map subgraph IDs back to full graph IDs)
@@ -861,6 +861,7 @@ cdef CommunityResults* community_clustering(WeightedGraph* graph,
     cdef float comm_diversity, edge_score
     cdef uint32_t max_communities
     cdef float bridge_score
+    cdef uint32_t node_degree_val
     # Variables for optimized betweenness calculation (bridge candidates)
     cdef uint32_t bridge_candidate_count
     cdef uint32_t max_bridge_nodes
@@ -1400,10 +1401,11 @@ cdef CommunityResults* community_clustering(WeightedGraph* graph,
             # Label Propagation Algorithm (LPA) - O(m) linear time
             # Fast and scalable for large graphs
             ret = igraph_community_label_propagation(&subgraph, &membership_sel,
-                                                     IGRAPH_ALL,  # mode (edge direction)
+                                                     <igraph_neimode_t>IGRAPH_ALL,  # mode (edge direction)
                                                      &sub_weights,  # weights
-                                                     NULL,  # initial membership (NULL = random)
-                                                     NULL)  # fixed vertices (NULL = none)
+                                                     <const igraph_vector_int_t*>NULL,  # initial membership (NULL = random)
+                                                     <const igraph_vector_bool_t*>NULL,  # fixed vertices (NULL = none)
+                                                     <igraph_lpa_variant_t>0)
 
             # LPA doesn't return num_communities, so we compute it from max membership
             if ret == IGRAPH_SUCCESS:
@@ -1415,10 +1417,17 @@ cdef CommunityResults* community_clustering(WeightedGraph* graph,
         else:
             # Community algorithm - O(m log n) with optimization
             # Better quality but slower
-            ret = igraph_community_leiden(&subgraph, &sub_weights, NULL,
-                                          <igraph_real_t>resolution, 0.01, False,
-                                          <igraph_integer_t>max_iterations,
-                                          &membership_sel, &num_communities, NULL)
+            ret = igraph_community_leiden(&subgraph,
+                                          &sub_weights,
+                                          <const igraph_vector_t*>NULL,  # vertex_out_weights (NULL = none)
+                                          <const igraph_vector_t*>NULL,  # vertex_in_weights (NULL = none)
+                                          <igraph_real_t>resolution,
+                                          <igraph_real_t>0.01,
+                                          <igraph_bool_t>False,
+                                          <igraph_int_t>max_iterations,
+                                          &membership_sel,
+                                          &num_communities,
+                                          <igraph_real_t*>NULL)
 
         t_end = clock()
         t_community_total = (t_end - t_start) / <double>CLOCKS_PER_SEC
@@ -1734,7 +1743,7 @@ cdef CommunityResults* community_clustering(WeightedGraph* graph,
             # Get neighbors of this node
             ret = igraph_vector_int_init(&neighbors_vec, 0)
             if ret == IGRAPH_SUCCESS:
-                ret = igraph_neighbors(ig_graph, &neighbors_vec, ref_idx, IGRAPH_ALL)
+                ret = igraph_neighbors(ig_graph, &neighbors_vec, ref_idx, <igraph_neimode_t>IGRAPH_ALL, <igraph_loops_t>IGRAPH_NO_LOOPS, <igraph_bool_t>False)
                 if ret == IGRAPH_SUCCESS:
                     # Count unique communities among neighbors
                     num_unique = 0
@@ -1848,21 +1857,28 @@ cdef CommunityResults* community_clustering(WeightedGraph* graph,
 
                     # Count inter-community edges (edges to different communities)
                     inter_comm_edges = 0
+                    node_degree_val = <uint32_t>0
+
                     if graph.nodes and ref_idx < graph.num_nodes:
                         node = &graph.nodes[ref_idx]
+                        node_degree_val = node.degree
                         for ni in range(node.degree):
                             neighbor_id = node.neighbors[ni]
                             if neighbor_id < graph.num_nodes:
                                 neighbor_comm = results.community_membership[neighbor_id]
                                 if neighbor_comm != my_comm:
                                     inter_comm_edges += 1
+                    else:
+                        # Fallback: use degrees computed during community processing when node array is unavailable
+                        if results.node_degree != NULL:
+                            node_degree_val = results.node_degree[ref_idx]
 
                     # Bridge score = combination of:
                     # - Community diversity (num_neighbor_communities)
                     # - Inter-community connectivity (inter_comm_edges)
                     # Normalize both to [0, 1] and combine
                     comm_diversity = <float>results.num_neighbor_communities[ref_idx] / <float>max_communities
-                    edge_score = <float>inter_comm_edges / <float>(node.degree + 1)  # +1 to avoid div by 0
+                    edge_score = <float>inter_comm_edges / <float>(node_degree_val + 1)  # +1 prevents div by 0
 
                     # Weighted combination: 60% community diversity, 40% edge connectivity
                     bridge_score = 0.6 * comm_diversity + 0.4 * edge_score
@@ -1898,7 +1914,12 @@ cdef CommunityResults* community_clustering(WeightedGraph* graph,
                         ret = igraph_vs_vector(&vs_bridges, &bridge_candidates)
                         if ret == IGRAPH_SUCCESS:
                             # Single call to igraph_betweenness for all candidates (most efficient)
-                            ret = igraph_betweenness(ig_graph, &betweenness_vec_bridges, vs_bridges, 0, ig_weights)
+                            ret = igraph_betweenness(ig_graph,
+                                                     ig_weights,
+                                                     &betweenness_vec_bridges,
+                                                     vs_bridges,
+                                                     <igraph_bool_t>0,
+                                                     <igraph_bool_t>False)
                             igraph_vs_destroy(&vs_bridges)
 
                             if ret == IGRAPH_SUCCESS:
@@ -1932,7 +1953,12 @@ cdef CommunityResults* community_clustering(WeightedGraph* graph,
                     if ret == IGRAPH_SUCCESS:
                         ret = igraph_vs_vector(&vs_bridges, &bridge_candidates)
                         if ret == IGRAPH_SUCCESS:
-                            ret = igraph_betweenness(ig_graph, &betweenness_vec_bridges, vs_bridges, 0, ig_weights)
+                            ret = igraph_betweenness(ig_graph,
+                                                     ig_weights,
+                                                     &betweenness_vec_bridges,
+                                                     vs_bridges,
+                                                     <igraph_bool_t>0,
+                                                     <igraph_bool_t>False)
                             igraph_vs_destroy(&vs_bridges)
 
                             if ret == IGRAPH_SUCCESS:

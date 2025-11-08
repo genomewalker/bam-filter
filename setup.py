@@ -295,6 +295,35 @@ ext_modules = [
         library_dirs=common_library_dirs,
         libraries=common_libraries,
     ),
+    Extension(
+        "bam_filter.processor_lca",
+        ["bam_filter/processor_lca.pyx"],
+        extra_compile_args=common_compile_args,
+        extra_link_args=common_link_args,
+        include_dirs=common_include_dirs,
+        library_dirs=common_library_dirs,
+        libraries=common_libraries,
+    ),
+    # LCA Stats - per-taxid statistics aggregation
+    Extension(
+        "bam_filter.processor_lca_stats",
+        ["bam_filter/processor_lca_stats.pyx"],
+        extra_compile_args=common_compile_args,
+        extra_link_args=common_link_args,
+        include_dirs=common_include_dirs,
+        library_dirs=common_library_dirs,
+        libraries=common_libraries,
+    ),
+    # LCA Stats V2 - simple, fast, correct version (DISABLED - merged into main)
+    # Extension(
+    #     "bam_filter.processor_lca_stats_v2",
+    #     ["bam_filter/processor_lca_stats_v2.pyx"],
+    #     extra_compile_args=common_compile_args,
+    #     extra_link_args=common_link_args,
+    #     include_dirs=common_include_dirs,
+    #     library_dirs=common_library_dirs,
+    #     libraries=common_libraries,
+    # ),
     # Tiny helper: read-name hashing (extracted from processor.pyx)
     Extension(
         "bam_filter.processor_hash",
@@ -409,12 +438,28 @@ ext_modules = [
     Extension(
         "bam_filter.taxonomy_db",
         ["bam_filter/taxonomy_db.pyx"],
-        extra_compile_args=common_compile_args + ["-std=c++17"],  # C++17 required for Arrow
+        extra_compile_args=common_compile_args
+        + ["-std=c++17"],  # C++17 required for Arrow
         extra_link_args=common_link_args,
         include_dirs=common_include_dirs,
         library_dirs=common_library_dirs,
-        libraries=common_libraries + ["arrow", "parquet", "duckdb"],  # Add Arrow, Parquet, and DuckDB
+        libraries=common_libraries
+        + ["arrow", "parquet", "duckdb"],  # Add Arrow, Parquet, and DuckDB
         language="c++",  # Use C++ compiler for Arrow API
+        define_macros=[
+            ("NPY_NO_DEPRECATED_API", "NPY_1_7_API_VERSION"),
+            ("_GNU_SOURCE", None),
+        ],
+    ),
+    # BAM to Parquet converter for metagenomic-scale data analysis with DuckDB
+    Extension(
+        "bam_filter.processor_parquet_writer",
+        ["bam_filter/processor_parquet_writer.pyx"],
+        extra_compile_args=common_compile_args,
+        extra_link_args=common_link_args,
+        include_dirs=common_include_dirs,
+        library_dirs=common_library_dirs,
+        libraries=common_libraries,
         define_macros=[
             ("NPY_NO_DEPRECATED_API", "NPY_1_7_API_VERSION"),
             ("_GNU_SOURCE", None),

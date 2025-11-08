@@ -1382,7 +1382,7 @@ cdef int build_igraph_direct_from_read_index(
             ret = igraph_vector_int_init(&comp_sizes, 0)
             if ret == 0:
                 comp_sizes_initialized = True
-                ret = igraph_clusters(ig_graph, &comp_membership, &comp_sizes, &n_components, IGRAPH_WEAK)
+                ret = igraph_connected_components(ig_graph, &comp_membership, &comp_sizes, &n_components, <igraph_connectedness_t>IGRAPH_WEAK)
                 if ret == 0:
                     for i_comp in range(igraph_vector_int_size(&comp_sizes)):
                         if get_vector_int_element_local(&comp_sizes, i_comp) == 1:
@@ -2571,7 +2571,7 @@ cdef int build_igraph_from_weighted_graph(
             # component sizes in csize and membership mapping. Use the older
             # `igraph_clusters` symbol which is available in the igraph C API
             # versions this code is built against.
-            ret = igraph_clusters(ig_graph, &membership, &csize, &no_components, IGRAPH_WEAK)
+            ret = igraph_connected_components(ig_graph, &membership, &csize, &no_components, <igraph_connectedness_t>IGRAPH_WEAK)
             if ret == IGRAPH_SUCCESS:
                 out_n_components[0] = no_components
 
@@ -2657,7 +2657,7 @@ cdef int extract_neighbors_from_igraph(WeightedGraph* graph, uint32_t num_refs,
 
     for ref_idx in range(num_refs):
         # Get neighbors for this node
-        ret = igraph_neighbors(ig, &neighbors_vec, ref_idx, IGRAPH_ALL)
+        ret = igraph_neighbors(ig, &neighbors_vec, ref_idx, <igraph_neimode_t>IGRAPH_ALL, <igraph_loops_t>IGRAPH_NO_LOOPS, <igraph_bool_t>False)
         if ret != IGRAPH_SUCCESS:
             igraph_vector_int_destroy(&neighbors_vec)
             # Free previously allocated arrays

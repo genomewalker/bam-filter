@@ -708,8 +708,7 @@ cdef int32_t lookup_taxid_duckdb(AccessionMap* amap, const char* accession) nogi
     return taxid
 
 
-cdef int64_t _process_duckdb_accession_filter(kh_str_t* hash_ptr, const char* parquet_cstr,
-                                               char** filter_cstrs, idx_t filter_count) nogil except -1:
+cdef int64_t _process_duckdb_accession_filter(kh_str_t* hash_ptr, const char* parquet_cstr, char** filter_cstrs, idx_t filter_count) nogil except -1:
     """
     Helper function to process DuckDB accession filtering in nogil context.
     Separated from main function to avoid stack overflow issues with large closures.
@@ -1062,7 +1061,7 @@ cdef AccessionMap* load_accession_map_from_parquet_arrow_cpp(str parquet_file, a
         raise MemoryError("Failed to allocate AccessionMap")
 
     amap.acc_hash = <void*>hash_ptr
-    amap.n_entries = <int32_t>row_count
+    amap.n_entries = <int32_t>hash_ptr.size  # Use actual hash table size, not row_count!
     # Initialize DuckDB fields to NULL (we don't use DuckDB backend here)
     amap.duckdb_db = NULL
     amap.duckdb_conn = NULL
@@ -1114,14 +1113,10 @@ convert_gz_to_parquet('input.gz', 'output.parquet')"
 
     if accession_filter and len(accession_filter) > 0:
         # Use batch query approach - single DuckDB query for all accessions
-        print(f"[TAXONOMY_DB] Loading {len(accession_filter):,} accessions using batch query...", flush=True)
         amap = load_accession_map_from_parquet_arrow_cpp(acc2taxid_file, accession_filter)
-        print(f"[TAXONOMY_DB] Batch query complete", flush=True)
     else:
         # No filter - this will load the full file (not recommended for large files)
-        print(f"[TAXONOMY_DB] Loading full accession map (no filter)...", flush=True)
         amap = load_accession_map_from_parquet_arrow_cpp(acc2taxid_file, None)
-        print(f"[TAXONOMY_DB] Full file loaded", flush=True)
 
     return AccessionMapping._from_c_struct(amap)
 
@@ -1130,7 +1125,7 @@ convert_gz_to_parquet('input.gz', 'output.parquet')"
 # LCA computation
 # =============================================================================
 
-cdef int32_t compute_lca_nogil(TaxonomyDB* db, int32_t taxid1, int32_t taxid2) nogil:
+cdef int32_t compute_lca_nogil(TaxonomyDB* db, int32_t taxid1, int32_t taxid2) noexcept nogil:
     """
     Compute the Lowest Common Ancestor of two taxids.
 
@@ -1214,7 +1209,15 @@ cdef int32_t compute_lca_nogil(TaxonomyDB* db, int32_t taxid1, int32_t taxid2) n
 
 cdef int32_t compute_lca_for_list_nogil(TaxonomyDB* db, int32_t[:] taxid_list) nogil:
     """
-    Compute LCA for a list of taxids.
+    Compute LCA for a list of taxids using ngsLCA.cpp algorithm.
+
+    This matches the ngsLCA.cpp do_lca() function which:
+    1. Walks each taxid to root, counting how many times each node is visited
+    2. Finds nodes visited by ALL taxids
+    3. Returns the deepest (most specific) such node
+
+    The iterative pairwise approach (LCA(LCA(a,b),c)) is INCORRECT for >2 taxids
+    because it loses lineage information after the first LCA computation.
 
     Parameters
     ----------
@@ -1234,15 +1237,214 @@ cdef int32_t compute_lca_for_list_nogil(TaxonomyDB* db, int32_t[:] taxid_list) n
     if n == 1:
         return taxid_list[0]
 
-    cdef int32_t lca = taxid_list[0]
-    cdef int32_t i
+    # Special case: 2 taxids can use the optimized pairwise algorithm
+    if n == 2:
+        return compute_lca_nogil(db, taxid_list[0], taxid_list[1])
 
-    for i in range(1, n):
-        lca = compute_lca_nogil(db, lca, taxid_list[i])
-        if lca < 0:
+    # For >2 taxids, use the ngsLCA.cpp approach
+    # We need a hash map to count visits to each node
+    # Since we can't allocate hash maps easily in nogil, use a simple approach:
+    # allocate arrays for visited nodes and their counts
+
+    cdef int32_t i, j, taxa_idx, parent_taxid, current_taxid, idx, skip
+    cdef int32_t candidate_taxid, candidate_count, candidate_depth, candidate_idx
+    cdef int32_t best_lca = -1
+    cdef int32_t best_depth = -1
+    cdef int32_t max_nodes_per_path = 100  # Reasonable upper bound for taxonomy depth
+    cdef int32_t total_capacity = n * max_nodes_per_path
+
+    # Allocate arrays to store all visited nodes and their visit counts
+    cdef int32_t* all_visited = <int32_t*>malloc(total_capacity * sizeof(int32_t))
+    cdef int32_t visit_count = 0
+
+    if all_visited == NULL:
+        return -1
+
+    # Walk each taxid to root and record all nodes visited
+    for taxa_idx in range(n):
+        current_taxid = taxid_list[taxa_idx]
+
+        # Check if taxid is valid
+        if current_taxid < 0 or current_taxid > db.max_taxid:
+            free(all_visited)
             return -1
 
-    return lca
+        # Walk to root
+        while True:
+            # Record this node visit
+            if visit_count >= total_capacity:
+                free(all_visited)
+                return -1
+            all_visited[visit_count] = current_taxid
+            visit_count += 1
+
+            # Get parent
+            idx = db.taxid_to_idx[current_taxid]
+            if idx < 0:
+                free(all_visited)
+                return -1
+
+            parent_taxid = db.nodes[idx].parent_taxid
+
+            # Check if we reached root
+            if current_taxid == parent_taxid:
+                break
+
+            current_taxid = parent_taxid
+
+    # Now count how many times each unique taxid was visited
+    # Find taxids that were visited exactly n times (once per input taxid)
+
+    # For each unique taxid in our visit list
+    for i in range(visit_count):
+        candidate_taxid = all_visited[i]
+
+        # Skip if we've already processed this taxid
+        skip = 0
+        for j in range(i):
+            if all_visited[j] == candidate_taxid:
+                skip = 1
+                break
+        if skip:
+            continue
+
+        # Count how many times this taxid appears
+        candidate_count = 0
+        for j in range(visit_count):
+            if all_visited[j] == candidate_taxid:
+                candidate_count += 1
+
+        # If visited by all input taxids, it's a candidate LCA
+        if candidate_count == n:
+            candidate_idx = db.taxid_to_idx[candidate_taxid]
+            if candidate_idx < 0:
+                continue
+            candidate_depth = db.nodes[candidate_idx].depth
+
+            # Keep the deepest (most specific) candidate
+            if candidate_depth > best_depth:
+                best_depth = candidate_depth
+                best_lca = candidate_taxid
+
+    free(all_visited)
+    return best_lca
+
+
+cdef int32_t compute_lca_for_array_nogil(TaxonomyDB* db, int32_t* taxids, int32_t n) noexcept nogil:
+    """
+    Compute LCA for an array of taxids (raw pointer version).
+
+    This is the same algorithm as compute_lca_for_list_nogil but accepts
+    a raw C pointer instead of a memoryview, for use in nogil contexts.
+
+    Matches ngsLCA.cpp do_lca() algorithm.
+
+    Parameters
+    ----------
+    db : TaxonomyDB*
+        Taxonomy database
+    taxids : int32_t*
+        Array of taxids
+    n : int32_t
+        Number of taxids in array
+
+    Returns
+    -------
+    int32_t
+        LCA taxid, or -1 if not found
+    """
+    if n == 0:
+        return -1
+    if n == 1:
+        return taxids[0]
+
+    # Special case: 2 taxids can use the optimized pairwise algorithm
+    if n == 2:
+        return compute_lca_nogil(db, taxids[0], taxids[1])
+
+    # For >2 taxids, use the ngsLCA.cpp approach
+    cdef int32_t i, j, taxa_idx, parent_taxid, current_taxid, idx, skip
+    cdef int32_t candidate_taxid, candidate_count, candidate_depth, candidate_idx
+    cdef int32_t best_lca = -1
+    cdef int32_t best_depth = -1
+    cdef int32_t max_nodes_per_path = 100  # Reasonable upper bound for taxonomy depth
+    cdef int32_t total_capacity = n * max_nodes_per_path
+
+    # Allocate arrays to store all visited nodes and their visit counts
+    cdef int32_t* all_visited = <int32_t*>malloc(total_capacity * sizeof(int32_t))
+    cdef int32_t visit_count = 0
+
+    if all_visited == NULL:
+        return -1
+
+    # Walk each taxid to root and record all nodes visited
+    for taxa_idx in range(n):
+        current_taxid = taxids[taxa_idx]
+
+        # Check if taxid is valid
+        if current_taxid < 0 or current_taxid > db.max_taxid:
+            free(all_visited)
+            return -1
+
+        # Walk to root
+        while True:
+            # Record this node visit
+            if visit_count >= total_capacity:
+                free(all_visited)
+                return -1
+            all_visited[visit_count] = current_taxid
+            visit_count += 1
+
+            # Get parent
+            idx = db.taxid_to_idx[current_taxid]
+            if idx < 0:
+                free(all_visited)
+                return -1
+
+            parent_taxid = db.nodes[idx].parent_taxid
+
+            # Check if we reached root
+            if current_taxid == parent_taxid:
+                break
+
+            current_taxid = parent_taxid
+
+    # Now count how many times each unique taxid was visited
+    # Find taxids that were visited exactly n times (once per input taxid)
+
+    # For each unique taxid in our visit list
+    for i in range(visit_count):
+        candidate_taxid = all_visited[i]
+
+        # Skip if we've already processed this taxid
+        skip = 0
+        for j in range(i):
+            if all_visited[j] == candidate_taxid:
+                skip = 1
+                break
+        if skip:
+            continue
+
+        # Count how many times this taxid appears
+        candidate_count = 0
+        for j in range(visit_count):
+            if all_visited[j] == candidate_taxid:
+                candidate_count += 1
+
+        # If visited by all input taxids, it's a candidate LCA
+        if candidate_count == n:
+            candidate_idx = db.taxid_to_idx[candidate_taxid]
+            if candidate_idx < 0:
+                continue
+            candidate_depth = db.nodes[candidate_idx].depth
+
+            # Keep the deepest (most specific) candidate
+            if candidate_depth > best_depth:
+                best_depth = candidate_depth
+                best_lca = candidate_taxid
+
+    free(all_visited)
+    return best_lca
 
 
 # =============================================================================
@@ -1284,23 +1486,28 @@ cdef int build_lineage_string_nogil(TaxonomyDB* db, int32_t taxid, char* buffer,
         buffer[0] = 0
         return 0
 
-    # Rank ID constants (from RANK_TO_ID mapping)
-    cdef int32_t RANK_SUPERKINGDOM = 24  # domain
-    cdef int32_t RANK_PHYLUM = 22
-    cdef int32_t RANK_CLASS = 21
-    cdef int32_t RANK_ORDER = 20
-    cdef int32_t RANK_FAMILY = 19
-    cdef int32_t RANK_GENUS = 6
-    cdef int32_t RANK_SPECIES = 1
+    # Rank ID constants (must match RANK_TO_ID mapping above)
+    cdef int32_t RANK_SUBSPECIES   = 1
+    cdef int32_t RANK_SPECIES      = 2
+    cdef int32_t RANK_GENUS        = 6
+    cdef int32_t RANK_FAMILY       = 8
+    cdef int32_t RANK_ORDER        = 13
+    cdef int32_t RANK_CLASS        = 17
+    cdef int32_t RANK_PHYLUM       = 20
+    cdef int32_t RANK_SUPERKINGDOM = 24
+    cdef int32_t RANK_DOMAIN       = 25
 
     # Store found ranks
     cdef const char* domain_name = NULL
+    cdef const char* lineage_name = NULL
+    cdef const char* kingdom_name = NULL
     cdef const char* phylum_name = NULL
     cdef const char* class_name = NULL
     cdef const char* order_name = NULL
     cdef const char* family_name = NULL
     cdef const char* genus_name = NULL
     cdef const char* species_name = NULL
+    cdef const char* subspecies_name = NULL
 
     # Walk up the taxonomy tree
     cdef int32_t current_idx = idx
@@ -1315,8 +1522,13 @@ cdef int build_lineage_string_nogil(TaxonomyDB* db, int32_t taxid, char* buffer,
         if db.nodes[current_idx].name_offset >= 0:
             name_ptr = db.names_buffer + db.nodes[current_idx].name_offset
 
-            if rank_id == RANK_SUPERKINGDOM and domain_name == NULL:
+            # Treat either 'domain' or 'superkingdom' as top-level
+            if (rank_id == RANK_SUPERKINGDOM or rank_id == RANK_DOMAIN) and domain_name == NULL:
                 domain_name = name_ptr
+            elif rank_id == 26 and lineage_name == NULL:  # 'clade' / 'lineage'
+                lineage_name = name_ptr
+            elif rank_id == 23 and kingdom_name == NULL:  # 'kingdom'
+                kingdom_name = name_ptr
             elif rank_id == RANK_PHYLUM and phylum_name == NULL:
                 phylum_name = name_ptr
             elif rank_id == RANK_CLASS and class_name == NULL:
@@ -1329,6 +1541,8 @@ cdef int build_lineage_string_nogil(TaxonomyDB* db, int32_t taxid, char* buffer,
                 genus_name = name_ptr
             elif rank_id == RANK_SPECIES and species_name == NULL:
                 species_name = name_ptr
+            elif rank_id == RANK_SUBSPECIES and subspecies_name == NULL:
+                subspecies_name = name_ptr
 
         # Move to parent
         if db.nodes[current_idx].taxid == db.nodes[current_idx].parent_taxid:
@@ -1345,10 +1559,29 @@ cdef int build_lineage_string_nogil(TaxonomyDB* db, int32_t taxid, char* buffer,
     cdef int32_t remaining = buffer_size - 1  # Reserve space for null terminator
     cdef int32_t written
 
-    # Helper macro to append rank
-    # Format: "d__Name"
+    # Emit lineage names as-is from the database, in canonical rank order
     if domain_name != NULL and remaining > 4:
-        written = snprintf(buffer + pos, remaining, "d__%s", domain_name)
+        written = snprintf(buffer + pos, remaining, "%s", domain_name)
+        if written > 0 and written < remaining:
+            pos += written
+            remaining -= written
+
+    if lineage_name != NULL and remaining > 4:
+        if pos > 0:
+            buffer[pos] = 59  # ';'
+            pos += 1
+            remaining -= 1
+        written = snprintf(buffer + pos, remaining, "%s", lineage_name)
+        if written > 0 and written < remaining:
+            pos += written
+            remaining -= written
+
+    if kingdom_name != NULL and remaining > 4:
+        if pos > 0:
+            buffer[pos] = 59  # ';'
+            pos += 1
+            remaining -= 1
+        written = snprintf(buffer + pos, remaining, "%s", kingdom_name)
         if written > 0 and written < remaining:
             pos += written
             remaining -= written
@@ -1358,7 +1591,7 @@ cdef int build_lineage_string_nogil(TaxonomyDB* db, int32_t taxid, char* buffer,
             buffer[pos] = 59  # ';'
             pos += 1
             remaining -= 1
-        written = snprintf(buffer + pos, remaining, "p__%s", phylum_name)
+        written = snprintf(buffer + pos, remaining, "%s", phylum_name)
         if written > 0 and written < remaining:
             pos += written
             remaining -= written
@@ -1368,7 +1601,7 @@ cdef int build_lineage_string_nogil(TaxonomyDB* db, int32_t taxid, char* buffer,
             buffer[pos] = 59  # ';'
             pos += 1
             remaining -= 1
-        written = snprintf(buffer + pos, remaining, "c__%s", class_name)
+        written = snprintf(buffer + pos, remaining, "%s", class_name)
         if written > 0 and written < remaining:
             pos += written
             remaining -= written
@@ -1378,7 +1611,7 @@ cdef int build_lineage_string_nogil(TaxonomyDB* db, int32_t taxid, char* buffer,
             buffer[pos] = 59  # ';'
             pos += 1
             remaining -= 1
-        written = snprintf(buffer + pos, remaining, "o__%s", order_name)
+        written = snprintf(buffer + pos, remaining, "%s", order_name)
         if written > 0 and written < remaining:
             pos += written
             remaining -= written
@@ -1388,7 +1621,7 @@ cdef int build_lineage_string_nogil(TaxonomyDB* db, int32_t taxid, char* buffer,
             buffer[pos] = 59  # ';'
             pos += 1
             remaining -= 1
-        written = snprintf(buffer + pos, remaining, "f__%s", family_name)
+        written = snprintf(buffer + pos, remaining, "%s", family_name)
         if written > 0 and written < remaining:
             pos += written
             remaining -= written
@@ -1398,7 +1631,7 @@ cdef int build_lineage_string_nogil(TaxonomyDB* db, int32_t taxid, char* buffer,
             buffer[pos] = 59  # ';'
             pos += 1
             remaining -= 1
-        written = snprintf(buffer + pos, remaining, "g__%s", genus_name)
+        written = snprintf(buffer + pos, remaining, "%s", genus_name)
         if written > 0 and written < remaining:
             pos += written
             remaining -= written
@@ -1408,7 +1641,17 @@ cdef int build_lineage_string_nogil(TaxonomyDB* db, int32_t taxid, char* buffer,
             buffer[pos] = 59  # ';'
             pos += 1
             remaining -= 1
-        written = snprintf(buffer + pos, remaining, "s__%s", species_name)
+        written = snprintf(buffer + pos, remaining, "%s", species_name)
+        if written > 0 and written < remaining:
+            pos += written
+            remaining -= written
+
+    if subspecies_name != NULL and remaining > 4:
+        if pos > 0:
+            buffer[pos] = 59  # ';'
+            pos += 1
+            remaining -= 1
+        written = snprintf(buffer + pos, remaining, "%s", subspecies_name)
         if written > 0 and written < remaining:
             pos += written
             remaining -= written

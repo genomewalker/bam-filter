@@ -4,7 +4,7 @@ channels:
   - bioconda
   - defaults
 dependencies:
-  - python>=3.9,<3.10
+  - python>=3.12,<3.13
   - pip
   - scikit-build-core>=0.9
   - setuptools>=69
@@ -14,9 +14,11 @@ dependencies:
   - cxx-compiler
   - pkg-config
   - htslib
+  - zlib
   - igraph
   - arrow-cpp
   - duckdb
+  - libduckdb-devel
   - pytest
   - pytest-cov
   - pip:

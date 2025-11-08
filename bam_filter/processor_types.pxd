@@ -188,25 +188,29 @@ cdef extern from "htslib/sam.h" nogil:
 
     # BAM object management
     bam1_t* bam_init1()
-    void bam_destroy1(bam1_t* b)
+    void bam_destroy1(bam1_t* b) nogil
     bam1_t* bam_dup1(bam1_t* src)
 
     # BAM data access
     char* bam_get_qname(bam1_t* b)
+    uint8_t* bam_get_seq(bam1_t* b)
+    uint8_t* bam_get_qual(bam1_t* b)
+    uint32_t* bam_get_cigar(bam1_t* b)
     uint8_t* bam_aux_get(bam1_t* b, const char* tag)
+    uint8_t* bam_get_aux(bam1_t* b)
     int bam_aux2i(const uint8_t* s)
     int bam_aux_del(bam1_t* b, uint8_t* s)
     int bam_aux_append(bam1_t* b, const char* tag, char type, int len, const uint8_t* data)
 
     # Index operations
-    hts_idx_t* sam_index_load(samFile* fp, const char* fn)
-    void hts_idx_destroy(hts_idx_t* idx)
-    int hts_idx_get_stat(hts_idx_t* idx, int tid, uint64_t* mapped, uint64_t* unmapped)
+    hts_idx_t* sam_index_load(samFile* fp, const char* fn) nogil
+    void hts_idx_destroy(hts_idx_t* idx) nogil
+    int hts_idx_get_stat(hts_idx_t* idx, int tid, uint64_t* mapped, uint64_t* unmapped) nogil
 
     # Iterators
-    hts_itr_t* sam_itr_queryi(const hts_idx_t* idx, int tid, int beg, int end)
-    int sam_itr_next(samFile* fp, hts_itr_t* iter, bam1_t* b)
-    void hts_itr_destroy(hts_itr_t* iter)
+    hts_itr_t* sam_itr_queryi(const hts_idx_t* idx, int tid, int beg, int end) nogil
+    int sam_itr_next(samFile* fp, hts_itr_t* iter, bam1_t* b) nogil
+    void hts_itr_destroy(hts_itr_t* iter) nogil
     int32_t sam_hdr_name2tid(sam_hdr_t* header, const char* name)
 
     # Threads

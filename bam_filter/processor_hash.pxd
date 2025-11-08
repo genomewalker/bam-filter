@@ -24,6 +24,8 @@ cdef extern from "seqid_khash.h":
 
     ctypedef struct kh_seqid_map_t:
         pass
+    ctypedef struct kh_seqid_name_map_t:
+        pass
 
     kh_seqid_map_t* kh_init_seqid_map() nogil
     void kh_destroy_seqid_map(kh_seqid_map_t*) nogil
@@ -33,6 +35,15 @@ cdef extern from "seqid_khash.h":
     int kh_exist_seqid_map(kh_seqid_map_t*, khint_t) nogil
     int* kh_val_seqid_map_wrap(kh_seqid_map_t*, khint_t) nogil
     khint_t kh_size(kh_seqid_map_t*) nogil
+
+    # name map (hash -> char*)
+    kh_seqid_name_map_t* kh_init_seqid_name_map() nogil
+    void kh_destroy_seqid_name_map(kh_seqid_name_map_t*) nogil
+    khint_t kh_put_seqid_name_map(kh_seqid_name_map_t*, khint64_t, int*) nogil
+    khint_t kh_get_seqid_name_map(kh_seqid_name_map_t*, khint64_t) nogil
+    khint_t kh_end_seqid_name_map(kh_seqid_name_map_t*) nogil
+    int kh_exist_seqid_name_map(kh_seqid_name_map_t*, khint_t) nogil
+    char** kh_val_seqid_name_map_wrap(kh_seqid_name_map_t*, khint_t) nogil
 
 
 cdef extern from *:
@@ -44,6 +55,7 @@ cdef extern from *:
 
 cdef struct ThreadLocalHashMap:
     kh_seqid_map_t* hash_to_id_map
+    kh_seqid_name_map_t* hash_to_name_map
     uint32_t next_local_id
 
 cdef ThreadLocalHashMap* create_thread_local_hash_map() except NULL nogil

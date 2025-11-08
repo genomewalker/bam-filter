@@ -1,5 +1,6 @@
 # cython: language_level=3
-from libc.stdint cimport int32_t, int64_t
+from libc.stdint cimport int32_t, int64_t, uint32_t
+from bam_filter.processor_types cimport samFile, sam_hdr_t, hts_idx_t
 
 # RLE coverage data structures
 cdef struct RLEInterval:
@@ -12,6 +13,14 @@ cdef struct RLECoverage:
     int64_t n_intervals
     int64_t capacity
     int64_t ref_length
+
+cdef extern from "seqid_khash.h":
+    ctypedef struct kh_seqid_map_t
+
+cdef extern from "taxonomy_khash.h":
+    ctypedef uint32_t khint_t
+    ctypedef struct kh_str_t:
+        pass
 
 
 # RefStats structure (declared here so callers can pass pointers to C functions)
@@ -44,6 +53,8 @@ cdef struct RefStats:
     double gc_content_mean
     double gc_content_std
     double gc_content_total
+    double dust_mean
+    double dust_std
 
     # Coverage statistics
     int64_t bases_covered
@@ -117,3 +128,23 @@ cdef struct FilterConditions:
     bint enable_min_norm_entropy
     bint enable_max_norm_gini
 
+cdef void initialize_reference_stats(RefStats* stats, int64_t ref_length, int64_t bam_ref_length) noexcept nogil
+
+cdef int calculate_reference_stats(
+    samFile* htsfile,
+    sam_hdr_t* header,
+    hts_idx_t* idx,
+    int64_t tid,
+    int64_t num_alns,
+    RefStats* stats,
+    kh_seqid_map_t* unique_reads_map,
+    double min_read_ani_c,
+    int min_read_length_c,
+    int max_read_length_c,
+    int64_t scale,
+    int trim_ends,
+    int trim_min,
+    int trim_max,
+    bint verbose,
+    kh_str_t* trusted_reads_hash
+) nogil

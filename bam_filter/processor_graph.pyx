@@ -2396,7 +2396,7 @@ cdef WeightedGraph* analyze_reference_graph(MemoryPool* pool, ReferencePattern* 
         degree_ret = igraph_vector_int_init(&degree_vec, array_size)
         if degree_ret == IGRAPH_SUCCESS:
             degree_ret = igraph_degree(&ig_graph, &degree_vec, igraph_vss_all(),
-                                      IGRAPH_ALL, False)  # loops=False (don't count self-loops)
+                                      IGRAPH_ALL, IGRAPH_NO_LOOPS)  # don't count self-loops
             if degree_ret == IGRAPH_SUCCESS:
                 # Count connected vs isolated nodes
                 for ref_idx in range(array_size):

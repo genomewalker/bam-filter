@@ -3,7 +3,7 @@ import sys
 import gzip
 import os
 import shutil
-import pandas as pd
+# import pandas as pd
 from multiprocessing import Pool
 from bam_filter import logging as bf_logging
 from functools import partial
@@ -15,7 +15,6 @@ import time
 from itertools import chain
 import numpy as np
 from pathlib import Path
-import pysam
 import tempfile
 from difflib import get_close_matches
 from typing import Optional
@@ -579,7 +578,7 @@ defaults = {
     "prefix": None,
     "sort_memory": "1G",
     "reference_lengths": None,
-    "scale": 1e6,
+    "scale": 1_000_000,
     "chunk_size": None,
     "coverage_plots": None,
     "stats": None,
@@ -603,9 +602,10 @@ defaults = {
     "steplength_scheme": 3,
     "calculate_pmd": True,
     "library_type": "ds",
-    "rank_lca": "species",
+    "rank_lca": "genus",
     "lca_summary": None,
     "reference_stats_tsv": None,
+    "taxonomy_db": None,
     # Graph construction parameters (cluster-aware filtering always enabled)
     "graph_min_edge_weight": 0,  # Minimum edge weight (shared reads) to keep in graph (0=auto, -1=no filtering)
     # Community detection parameters
@@ -661,11 +661,11 @@ help_msg = {
     "names": "Names dmp file from taxonomy",
     "nodes": "Nodes dmp file from taxonomy",
     "acc2taxid": "acc2taxid file from taxonomy",
+    "taxonomy_db": "Directory with Parquet taxonomy database (created via filterBAM build-taxonomy, must include accession_map.parquet)",
     "rank_lca": "Rank to use for LCA calculation",
     "lca_summary": "Save a TSV file with the LCA summary",
     "lca_missing": "Save a TSV file with references with missing taxids",
-    "lca_stats": "A TSV file from the filter subcommand",
-    "custom": "Use custom taxdump files",
+    "lca_stats_flag": "Augment the LCA summary with full per-taxid quality metrics (same output file, more columns).",
     "version": "Print program version",
     # ✓ SYNCED: Updated EM algorithm help messages
     "max_em_iterations": "Maximum number of EM iterations",
@@ -906,6 +906,15 @@ def get_arguments(argv=None):
         allow_abbrev=False,
     )
 
+    # Create the parser for the to-parquet command with all parent parsers
+    parser_to_parquet = sub_parsers.add_parser(
+        "to-parquet",
+        help="Convert BAM to partitioned Parquet format for fast DuckDB queries",
+        parents=[parent_parser, common_required, common_optional],
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        allow_abbrev=False,
+    )
+
     # Reassign workflow: organize options by stage
     reassign_io_args = parser_reassign.add_argument_group("Input / Output")
     reassign_pmd_args = parser_reassign.add_argument_group("PMD & Library Type")
@@ -922,8 +931,23 @@ def get_arguments(argv=None):
     filter_required_args = parser_filter.add_argument_group("Filter required arguments")
     # filter_optional_args = parser_filter.add_argument_group("Filter optional arguments")
 
-    # lca_required_args = parser_lca.add_argument_group("LCA required arguments")
+    # For LCA, add --taxonomy-db to the existing "required arguments" group from parent
+    # Find the existing required arguments group
+    lca_required_args = None
+    for group in parser_lca._action_groups:
+        if group.title == "required arguments":
+            lca_required_args = group
+            break
+    if lca_required_args is None:
+        lca_required_args = parser_lca.add_argument_group("required arguments")
+
     lca_optional_args = parser_lca.add_argument_group("LCA optional arguments")
+
+    # To-parquet argument groups
+    parquet_required_args = parser_to_parquet.add_argument_group("required arguments")
+    parquet_output_args = parser_to_parquet.add_argument_group("output arguments")
+    parquet_format_args = parser_to_parquet.add_argument_group("format options")
+    parquet_filter_args = parser_to_parquet.add_argument_group("filtering arguments")
 
     # add subparser for filtering options:
     # reassign_args = parser.add_argument_group("reassign arguments")
@@ -1650,26 +1674,13 @@ def get_arguments(argv=None):
     #     help=help_msg["chunk_size"],
     # )
 
-    lca_optional_args.add_argument(
-        "--names",
-        metavar="FILE",
-        type=lambda x: is_valid_file(parser, x, "names"),
-        dest="names",
-        help=help_msg["names"],
-    )
-    lca_optional_args.add_argument(
-        "--nodes",
-        metavar="FILE",
-        type=lambda x: is_valid_file(parser, x, "nodes"),
-        dest="nodes",
-        help=help_msg["nodes"],
-    )
-    lca_optional_args.add_argument(
-        "--acc2taxid",
-        metavar="FILE",
-        type=lambda x: is_valid_file(parser, x, "acc2taxid"),
-        dest="acc2taxid",
-        help=help_msg["acc2taxid"],
+    lca_required_args.add_argument(
+        "--taxonomy-db",
+        metavar="DIR",
+        type=str,
+        dest="taxonomy_db",
+        required=True,
+        help=help_msg["taxonomy_db"],
     )
     lca_optional_args.add_argument(
         "--lca-rank",
@@ -1679,49 +1690,26 @@ def get_arguments(argv=None):
         dest="rank_lca",
         help=help_msg["rank_lca"],
     )
-    lca_optional_args.add_argument(
+    lca_required_args.add_argument(
         "--lca-summary",
         dest="lca_summary",
         metavar="FILE",
-        default=defaults["lca_summary"],
         type=str,
-        nargs="?",
-        const="",
         help=help_msg["lca_summary"],
     )
     lca_optional_args.add_argument(
-        "--scale",
-        type=lambda x: check_suffix(x, parser=parser, var="--scale"),
-        default=defaults["scale"],
-        dest="scale",
-        metavar="STR",
-        help=help_msg["scale"],
-    )
-    lca_optional_args.add_argument(
-        "-m",
-        "--sort-memory",
-        type=lambda x: check_suffix(x, parser=parser, var="--sort-memory"),
-        default=defaults["sort_memory"],
-        metavar="STR",
-        dest="sort_memory",
-        help=help_msg["sort_memory"],
-    )
-    lca_optional_args.add_argument(
-        "--custom",
-        dest="custom",
-        action="store_true",
-        help=help_msg["custom"],
+        "--lca-per-read",
+        dest="lca_per_read",
+        metavar="FILE",
+        default=None,
+        type=str,
+        help="Write per-read LCA assignments (TSV). Use .gz to compress (e.g., per-read.tsv.gz).",
     )
     lca_optional_args.add_argument(
         "--stats",
         dest="lca_stats",
-        default=defaults["stats"],
-        type=str,
-        metavar="FILE",
-        nargs="?",
-        const="",
-        required=False,
-        help=help_msg["lca_stats"],
+        action="store_true",
+        help=help_msg["lca_stats_flag"],
     )
 
     # Create the parser for the build-taxonomy command
@@ -1797,6 +1785,143 @@ def get_arguments(argv=None):
         help="List of taxids to precompute in LCA cache for O(1) queries. Optional.",
     )
 
+    # To-parquet arguments
+    parquet_output_args.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        type=str,
+        required=True,
+        metavar="DIR",
+        help="Output directory for Parquet files (will create partitioned structure)",
+    )
+
+    parquet_format_args.add_argument(
+        "--num-partitions",
+        dest="num_partitions",
+        type=int,
+        default=-1,
+        metavar="INT",
+        help="Number of hash-based partitions for alignments (default: auto)",
+    )
+
+    parquet_format_args.add_argument(
+        "--batch-size",
+        dest="batch_size",
+        type=int,
+        default=-1,
+        metavar="INT",
+        help="Number of alignments per batch for streaming (default: auto)",
+    )
+
+    parquet_format_args.add_argument(
+        "--compression",
+        dest="compression",
+        type=str,
+        choices=["snappy", "zstd", "gzip", "none"],
+        default="zstd",
+        metavar="CODEC",
+        help="Parquet compression codec: snappy (fast), zstd (balanced), gzip (max compression) (default: zstd)",
+    )
+
+    parquet_format_args.add_argument(
+        "--compression-level",
+        dest="compression_level",
+        type=int,
+        default=3,
+        metavar="INT",
+        help="Compression level for zstd (1-9, default: 3)",
+    )
+
+    parquet_format_args.add_argument(
+        "--include-read-names",
+        dest="include_read_names",
+        action="store_true",
+        default=True,
+        help="Include read names in output (default: enabled; disable with --no-read-names)",
+    )
+
+    parquet_format_args.add_argument(
+        "--no-read-names",
+        dest="include_read_names",
+        action="store_false",
+        help=argparse.SUPPRESS,
+    )
+
+    parquet_format_args.add_argument(
+        "--no-sequences",
+        dest="include_sequences",
+        action="store_false",
+        default=True,
+        help="Exclude sequences from output (default: sequences included)",
+    )
+
+    parquet_format_args.add_argument(
+        "--include-sequences",
+        dest="include_sequences",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+
+    parquet_format_args.add_argument(
+        "--include-sequence-text",
+        dest="include_sequence_text",
+        action="store_true",
+        default=False,
+        help="Also store plain-text sequences alongside the packed representation (default: disabled)",
+    )
+
+    parquet_format_args.add_argument(
+        "--no-sequence-text",
+        dest="include_sequence_text",
+        action="store_false",
+        help=argparse.SUPPRESS,
+    )
+
+    parquet_format_args.add_argument(
+        "--disable-pmd",
+        dest="calculate_pmd",
+        action="store_false",
+        default=True,
+        help="Disable PMD (Post-Mortem Damage) score calculation (enabled by default)",
+    )
+
+    parquet_filter_args.add_argument(
+        "--min-mapq",
+        dest="min_mapq",
+        type=int,
+        default=0,
+        metavar="INT",
+        help="Minimum mapping quality (default: 0, no filter)",
+    )
+
+    parquet_filter_args.add_argument(
+        "--min-read-length",
+        dest="min_read_length",
+        type=int,
+        default=0,
+        metavar="INT",
+        help="Minimum read length (default: 0)",
+    )
+
+    parquet_filter_args.add_argument(
+        "--max-read-length",
+        dest="max_read_length",
+        type=int,
+        default=2147483647,
+        metavar="INT",
+        help="Maximum read length (default: 2,147,483,647; effectively unlimited)",
+    )
+
+    parquet_filter_args.add_argument(
+        "--min-read-ani",
+        dest="min_read_ani",
+        type=float,
+        default=0.0,
+        metavar="FLOAT",
+        help="Minimum alignment identity percentage (default: 0.0)",
+    )
+
     if argv is None:
         argv = sys.argv[1:]
 
@@ -1849,31 +1974,19 @@ def suppress_stdout():
             yield (err, out)
 
 
-def applyParallel(dfGrouped, func, threads, parms):
-    p = Pool(threads)
-    func = partial(func, parms=parms)
-    ret_list = tqdm.tqdm(
-        p.map(func, [group for name, group in dfGrouped]),
-        total=len([group for name, group in dfGrouped]),
-    )
-    p.close()
-    p.join()
-    return pd.concat(ret_list)
-
-
 def fast_flatten(input_list):
     return list(chain.from_iterable(input_list))
 
 
-def concat_df(frames):
-    COLUMN_NAMES = frames[0].columns
-    df_dict = dict.fromkeys(COLUMN_NAMES, [])
-    for col in COLUMN_NAMES:
-        extracted = (frame[col] for frame in frames)
-        # Flatten and save to df_dict
-        df_dict[col] = fast_flatten(extracted)
-    df = pd.DataFrame.from_dict(df_dict)[COLUMN_NAMES]
-    return df
+# def concat_df(frames):
+#     COLUMN_NAMES = frames[0].columns
+#     df_dict = dict.fromkeys(COLUMN_NAMES, [])
+#     for col in COLUMN_NAMES:
+#         extracted = (frame[col] for frame in frames)
+#         # Flatten and save to df_dict
+#         df_dict[col] = fast_flatten(extracted)
+#     df = pd.DataFrame.from_dict(df_dict)[COLUMN_NAMES]
+#     return df
 
 
 def initializer(init_data):
