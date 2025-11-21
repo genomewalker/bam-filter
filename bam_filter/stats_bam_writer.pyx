@@ -13,7 +13,8 @@
 from libc.stdint cimport int32_t, int64_t, uint32_t, uint8_t, uint16_t
 from libc.stdlib cimport malloc, free
 
-from bam_filter.stats cimport RefStats, FilterConditions
+from bam_filter.stats cimport RefStats
+from bam_filter.generic_filters cimport GenericFilters, passes_generic_filters
 from bam_filter.processor cimport (
     min_int32,
     samFile,
@@ -70,37 +71,8 @@ cdef extern from "bam_filter/c_logging.h":
 # Use centralized declarations from processor_types.pxd for htslib types and functions
 
 
-cdef bint passes_filters(RefStats* stats, FilterConditions* filters) noexcept nogil:
-    """Check if reference passes all ENABLED filter conditions."""
-    cdef double cov_evenness_tmp
-
-    if filters.enable_min_coverage_mean and stats.mean_coverage < filters.min_coverage_mean:
-        return <bint>False
-
-    if filters.enable_min_avg_read_ani and stats.ani_mean < filters.min_avg_read_ani:
-        return <bint>False
-
-    if filters.enable_min_breadth and stats.breadth < filters.min_breadth:
-        return <bint>False
-
-    if filters.enable_min_expected_breadth_ratio and stats.breadth_exp_ratio < filters.min_expected_breadth_ratio:
-        return <bint>False
-
-    if filters.enable_min_coverage_evenness:
-        cov_evenness_tmp = <double>(stats.cov_evenness if stats.mean_coverage >= 1.0 else 1.0)
-        if cov_evenness_tmp < filters.min_coverage_evenness:
-            return <bint>False
-
-    if filters.enable_max_coeff_var and stats.c_v > filters.max_coeff_var:
-        return <bint>False
-
-    if filters.enable_min_norm_entropy and stats.norm_entropy < filters.min_norm_entropy:
-        return <bint>False
-
-    if filters.enable_max_norm_gini and stats.norm_gini > filters.max_norm_gini:
-        return <bint>False
-
-    return <bint>True
+# NOTE: passes_filters is now imported from generic_filters module
+# Old function removed - using passes_generic_filters instead
 
 
 # Small inline helpers to safely index C arrays in nogil code and avoid
@@ -126,7 +98,7 @@ cdef inline int64_t refstats_n_alns(RefStats* arr, int i) nogil:
 
 cdef ReferenceFilter* create_reference_filter(
     RefStats* global_ref_stats,
-    FilterConditions* filters,
+    GenericFilters* gfilters,
     int n_refs
 ) noexcept nogil:
     cdef ReferenceFilter* ref_filter = <ReferenceFilter*>malloc(<size_t>sizeof(ReferenceFilter))
@@ -148,13 +120,27 @@ cdef ReferenceFilter* create_reference_filter(
 
     cdef int32_t new_tid = 0
     cdef RefStats* stats_ptr
+    cdef int n_with_alns = 0
+    cdef int n_pass_filters = 0
     for i in range(n_refs):
         stats_ptr = refstats_ptr_at(global_ref_stats, i)
-        if refstats_n_alns(global_ref_stats, i) > 0 and passes_filters(stats_ptr, filters):
-            set_int32_at(tid_map, i, new_tid)
-            new_tid += 1
+        if refstats_n_alns(global_ref_stats, i) > 0:
+            n_with_alns += 1
+            if passes_generic_filters(stats_ptr, gfilters):
+                set_int32_at(tid_map, i, new_tid)
+                new_tid += 1
+                n_pass_filters += 1
 
     ref_filter.n_filtered_refs = new_tid
+    bf_nogil_logf_notime(NULL, "create_reference_filter: %d refs with alns, %d pass filters (gfilters=%p, n_filters=%d)\n",
+                         n_with_alns, n_pass_filters, <void*>gfilters, gfilters.n_filters if gfilters != NULL else -1)
+
+    # Print filter details
+    if gfilters != NULL:
+        for i in range(gfilters.n_filters):
+            bf_nogil_logf_notime(NULL, "Filter %d: col=%d active=%d range=[%.4f, %.4f]\n",
+                                 i, gfilters.filters[i].column_index, gfilters.filters[i].is_active,
+                                 gfilters.filters[i].min_value, gfilters.filters[i].max_value)
 
     if new_tid > 0:
         ref_filter.reverse_mapping = <int32_t*>malloc(<size_t>(new_tid * sizeof(int32_t)))

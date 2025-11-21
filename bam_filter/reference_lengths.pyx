@@ -32,6 +32,10 @@ from libc.string cimport strlen, strcpy, strcmp, memchr, memcpy, memmove, strstr
 from libc.stdint cimport int32_t, int64_t, uint8_t, uint16_t, uint32_t, uint64_t
 from libc.time cimport clock, CLOCKS_PER_SEC, clock_t
 
+# Import C logging functions
+cdef extern from "bam_filter/c_logging.h":
+    void bf_nogil_logf_verbose(int level, const char* tag, const char* fmt, ...) nogil
+
 # Fast zlib support
 cdef extern from "zlib.h":
     ctypedef struct gzFile_s
@@ -551,9 +555,9 @@ cdef void print_tsv_reference_stats(TSVReferenceMap* tsv_map) noexcept nogil:
                 min_length = tsv_map.entries[i].reference_length
             if tsv_map.entries[i].reference_length > max_length:
                 max_length = tsv_map.entries[i].reference_length
-    # Emit a concise summary to stderr (nogil-safe C-level I/O)
+    # Emit a concise summary using C logging (respects verbosity level)
     cdef double avg_length = <double>total_length / <double>tsv_map.entry_count
-    fprintf(stderr, "[TSV] Loaded %d references; total_length=%lld; min=%lld; max=%lld; avg=%.2f\n",
+    bf_nogil_logf_verbose(1, b"LCA", b"Loaded %d references; total_length=%lld; min=%lld; max=%lld; avg=%.2f\n",
         tsv_map.entry_count, total_length, min_length, max_length, avg_length)
 
 # ===============================================================================

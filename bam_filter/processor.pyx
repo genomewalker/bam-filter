@@ -293,7 +293,7 @@ cdef score_alignments(
     reference_lengths_tsv=None,
     reference_stats_tsv=None,
     min_read_count=1,
-    min_read_ani=90.0,
+    min_read_ani=0.0,
     min_read_length=30,
     max_read_length=10000,
     use_em=True,
@@ -874,7 +874,7 @@ cdef score_alignments(
                 raise MemoryError(f"Failed to create thread hash map {thread_idx}")
 
         # Process batches in parallel
-        _announce_stage("Phase 1: Alignment Processing", "Loading alignments, applying quality filters, and computing alignment scores")
+        _announce_stage("Alignment Processing", "Loading alignments, applying quality filters, and computing alignment scores")
         stage_timer = bf_monotonic_seconds()
         if verbose:
             _info("Processing batches")
@@ -963,7 +963,7 @@ cdef score_alignments(
             if verbose:
                 _info("Transferring alignments to memory pool")
 
-            _announce_stage("Phase 2: Memory Optimization", "Transferring filtered alignments to optimized memory structures")
+            _announce_stage("Memory Optimization", "Transferring filtered alignments to optimized memory structures")
             stage_timer = bf_monotonic_seconds()
             if populate_memory_pool_direct(memory_pool, processing_batches, batch_count, 
                                                              bam_header, num_threads_c) != 0:
@@ -987,7 +987,7 @@ cdef score_alignments(
             if verbose:
                 _info("Running EM algorithm")
 
-            _announce_stage("Phase 3: EM Optimization", "Running Expectation-Maximization algorithm with SQUAREM acceleration")
+            _announce_stage("EM Optimization", "Running Expectation-Maximization algorithm with SQUAREM acceleration")
             stage_timer = bf_monotonic_seconds()
             # Execute EM algorithm WITHOUT graph penalties
             if execute_em_algorithm(memory_pool, &em_config) != 0:
@@ -1003,7 +1003,7 @@ cdef score_alignments(
                 _info(f"EM converged after {memory_pool.iteration_count} iterations")
                 _info("Applying probability filtering")
 
-            _announce_stage("Phase 4: Confidence Filtering", "Removing low-confidence alignments based on posterior probabilities")
+            _announce_stage("Confidence Filtering", "Removing low-confidence alignments based on posterior probabilities")
             stage_timer = bf_monotonic_seconds()
             # Apply probability filtering (this removes low-probability alignments)
             if apply_probability_filtering(memory_pool, &em_config) != 0:
@@ -1093,7 +1093,7 @@ cdef score_alignments(
                         if verbose:
                             bf_logging.warn(f"GRAPH: Broken-stick selection failed; proceeding with threshold={graph_min_edge_weight_c}. Error: {e}")
 
-                _announce_stage("Phase 5: Connectivity Analysis", "Constructing reference connectivity graph and analyzing read categories")
+                _announce_stage("Connectivity Analysis", "Constructing reference connectivity graph and analyzing read categories")
                 stage_timer = bf_monotonic_seconds()
                 # Now run graph analysis which may build an igraph using the selected threshold
                 filtered_graph = analyze_reference_graph(memory_pool, pattern_data, em_config.minimum_read_coverage,
@@ -1111,7 +1111,7 @@ cdef score_alignments(
 
                 # Taxonomy-aware graph analysis (if databases provided)
                 if taxonomy_db is not None and taxonomy_accession_map is not None:
-                    _announce_stage("Phase 5b: Taxonomy Enrichment", "Enriching graph with taxonomic information")
+                    _announce_stage("Taxonomy Enrichment", "Enriching graph with taxonomic information")
                     import sys
                     sys.stdout.flush()
                     sys.stderr.flush()
@@ -1217,7 +1217,7 @@ cdef score_alignments(
                 # Alignments before filtering
                 alignments_before_filtering = memory_pool.alignment_count
             else:
-                _announce_stage_skip("Phase 5: Connectivity Analysis", "Graph analysis disabled")
+                _announce_stage_skip("Connectivity Analysis", "Graph analysis disabled")
                 # No graph/TSV requested: skip analysis and free pattern_data
                 filtered_graph = NULL
                 verbose_c = 1 if verbose else 0
@@ -1233,9 +1233,9 @@ cdef score_alignments(
             if clustering:
                 # Determine which algorithm will be used based on graph size
                 if filtered_graph and filtered_graph.num_nodes >= 10000:
-                    _announce_stage("Phase 6: Graph Filtering", "Applying cluster-aware refinement using Label Propagation Algorithm (fast, for large graphs)")
+                    _announce_stage("Graph Filtering", "Applying cluster-aware refinement using Label Propagation Algorithm (fast, for large graphs)")
                 else:
-                    _announce_stage("Phase 6: Graph Filtering", "Applying cluster-aware refinement using Community algorithm")
+                    _announce_stage("Graph Filtering", "Applying cluster-aware refinement using Community algorithm")
 
                 # Validate filtered_graph before proceeding
                 if not filtered_graph:
@@ -1413,7 +1413,7 @@ cdef score_alignments(
                                                     0, 0, 0,
                                                     0, aligns_filtered_information, 0)
             else:
-                _announce_stage_skip("Phase 6: Advanced Filtering", "Cluster-aware filtering disabled")
+                _announce_stage_skip("Advanced Filtering", "Cluster-aware filtering disabled")
                 # Clustering disabled: keep graph metrics (TSV) but skip any filtering steps.
                 # Ensure we free graph resources and pattern data allocated for analysis.
                 if filtered_graph:
@@ -1458,7 +1458,7 @@ cdef score_alignments(
                     _info("Writing output BAM")
                     
                 bam_write_threads = min_int32(num_threads_c, 4)
-                _announce_stage("Phase 7: Output Generation", "Writing filtered alignments to optimized BAM file")
+                _announce_stage("Output Generation", "Writing filtered alignments to optimized BAM file")
                 stage_timer = bf_monotonic_seconds()
                 if write_bam_with_filtered_header(memory_pool, bam_file_path, output_bam_path,
                                      bam_header, mapping, bam_write_threads) != 0:
@@ -1592,7 +1592,7 @@ def process_bam_with_em(
     min_read_count=1,
     min_read_length=30,
     max_read_length=10000,
-    min_read_ani=90.0,
+    min_read_ani=0.0,
 
     # EM algorithm parameters
     max_em_iterations=25,

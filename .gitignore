@@ -5,6 +5,12 @@ __pycache__/
 
 # C extensions
 *.so
+*.c
+*.cpp
+*.backup
+.nfs*
+*.pyx.*
+*.pxd.*
 
 # Distribution / packaging
 .Python
@@ -61,3 +67,7 @@ target/
 # pyenv python configuration file
 .python-version
 .vscode/
+
+old-files*/
+examples/
+.groupedtimelineinclude

@@ -51,7 +51,7 @@ def reassign_reads(
     library_type: str = "ds",
     # Read filtering parameters
     min_read_count: int = 1,
-    min_read_ani: float = 90.0,
+    min_read_ani: float = 0.0,
     min_read_length: int = 30,
     max_read_length: int = 10000,
     # EM algorithm parameters
@@ -133,7 +133,7 @@ def reassign_reads(
         Library type: "ds" (double-stranded) or "ss" (single-stranded)
     min_read_count : int, default=1
         Minimum reads per reference
-    min_read_ani : float, default=90.0
+    min_read_ani : float, default=0.0
         Minimum average nucleotide identity (%)
     min_read_length : int, default=30
         Minimum read length (bp)
@@ -447,7 +447,7 @@ def reassign(args):
         "calculate_pmd": not getattr(args, "disable_pmd", False),
         "library_type": getattr(args, "library_type", "ds"),
         "min_read_count": getattr(args, "min_read_count", 1),
-        "min_read_ani": getattr(args, "min_read_ani", 90.0),
+        "min_read_ani": getattr(args, "min_read_ani", 0.0),
         "min_read_length": getattr(args, "min_read_length", 30),
         "max_read_length": getattr(args, "max_read_length", 10000),
         "max_em_iterations": getattr(

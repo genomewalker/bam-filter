@@ -17,6 +17,8 @@ from libc.math cimport log, exp, sqrt, ceil
 from bam_filter.stats cimport RefStats, RLEInterval, RLECoverage
 from bam_filter.stats_helpers cimport compare_pairs, compare_int64
 
+# Mathematical constants
+cdef double LOG2E = 1.4426950408889634  # log2(e), for converting ln to log2
 
 cdef extern from "time.h":
     cdef struct timespec:
@@ -33,7 +35,7 @@ cdef extern from "bam_filter/c_logging.h":
 
 cdef inline double calculate_coverage_evenness_from_rle(
     int64_t ref_length,
-    int32_t* starts, int32_t* ends, int32_t* depths, int64_t n_intervals
+    int64_t* starts, int64_t* ends, int32_t* depths, int64_t n_intervals
 ) noexcept nogil:
     """
     Calculate coverage evenness from RLE coverage intervals.
@@ -55,7 +57,15 @@ cdef inline double calculate_coverage_evenness_from_rle(
 
     # Calculate mean and round (matches Python's np.rint(np.mean(coverage)))
     cdef double mean_coverage = <double>total_coverage / <double>ref_length
-    cdef int32_t C = <int32_t>(mean_coverage + (0.5 if mean_coverage >= 0 else -0.5))  # Symmetric rounding, matches np.rint()
+    # Clamp to int32_t range to prevent overflow
+    cdef double rounded = mean_coverage + (0.5 if mean_coverage >= 0 else -0.5)
+    cdef int32_t C
+    if rounded > 2147483647.0:
+        C = 2147483647  # INT32_MAX
+    elif rounded < -2147483648.0:
+        C = -2147483648  # INT32_MIN
+    else:
+        C = <int32_t>rounded
 
     # Step 2: Count positions and sum values <= C efficiently from RLE
     cdef int64_t n_leq_C = 0      # len(D2)
@@ -112,14 +122,21 @@ cdef inline double calculate_entropy(int32_t* counts, int64_t n_bins) nogil:
     return entropy
 
 
-cdef inline double calculate_entropy_smart(int32_t* counts, int64_t n_bins) nogil:
-    """Mathematically identical entropy, optimized for sparse histograms."""
+cdef inline double calculate_spatial_entropy(int32_t* counts, int64_t n_bins) nogil:
+    """Calculate spatial entropy: measures uniformity of covered position distribution.
+
+    This measures how evenly distributed covered positions are across the reference,
+    NOT the uniformity of coverage depths. Optimized for sparse histograms.
+
+    Low spatial entropy = positions clustered (pileup)
+    High spatial entropy = positions evenly spread
+    """
     cdef double entropy = 0.0
     cdef int64_t total = 0
     cdef int64_t i
     cdef double p
 
-    # Single pass: calculate total from non-zero bins only
+    # Calculate total from non-zero bins only
     for i in range(n_bins):
         total += counts[i]  # This includes zeros but they don't contribute
 
@@ -222,7 +239,7 @@ cdef inline double calculate_gini_smart(int32_t* counts, int64_t n_bins) nogil:
 
 cdef inline void get_tad_from_rle(
     int64_t ref_length,
-    int32_t* starts, int32_t* ends, int32_t* depths, int64_t n_intervals,
+    int64_t* starts, int64_t* ends, int32_t* depths, int64_t n_intervals,
     double* result_mean, int64_t* result_len,
     int trim_min=10, int trim_max=90
 ) noexcept nogil:
@@ -322,18 +339,26 @@ cdef void destroy_rle_coverage(RLECoverage* rle) noexcept nogil:
 
 cdef int add_coverage_interval(RLECoverage* rle, int64_t start, int64_t end, int32_t count) noexcept nogil:
     """Add a coverage interval to the RLE structure."""
+    cdef int64_t new_capacity  # Declare at function start
+    cdef RLEInterval* interval
+
     if rle == NULL or start >= end:
         return -1
 
     # Ensure we have capacity
     if rle.n_intervals >= rle.capacity:
-        rle.capacity *= 2
+        # Check for overflow before doubling (prevent wrapping)
+        new_capacity = rle.capacity * 2
+        if new_capacity < rle.capacity or new_capacity > 1000000000:
+            # Capacity overflow or unreasonably large allocation
+            return -1
+        rle.capacity = new_capacity
         rle.intervals = <RLEInterval*>realloc(rle.intervals, rle.capacity * sizeof(RLEInterval))
         if rle.intervals == NULL:
             return -1
 
     # Add the interval (merge later if needed)
-    cdef RLEInterval* interval = &rle.intervals[rle.n_intervals]
+    interval = &rle.intervals[rle.n_intervals]
     interval.start = start
     interval.end = end
     interval.count = count
@@ -386,8 +411,16 @@ cdef inline double calculate_norm_entropy_inline(int32_t* counts, int64_t n_bins
     return entropy_val / max_entropy
 
 
-cdef inline double calculate_norm_entropy_smart(int32_t* counts, int64_t n_bins) nogil:
-    """Mathematically identical normalized entropy, optimized for sparse data."""
+cdef inline double calculate_normalized_spatial_entropy(int32_t* counts, int64_t n_bins) nogil:
+    """Calculate normalized spatial entropy: measures spatial distribution uniformity [0,1].
+
+    Normalizes by the maximum achievable entropy given the constraints (total counts, n_bins),
+    NOT the theoretical maximum (log(n_bins)). This accounts for discrete distribution constraints.
+
+    Returns:
+        0.0 = Maximally clustered (pileup)
+        1.0 = Maximally uniform spatial distribution
+    """
     if n_bins <= 1:
         return 1.0
 
@@ -396,7 +429,7 @@ cdef inline double calculate_norm_entropy_smart(int32_t* counts, int64_t n_bins)
     cdef double p
     cdef int64_t i
 
-    # Single pass: calculate total and entropy from non-zero bins only
+    # Calculate total and entropy from non-zero bins only
     for i in range(n_bins):
         if counts[i] > 0:
             total += counts[i]
@@ -479,10 +512,13 @@ cdef inline double calculate_norm_gini_inline(int32_t* counts, int64_t n_bins) n
     free(even_counts)
 
     # Normalize: (actual - min) / (max - min)
-    if max_gini - min_gini == 0.0:
-        return 0.0
+    cdef double denominator = max_gini - min_gini
+    if denominator == 0.0:
+        # When max == min, all distributions have same Gini
+        # Return 0.0 (perfectly even) if gini_val matches, else 0.5 (neutral)
+        return 0.0 if abs(gini_val - min_gini) < 1e-10 else 0.5
 
-    return (gini_val - min_gini) / (max_gini - min_gini)
+    return (gini_val - min_gini) / denominator
 
 
 cdef inline double calculate_norm_gini_smart(int32_t* counts, int64_t n_bins) nogil:
@@ -512,6 +548,104 @@ cdef inline double calculate_norm_gini_smart(int32_t* counts, int64_t n_bins) no
     return (actual_gini - min_gini) / (max_gini - min_gini)
 
 
+cdef inline int64_t estimate_histogram_bins(
+    int64_t n_positions,
+    int64_t* interval_starts,
+    int64_t* interval_ends,
+    int64_t n_intervals,
+    double range_span
+) noexcept nogil:
+    """Estimate optimal number of histogram bins for spatial distribution analysis.
+
+    Uses adaptive binning strategy:
+    - Small datasets (n < 100): Sturges' rule (log2(n) + 1)
+    - Large datasets (n >= 100): min(Freedman-Diaconis, Sturges)
+
+    Freedman-Diaconis uses IQR for robustness to outliers.
+    Sturges is simpler and works well for smaller datasets.
+
+    Args:
+        n_positions: Total number of covered positions
+        interval_starts: RLE interval start positions
+        interval_ends: RLE interval end positions
+        n_intervals: Number of RLE intervals
+        range_span: Total range to bin over (e.g., genome length)
+
+    Returns:
+        Optimal number of bins (>= 1)
+    """
+    if n_positions <= 1:
+        return 1
+
+    cdef double log_count = log(<double>n_positions)
+    cdef int64_t q1_idx = n_positions // 4
+    cdef int64_t q3_idx = (3 * n_positions) // 4
+    cdef double pos_q1 = 0.0, pos_q3 = 0.0
+    cdef double pos_first = 0.0, pos_last = 0.0
+    cdef int64_t acc = 0, interval_len
+    cdef int64_t k
+    cdef double iqr, data_range, fd_bw, sturges_bw, bin_width
+    cdef int64_t n_bins
+
+    # Find Q1 position by scanning intervals
+    for k in range(n_intervals):
+        interval_len = interval_ends[k] - interval_starts[k]
+        if acc + interval_len > q1_idx:
+            pos_q1 = <double>(interval_starts[k] + (q1_idx - acc))
+            break
+        acc += interval_len
+
+    # Find Q3 position
+    acc = 0
+    for k in range(n_intervals):
+        interval_len = interval_ends[k] - interval_starts[k]
+        if acc + interval_len > q3_idx:
+            pos_q3 = <double>(interval_starts[k] + (q3_idx - acc))
+            break
+        acc += interval_len
+
+    iqr = pos_q3 - pos_q1
+
+    # Find first and last covered positions
+    for k in range(n_intervals):
+        interval_len = interval_ends[k] - interval_starts[k]
+        if interval_len > 0:
+            pos_first = <double>interval_starts[k]
+            break
+
+    for k in range(n_intervals):
+        interval_len = interval_ends[k] - interval_starts[k]
+        if interval_len > 0:
+            pos_last = <double>(interval_ends[k] - 1)
+
+    data_range = pos_last - pos_first
+
+    # Adaptive binning strategy
+    if n_positions < 100:
+        # Small datasets: use Sturges' rule
+        sturges_bw = data_range / (log_count * LOG2E + 1.0) if data_range > 0.0 else 0.0
+        bin_width = sturges_bw if sturges_bw > 0.0 else 0.0
+    else:
+        # Large datasets: use Freedman-Diaconis, fallback to Sturges
+        fd_bw = 2.0 * iqr * exp(-log_count / 3.0)
+        if fd_bw > 0.0:
+            sturges_bw = data_range / (log_count * LOG2E + 1.0) if data_range > 0.0 else 0.0
+            bin_width = fd_bw if (sturges_bw <= 0.0 or fd_bw < sturges_bw) else sturges_bw
+        else:
+            sturges_bw = data_range / (log_count * LOG2E + 1.0) if data_range > 0.0 else 0.0
+            bin_width = sturges_bw if sturges_bw > 0.0 else 0.0
+
+    # Convert bin width to bin count
+    if bin_width > 0.0:
+        n_bins = <int64_t>ceil(range_span / bin_width)
+    else:
+        # Fallback: use Sturges directly on total range
+        n_bins = <int64_t>(log_count * LOG2E + 1.0)
+
+    # Ensure at least 1 bin
+    return n_bins if n_bins >= 1 else 1
+
+
 cdef void calculate_rle_coverage_stats(RLECoverage* rle, RefStats* stats, int trim_min, int trim_max) noexcept nogil:
     """Accurate RLE coverage stats with interval merging and depth calculation."""
     # Instrumentation: measure phases within coverage stats
@@ -525,8 +659,8 @@ cdef void calculate_rle_coverage_stats(RLECoverage* rle, RefStats* stats, int tr
     cdef int64_t uncovered_bases, n_covered_positions, genome_length, n_bins_calc
     cdef int64_t pos_count, pos_idx, interval_pos, q1_idx, q3_idx, bin_idx, total
     cdef int64_t trimmed_count, trim_idx
-    cdef int32_t* starts = NULL
-    cdef int32_t* ends = NULL
+    cdef int64_t* starts = NULL
+    cdef int64_t* ends = NULL
     cdef int32_t* depths = NULL
     cdef int32_t* hist_counts = NULL
     cdef int64_t* events = NULL
@@ -572,8 +706,8 @@ cdef void calculate_rle_coverage_stats(RLECoverage* rle, RefStats* stats, int tr
         stats.mean_coverage_trunc = 0.0
         stats.mean_coverage_trunc_len = 0
         stats.n_bins = 0
-        stats.entropy = 0.0
-        stats.norm_entropy = 0.0
+        stats.spatial_entropy = 0.0
+        stats.norm_spatial_entropy = 0.0
         stats.gini = 0.0
         stats.norm_gini = 0.0
         # Ensure timing fields are zeroed when no intervals
@@ -602,7 +736,7 @@ cdef void calculate_rle_coverage_stats(RLECoverage* rle, RefStats* stats, int tr
         events[j*2] = iv.start
         events[j*2+1] = iv.count
         j += 1
-        events[j*2] = iv.end
+        events[j*2] = iv.endc
         events[j*2+1] = -iv.count
         j += 1
 
@@ -618,8 +752,8 @@ cdef void calculate_rle_coverage_stats(RLECoverage* rle, RefStats* stats, int tr
     n_intervals = 0
 
     # Pre-allocate arrays for RLE TAD calculation and histogram
-    starts = <int32_t*>malloc(n_events * sizeof(int32_t))
-    ends = <int32_t*>malloc(n_events * sizeof(int32_t))
+    starts = <int64_t*>malloc(n_events * sizeof(int64_t))
+    ends = <int64_t*>malloc(n_events * sizeof(int64_t))
     depths = <int32_t*>malloc(n_events * sizeof(int32_t))
     if starts == NULL or ends == NULL or depths == NULL:
         free(events)
@@ -640,9 +774,9 @@ cdef void calculate_rle_coverage_stats(RLECoverage* rle, RefStats* stats, int tr
                 total_coverage += curr_depth * cov_len
                 total_bases_covered += cov_len
                 # Fill RLE arrays for TAD
-                starts[rle_idx] = <int32_t>events[i*2];
-                ends[rle_idx] = <int32_t>events[(i+1)*2];
-                depths[rle_idx] = <int32_t>curr_depth;
+                starts[rle_idx] = events[i*2]
+                ends[rle_idx] = events[(i+1)*2]
+                depths[rle_idx] = <int32_t>curr_depth
                 rle_idx += 1;
             else:
                 if current_interval_start != -1:
@@ -739,208 +873,138 @@ cdef void calculate_rle_coverage_stats(RLECoverage* rle, RefStats* stats, int tr
         # Trimmed count (positions already lie within [0, genome_length])
         trimmed_count = n_covered_positions
 
-        if trimmed_count <= 1:
-            n_bins_calc = 1
-        else:
-            # Time the interquartile calculations
-            iq_start = bf_monotonic_seconds()
-
-            # Calculate quartile positions and ptp without allocating huge arrays
-            q1_idx = trimmed_count // 4
-            q3_idx = (3 * trimmed_count) // 4
-
-            # Initialize quartile position variables (declared at function top)
-            pos_q1 = 0.0
-            pos_q3 = 0.0
-            pos_first = 0.0
-            pos_last = 0.0
-            acc = 0
-            interval_len = 0
-
-            # Find q1 position by scanning intervals
-            for k in range(rle_idx):
-                interval_len = ends[k] - starts[k]
-                if acc + interval_len > q1_idx:
-                    pos_q1 = <double>(starts[k] + (q1_idx - acc))
-                    break
-                acc += interval_len
-
-            # Find q3 position
-            acc = 0
-            for k in range(rle_idx):
-                interval_len = ends[k] - starts[k]
-                if acc + interval_len > q3_idx:
-                    pos_q3 = <double>(starts[k] + (q3_idx - acc))
-                    break
-                acc += interval_len
-
-            iqr = pos_q3 - pos_q1
-
-            iq_end = bf_monotonic_seconds()
-
-            # first and last covered positions
-            acc = 0
-            for k in range(rle_idx):
-                interval_len = ends[k] - starts[k]
-                if interval_len > 0:
-                    pos_first = <double>starts[k]
-                    break
-
-            acc = 0
-            for k in range(rle_idx):
-                interval_len = ends[k] - starts[k]
-                if interval_len > 0:
-                    pos_last = <double>(ends[k] - 1)
-            trimmed_ptp = pos_last - pos_first
-
-
-            # Time the bin width calculation
-            bw_start = bf_monotonic_seconds()
-
-            # FD and Sturges rules (same logic as NumPy's _hist_bin_auto)
-            log_count = log(<double>trimmed_count)
-
-            if trimmed_count < 100:
-                sturges_bw = trimmed_ptp / (log_count * 1.4426950408889634 + 1.0) if trimmed_ptp > 0.0 else 0.0
-                bin_width = sturges_bw if sturges_bw > 0.0 else 0.0
-            else:
-                fd_bw = 2.0 * iqr * exp(-log_count / 3.0)
-                if fd_bw > 0.0:
-                    sturges_bw = trimmed_ptp / (log_count * 1.4426950408889634 + 1.0) if trimmed_ptp > 0.0 else 0.0
-                    bin_width = fd_bw if (sturges_bw <= 0.0 or fd_bw < sturges_bw) else sturges_bw
-                else:
-                    sturges_bw = trimmed_ptp / (log_count * 1.4426950408889634 + 1.0) if trimmed_ptp > 0.0 else 0.0
-                    bin_width = sturges_bw if sturges_bw > 0.0 else 0.0
-
-            bw_end = bf_monotonic_seconds()
-
-            data_ptp = last_edge - first_edge
-            if bin_width > 0.0:
-                n_bins_calc = <int64_t>ceil(data_ptp / bin_width)
-            else:
-                n_bins_calc = <int64_t>(log_count * 1.4426950408889634 + 1.0)
-
-            if n_bins_calc < 1:
-                n_bins_calc = 1
+        # Estimate optimal number of bins using adaptive strategy
+        n_bins_calc = estimate_histogram_bins(
+            trimmed_count,
+            starts,
+            ends,
+            rle_idx,
+            last_edge - first_edge
+        )
 
         # Build histogram with performance optimizations
-            hist_counts = <int32_t*>calloc(n_bins_calc, sizeof(int32_t))
-            if hist_counts != NULL:
-                data_range = last_edge - first_edge
-                bin_size = data_range / n_bins_calc if n_bins_calc > 0 else data_range
-
-                # OPTIMIZATION: Precompute inverse for multiplication instead of division
-                bin_size_inv = n_bins_calc / data_range if data_range > 0.0 else 0.0
-
-                # Time the histogram filling
-                fill_start = bf_monotonic_seconds()
-
-                for i in range(rle_idx):
-                    iv_start = starts[i]
-                    iv_end = ends[i]
-                    if iv_end <= iv_start:
-                        continue
-
-                    # OPTIMIZATION: Use multiplication instead of division for bin calculation
-                    start_bin = <int>(<double>iv_start * bin_size_inv)
-                    end_bin = <int>(<double>(iv_end - 1) * bin_size_inv)
-
-                    # Bounds checking
-                    if start_bin < 0:
-                        start_bin = 0
-                    elif start_bin >= n_bins_calc:
-                        start_bin = n_bins_calc - 1
-
-                    if end_bin < 0:
-                        end_bin = 0
-                    elif end_bin >= n_bins_calc:
-                        end_bin = n_bins_calc - 1
-
-                    if start_bin == end_bin:
-                        # OPTIMIZATION: Most common case for sparse data - single bin
-                        hist_counts[start_bin] += <int32_t>(iv_end - iv_start)
-                    else:
-                        # OPTIMIZATION: Simplified multi-bin calculation (pure C arithmetic)
-                        if bin_size_inv > 0.0:
-                            # First partial bin: compute boundary as double then cast
-                            bin_boundary_d = (<double>(start_bin + 1)) / bin_size_inv
-                            bin_boundary = <int64_t>bin_boundary_d
-                            add_count = bin_boundary - iv_start
-                            if add_count > 0:
-                                hist_counts[start_bin] += <int32_t>add_count
-
-                            # Full middle bins - simplified calculation using while loop to avoid Python range
-                            full_bin_length = <int64_t>(1.0 / bin_size_inv)
-                            b = start_bin + 1
-                            while b < end_bin:
-                                hist_counts[b] += <int32_t>full_bin_length
-                                b += 1
-
-                            # Last partial bin
-                            bin_boundary_d = (<double>end_bin) / bin_size_inv
-                            bin_boundary = <int64_t>bin_boundary_d
-                            add_count = iv_end - bin_boundary
-                            if add_count > 0:
-                                hist_counts[end_bin] += <int32_t>add_count
-                        else:
-                            # Fallback: if bin_size_inv is zero, attribute all to start_bin
-                            hist_counts[start_bin] += <int32_t>(iv_end - iv_start)
-
-                fill_end = bf_monotonic_seconds()
-
-                # Compute histogram summary (min, max, mean, sd, nonzero)
-                hist_max = -2147483648
-                hist_min = 2147483647
-                hist_nonzero = 0
-                hist_mean = 0.0
-                hist_sd = 0.0
-                hist_total = 0
-                hist_total_sq = 0.0
-                for i in range(n_bins_calc):
-                    v = hist_counts[i]
-                    if v > 0:
-                        hist_nonzero += 1
-                    if v > hist_max:
-                        hist_max = v
-                    if v < hist_min:
-                        hist_min = v
-                    hist_total += v
-                    hist_total_sq += (<double>v) * (<double>v)
-
-                if hist_min == 2147483647:
-                    hist_min = 0
-
-                if n_bins_calc > 0:
-                    hist_mean = <double>hist_total / <double>n_bins_calc
-                    if n_bins_calc > 1:
-                        var_h = (hist_total_sq - (<double>hist_total * <double>hist_total) / <double>n_bins_calc) / (<double>(n_bins_calc - 1))
-                        hist_sd = sqrt(var_h) if var_h > 0.0 else 0.0
-                    else:
-                        hist_sd = 0.0
-
-                # Calculate entropy and Gini (no per-phase timing/logging)
-                stats.entropy = calculate_entropy_smart(hist_counts, n_bins_calc)
-                stats.norm_entropy = calculate_norm_entropy_smart(hist_counts, n_bins_calc)
-                stats.gini = calculate_gini_smart(hist_counts, n_bins_calc)
-                stats.norm_gini = calculate_norm_gini_smart(hist_counts, n_bins_calc)
-                # Cache histogram summary into stats (so caller can aggregate/print summaries later)
-                stats.hist_min = hist_min
-                stats.hist_max = hist_max
-                stats.hist_nonzero = hist_nonzero
-                stats.hist_mean = hist_mean
-                stats.hist_sd = hist_sd
-
-                free(hist_counts)
+        hist_counts = <int32_t*>calloc(n_bins_calc, sizeof(int32_t))
+        if hist_counts != NULL:
+            data_range = last_edge - first_edge
+            # Guard both divisions: check n_bins_calc > 0 AND data_range > 0
+            if n_bins_calc > 0 and data_range > 0.0:
+                bin_size = data_range / n_bins_calc
+                # Precompute inverse for multiplication instead of division
+                bin_size_inv = n_bins_calc / data_range
             else:
-                # Memory allocation failed
-                stats.entropy = 0.0
-                stats.norm_entropy = 0.0
-                stats.gini = 0.0
-                stats.norm_gini = 0.0
+                # Degenerate case: use safe defaults
+                bin_size = max(data_range, 1.0)
+                bin_size_inv = 0.0
+
+            # Time the histogram filling
+            fill_start = bf_monotonic_seconds()
+
+            for i in range(rle_idx):
+                iv_start = starts[i]
+                iv_end = ends[i]
+                if iv_end <= iv_start:
+                    continue
+
+                # Use multiplication instead of division for bin calculation
+                start_bin = <int>(<double>iv_start * bin_size_inv)
+                end_bin = <int>(<double>(iv_end - 1) * bin_size_inv)
+
+                # Bounds checking
+                if start_bin < 0:
+                    start_bin = 0
+                elif start_bin >= n_bins_calc:
+                    start_bin = n_bins_calc - 1
+
+                if end_bin < 0:
+                    end_bin = 0
+                elif end_bin >= n_bins_calc:
+                    end_bin = n_bins_calc - 1
+
+                if start_bin == end_bin:
+                    # Most common case for sparse data - single bin
+                    hist_counts[start_bin] += <int32_t>(iv_end - iv_start)
+                else:
+                    # Simplified multi-bin calculation
+                    if bin_size_inv > 0.0:
+                        # First partial bin: compute boundary as double then cast
+                        bin_boundary_d = (<double>(start_bin + 1)) / bin_size_inv
+                        bin_boundary = <int64_t>bin_boundary_d
+                        add_count = bin_boundary - iv_start
+                        if add_count > 0:
+                            hist_counts[start_bin] += <int32_t>add_count
+
+                        # Full middle bins - simplified calculation using while loop to avoid Python range
+                        full_bin_length = <int64_t>(1.0 / bin_size_inv)
+                        b = start_bin + 1
+                        while b < end_bin:
+                            hist_counts[b] += <int32_t>full_bin_length
+                            b += 1
+
+                        # Last partial bin
+                        bin_boundary_d = (<double>end_bin) / bin_size_inv
+                        bin_boundary = <int64_t>bin_boundary_d
+                        add_count = iv_end - bin_boundary
+                        if add_count > 0:
+                            hist_counts[end_bin] += <int32_t>add_count
+                    else:
+                        # Fallback: if bin_size_inv is zero, attribute all to start_bin
+                        hist_counts[start_bin] += <int32_t>(iv_end - iv_start)
+
+            fill_end = bf_monotonic_seconds()
+
+            # Compute histogram summary (min, max, mean, sd, nonzero)
+            hist_max = -2147483648
+            hist_min = 2147483647
+            hist_nonzero = 0
+            hist_mean = 0.0
+            hist_sd = 0.0
+            hist_total = 0
+            hist_total_sq = 0.0
+            for i in range(n_bins_calc):
+                v = hist_counts[i]
+                if v > 0:
+                    hist_nonzero += 1
+                if v > hist_max:
+                    hist_max = v
+                if v < hist_min:
+                    hist_min = v
+                hist_total += v
+                hist_total_sq += (<double>v) * (<double>v)
+
+            if hist_min == 2147483647:
+                hist_min = 0
+
+            if n_bins_calc > 0:
+                hist_mean = <double>hist_total / <double>n_bins_calc
+                if n_bins_calc > 1:
+                    var_h = (hist_total_sq - (<double>hist_total * <double>hist_total) / <double>n_bins_calc) / (<double>(n_bins_calc - 1))
+                    hist_sd = sqrt(var_h) if var_h > 0.0 else 0.0
+                else:
+                    hist_sd = 0.0
+
+            # Calculate spatial entropy and Gini (no per-phase timing/logging)
+            stats.spatial_entropy = calculate_spatial_entropy(hist_counts, n_bins_calc)
+            stats.norm_spatial_entropy = calculate_normalized_spatial_entropy(hist_counts, n_bins_calc)
+            stats.gini = calculate_gini_smart(hist_counts, n_bins_calc)
+            stats.norm_gini = calculate_norm_gini_smart(hist_counts, n_bins_calc)
+            # Cache histogram summary into stats (so caller can aggregate/print summaries later)
+            stats.hist_min = hist_min
+            stats.hist_max = hist_max
+            stats.hist_nonzero = hist_nonzero
+            stats.hist_mean = hist_mean
+            stats.hist_sd = hist_sd
+
+            free(hist_counts)
+        else:
+            # Memory allocation failed
+            stats.spatial_entropy = 0.0
+            stats.norm_spatial_entropy = 0.0
+            stats.gini = 0.0
+            stats.norm_gini = 0.0
     else:
         # No covered positions
-        stats.entropy = 0.0
-        stats.norm_entropy = 0.0
+        stats.spatial_entropy = 0.0
+        stats.norm_spatial_entropy = 0.0
         stats.gini = 0.0
         stats.norm_gini = 0.0
 

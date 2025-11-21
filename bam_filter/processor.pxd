@@ -91,11 +91,11 @@ cdef struct MemoryPool:
     int64_t* reference_lengths
     uint32_t reference_count
 
-    # OPTIMIZED: Single unified buffer instead of separate arrays
+    # Single unified buffer instead of separate arrays
     double* unified_buffer
     size_t unified_buffer_size
 
-    # OPTIMIZED: Offsets into unified buffer
+    # Offsets into unified buffer
     size_t reference_weights_offset
     size_t temp_buffer_A_offset
     size_t temp_buffer_B_offset

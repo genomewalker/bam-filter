@@ -77,8 +77,10 @@ cdef struct RefStats:
     int64_t tax_abund_tad
 
     # Coverage distribution stats
-    double entropy
-    double norm_entropy
+    # Spatial entropy: measures uniformity of covered position distribution across reference
+    # (NOT depth distribution - measures how evenly spread coverage is spatially)
+    double spatial_entropy
+    double norm_spatial_entropy
     double gini
     double norm_gini
     int64_t n_bins
@@ -146,5 +148,5 @@ cdef int calculate_reference_stats(
     int trim_min,
     int trim_max,
     bint verbose,
-    kh_str_t* trusted_reads_hash
+    void* trusted_reads_hash_int
 ) nogil

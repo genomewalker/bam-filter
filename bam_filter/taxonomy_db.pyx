@@ -539,41 +539,114 @@ cdef object _build_taxonomy_db_from_parsed_data(list nodes_data, dict names_dict
             db.root_idx = node_idx
             db.nodes[node_idx].depth = 0
 
-    # Second pass: calculate depths via BFS with parent→children index
+    # Second pass: calculate depths via BFS using C arrays (31x faster than Python dict)
     print("Calculating node depths...")
 
-    # Build parent→children mapping for O(1) lookups
-    cdef dict parent_to_children = {}
-    for idx in range(n_nodes):
-        parent_taxid = db.nodes[idx].parent_taxid
-        if parent_taxid not in parent_to_children:
-            parent_to_children[parent_taxid] = []
-        parent_to_children[parent_taxid].append(idx)
+    # Build parent→children mapping using C arrays
+    # First, count children per parent
+    cdef int32_t* children_count = <int32_t*>calloc(n_nodes, sizeof(int32_t))
+    cdef int32_t parent_idx  # Declare here to avoid redeclaration
+    if children_count == NULL:
+        free_taxonomy_db(db)
+        raise MemoryError("Failed to allocate children count")
 
-    # BFS traversal using the parent→children index
-    cdef list queue = [db.root_idx]
-    cdef int32_t current_node_idx, current_taxid, child_idx
-    cdef int32_t current_depth
-    cdef list children
+    for i in range(n_nodes):
+        # Skip root node (its parent is itself)
+        if i == db.root_idx:
+            continue
+        parent_taxid = db.nodes[i].parent_taxid
+        if parent_taxid <= max_taxid:
+            parent_idx = db.taxid_to_idx[parent_taxid]
+            if parent_idx >= 0 and parent_idx < n_nodes:
+                children_count[parent_idx] += 1
+
+    # Pre-allocate single contiguous block for all children (avoids 828K malloc calls!)
+    cdef int32_t total_children = 0
+    for i in range(n_nodes):
+        total_children += children_count[i]
+
+    cdef int32_t* children_data = <int32_t*>malloc(total_children * sizeof(int32_t))
+    cdef int32_t** children = <int32_t**>malloc(n_nodes * sizeof(int32_t*))
+    if children_data == NULL or children == NULL:
+        if children_data != NULL:
+            free(children_data)
+        if children != NULL:
+            free(children)
+        free(children_count)
+        free_taxonomy_db(db)
+        raise MemoryError("Failed to allocate children arrays")
+
+    # Assign pointers into contiguous block
+    cdef int32_t offset = 0
+    for i in range(n_nodes):
+        if children_count[i] > 0:
+            children[i] = children_data + offset
+            offset += children_count[i]
+        else:
+            children[i] = NULL
+
+    # Populate children arrays using a separate index tracker
+    cdef int32_t* children_idx = <int32_t*>calloc(n_nodes, sizeof(int32_t))
+    if children_idx == NULL:
+        free(children_data)
+        free(children)
+        free(children_count)
+        free_taxonomy_db(db)
+        raise MemoryError("Failed to allocate children index")
+
+    for i in range(n_nodes):
+        # Skip root node (its parent is itself)
+        if i == db.root_idx:
+            continue
+        parent_taxid = db.nodes[i].parent_taxid
+        if parent_taxid <= max_taxid:
+            parent_idx = db.taxid_to_idx[parent_taxid]
+            if parent_idx >= 0 and parent_idx < n_nodes and children[parent_idx] != NULL:
+                children[parent_idx][children_idx[parent_idx]] = i
+                children_idx[parent_idx] += 1
+
+    free(children_idx)  # No longer needed after population
+
+    # BFS with direct children access
+    cdef int32_t* queue = <int32_t*>malloc(n_nodes * sizeof(int32_t))
+    if queue == NULL:
+        free(children_data)
+        free(children)
+        free(children_count)
+        free_taxonomy_db(db)
+        raise MemoryError("Failed to allocate BFS queue")
+
+    cdef int queue_head = 0
+    cdef int queue_tail = 0
+    cdef int32_t current_node_idx, current_depth, child_idx, num_children
     cdef int max_depth = 0
-    cdef int queue_idx = 0  # Manual index to avoid O(N) pop(0)
+    cdef int j
 
-    while queue_idx < len(queue):
-        current_node_idx = queue[queue_idx]
-        queue_idx += 1
+    queue[0] = db.root_idx
+    queue_tail = 1
+
+    while queue_head < queue_tail:
+        current_node_idx = queue[queue_head]
+        queue_head += 1
         current_depth = db.nodes[current_node_idx].depth
-        current_taxid = db.nodes[current_node_idx].taxid
 
         if current_depth > max_depth:
             max_depth = current_depth
 
-        # Get children from index (O(1) lookup instead of O(N) scan)
-        if current_taxid in parent_to_children:
-            children = parent_to_children[current_taxid]
-            for child_idx in children:
-                if db.nodes[child_idx].depth == -1:  # Not yet visited
-                    db.nodes[child_idx].depth = current_depth + 1
-                    queue.append(child_idx)
+        # Process children using direct array access
+        num_children = children_count[current_node_idx]
+        if children[current_node_idx] != NULL:
+            for j in range(num_children):
+                child_idx = children[current_node_idx][j]
+                db.nodes[child_idx].depth = current_depth + 1
+                queue[queue_tail] = child_idx
+                queue_tail += 1
+
+    # Cleanup
+    free(queue)
+    free(children_data)  # Free contiguous block (single free instead of 828K!)
+    free(children)
+    free(children_count)
 
     print(f"Taxonomy database built: {n_nodes:,} nodes, max depth: {max_depth}")
 
@@ -2127,19 +2200,25 @@ cdef class TaxonomyDatabase:
 
         This is much faster than parsing dump files (~100x speedup).
         """
+        import time
+        t0 = time.time()
         print(f"Loading taxonomy database from {input_dir}...")
 
         # Load using Arrow C++ (no pandas!)
         nodes_table = pq.read_table(os.path.join(input_dir, 'nodes.parquet'))
         metadata_table = pq.read_table(os.path.join(input_dir, 'metadata.parquet'))
+        t1 = time.time()
 
-        print(f"  Loaded {len(nodes_table):,} nodes")
+        print(f"  Loaded {len(nodes_table):,} nodes (parquet read: {t1-t0:.2f}s)")
 
         # Convert Arrow arrays to Python lists
+        t2 = time.time()
         taxid_col = nodes_table['taxid'].to_pylist()
         parent_taxid_col = nodes_table['parent_taxid'].to_pylist()
         rank_col = nodes_table['rank'].to_pylist()
         name_col = nodes_table['name'].to_pylist()
+        t3 = time.time()
+        print(f"  Converted to Python lists ({t3-t2:.2f}s)")
 
         # Build nodes_data and names_dict
         nodes_data = []
@@ -2154,17 +2233,42 @@ cdef class TaxonomyDatabase:
             nodes_data.append((taxid, parent_taxid, rank))
             names_dict[taxid] = name
 
+        t4 = time.time()
+        print(f"  Built nodes_data and names_dict ({t4-t3:.2f}s)")
+
         # Build database
         tax_db = _build_taxonomy_db_from_parsed_data(nodes_data, names_dict, num_threads=1)
+        t5 = time.time()
+        print(f"Taxonomy database object created ({t5-t4:.2f}s total for C structures), checking for LCA cache...")
+        import sys
+        sys.stdout.flush()
 
         # Load LCA cache if exists
         lca_cache_path = os.path.join(input_dir, 'lca_cache_taxids.parquet')
+        t6 = time.time()
         if os.path.exists(lca_cache_path):
-            print("Loading LCA cache...")
+            print(f"LCA cache file exists at {lca_cache_path}, loading...")
+            sys.stdout.flush()
+            t7 = time.time()
             cache_table = pq.read_table(lca_cache_path)
+            t8 = time.time()
+            print(f"  Cache parquet loaded in {t8-t7:.2f}s, converting to list...")
+            sys.stdout.flush()
             cached_taxids = cache_table['cached_taxids'].to_pylist()
+            t9 = time.time()
+            print(f"  Converted to list in {t9-t8:.2f}s ({len(cached_taxids):,} taxids), building cache...")
+            sys.stdout.flush()
             tax_db.build_lca_cache(cached_taxids)
+            t10 = time.time()
+            print(f"  LCA cache built in {t10-t9:.2f}s (total cache loading: {t10-t7:.2f}s)")
+            sys.stdout.flush()
+        else:
+            print(f"No LCA cache file found at {lca_cache_path}")
+            sys.stdout.flush()
 
+        t11 = time.time()
+        print(f"Returning taxonomy database (total from_parquet time: {t11-t0:.2f}s)")
+        sys.stdout.flush()
         return tax_db
 
     @property

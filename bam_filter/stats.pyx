@@ -76,6 +76,12 @@ from bam_filter.stats_bam_writer cimport (
     destroy_reference_filter,
     write_filtered_bam_streaming,
 )
+from bam_filter.generic_filters cimport (
+    GenericFilters,
+    create_generic_filters,
+    destroy_generic_filters,
+    add_filter,
+)
 from bam_filter.stats_rle cimport (
     initialize_rle_from_length,
     destroy_rle_coverage,
@@ -165,6 +171,13 @@ cdef extern from "taxonomy_khash.h":
         pass
     khint_t kh_get_str(const kh_str_t* h, const char* key) nogil
     khint_t kh_end(const kh_str_t* h) nogil
+
+cdef extern from "lca_stats_khash.h":
+    # Hash-based read hash → taxid hash (uint64_t → int32_t) - MEMORY EFFICIENT!
+    ctypedef struct kh_read_hash_to_taxid_t:
+        pass
+    khint_t kh_get_read_hash_to_taxid(const kh_read_hash_to_taxid_t* h, uint64_t key) nogil
+    khint_t kh_end_read_hash_to_taxid "kh_end" (const kh_read_hash_to_taxid_t* h) nogil
 
 # Import htslib types and functions from centralized header
 from bam_filter.processor_types cimport (
@@ -456,7 +469,7 @@ cdef int calculate_reference_stats(
     int trim_min,
     int trim_max,
     bint verbose,
-    kh_str_t* trusted_reads_hash
+    void* trusted_reads_hash_int
 ) nogil:
     """Compute detailed per-reference statistics from BAM alignments.
 
@@ -520,7 +533,9 @@ cdef int calculate_reference_stats(
     cdef int64_t capacity = max(num_alns, 1000)  # Better initial estimate
     cdef int32_t* read_lengths = <int32_t*>malloc(capacity * sizeof(int32_t))
     cdef double* ani_values = <double*>malloc(capacity * sizeof(double))
-    
+    cdef int32_t* new_read_lengths  # For safe realloc
+    cdef double* new_ani_values     # For safe realloc
+
     if read_lengths == NULL or ani_values == NULL:
         if read_lengths != NULL: free(read_lengths)
         if ani_values != NULL: free(ani_values)
@@ -549,7 +564,7 @@ cdef int calculate_reference_stats(
     cdef double gc_mean = 0.0, gc_M2 = 0.0
     cdef int64_t qaln_count = 0, as_count = 0, nm_count = 0, mapq_count = 0, gc_count = 0
     
-    # Main processing loop - SINGLE PASS
+    # Main processing loop
     cdef int ret = 0
     cdef int32_t read_length, gc_bases, nm_val, mapq_val
     cdef double ani, qaln_len, as_val, gc_percent, dust_val
@@ -571,7 +586,7 @@ cdef int calculate_reference_stats(
         if read_length < min_read_length_c or read_length > max_read_length_c:
             continue
         
-        # === SINGLE TAG PARSING PASS ===
+        # Parse alignment tags
         # Parse NM tag once
         nm_tag = bam_aux_get(b, b"NM")
         nm_val = bam_aux2i(nm_tag) if nm_tag != NULL else -1
@@ -599,7 +614,7 @@ cdef int calculate_reference_stats(
         # Get MAPQ once
         mapq_val = 255 if b.core.qual == 255 else b.core.qual
         
-        # === SINGLE SEQUENCE ANALYSIS PASS ===
+        # Analyze sequence data
         # Calculate GC content in one pass
         gc_bases = count_gc_bases(b)
         gc_percent = (<double>gc_bases / read_length) * 100.0
@@ -620,26 +635,35 @@ cdef int calculate_reference_stats(
         
         # Get read name once for unique tracking
         qname = bam_get_qname(b)
-        if trusted_reads_hash != NULL:
-            if kh_get_str(trusted_reads_hash, qname) == kh_end(trusted_reads_hash):
-                continue
+
+        # Hash the read name for both unique tracking AND trusted filtering
         key = fnv1a_hash_read_id(qname)
+
+        # Check if read is in trusted set (if filter is provided)
+        # Memory-efficient hash-based lookup (70% less memory than string-based!)
+        if trusted_reads_hash_int != NULL:
+            if kh_get_read_hash_to_taxid(<kh_read_hash_to_taxid_t*>trusted_reads_hash_int, <uint64_t>key) == kh_end_read_hash_to_taxid(<kh_read_hash_to_taxid_t*>trusted_reads_hash_int):
+                continue
+
         kh_put_seqid_map(unique_reads_map, key, &ret_val)
         
-        # === SINGLE PASS STATISTICS UPDATE ===
+        # Update statistics
         # Resize arrays if needed (rarely)
         if n_alns >= capacity:
             capacity *= 2
-            read_lengths = <int32_t*>realloc(read_lengths, capacity * sizeof(int32_t))
-            ani_values = <double*>realloc(ani_values, capacity * sizeof(double))
-            if read_lengths == NULL or ani_values == NULL:
-                # Cleanup on failure
-                if read_lengths != NULL: free(read_lengths)
-                if ani_values != NULL: free(ani_values)
+            # Use temporary pointers to preserve originals on realloc failure
+            new_read_lengths = <int32_t*>realloc(read_lengths, capacity * sizeof(int32_t))
+            new_ani_values = <double*>realloc(ani_values, capacity * sizeof(double))
+            if new_read_lengths == NULL or new_ani_values == NULL:
+                # Cleanup original pointers on failure
+                free(read_lengths)
+                free(ani_values)
                 destroy_rle_coverage(rle_coverage)
                 bam_destroy1(b)
                 hts_itr_destroy(iter)
                 return -1
+            read_lengths = new_read_lengths
+            ani_values = new_ani_values
         
         # Store values for later median/mode calculation
         read_lengths[n_alns] = read_length
@@ -701,7 +725,7 @@ cdef int calculate_reference_stats(
         gc_mean += delta / gc_count
         gc_M2 += delta * (gc_percent - gc_mean)
     
-    # === POST-PROCESSING (SINGLE PASS WHERE POSSIBLE) ===
+    # Post-processing and final calculations
     
     # Set basic counts
     stats.n_alns = n_alns
@@ -741,7 +765,7 @@ cdef int calculate_reference_stats(
     stats.mapq_std = sqrt(mapq_M2 / (mapq_count - 1)) if mapq_count > 1 else 0.0
     stats.gc_content_mean = gc_mean
     stats.gc_content_std = sqrt(gc_M2 / (gc_count - 1)) if gc_count > 1 else 0.0
-    stats.gc_content_total = (<double>total_gc_bases / total_read_length) * 100.0
+    stats.gc_content_total = ((<double>total_gc_bases / total_read_length) * 100.0) if total_read_length > 0 else 0.0
     if dust_count > 0:
         stats.dust_mean = dust_mean_acc
         stats.dust_std = sqrt(dust_M2 / (dust_count - 1)) if dust_count > 1 else 0.0
@@ -756,7 +780,8 @@ cdef int calculate_reference_stats(
     if n_alns % 2 == 1:
         stats.read_length_median = read_lengths[mid_idx]
     else:
-        stats.read_length_median = (read_lengths[mid_idx - 1] + read_lengths[mid_idx]) // 2
+        # Prevent int32_t overflow by promoting to int64_t before addition
+        stats.read_length_median = <int32_t>(((<int64_t>read_lengths[mid_idx - 1] + <int64_t>read_lengths[mid_idx]) // 2))
     stats.read_length_mode = mode_from_sorted(read_lengths, n_alns)
     
     qsort(ani_values, n_alns, sizeof(double), compare_double)
@@ -824,7 +849,7 @@ cdef int process_batches(
     const char* output_c,
     const char* filtered_output_c,
     const char* filtered_bam_c,
-    FilterConditions* filters
+    GenericFilters* gfilters
 ) nogil:
     
     # Declare all variables at the beginning
@@ -917,7 +942,7 @@ cdef int process_batches(
                 min_read_ani_c, min_read_length_c, max_read_length_c,
                 scale, trim_ends, trim_min, trim_max,
                 verbose,
-                NULL
+                NULL  # No trusted reads filter for regular stats
             )
             if ret != 0:
                 break
@@ -938,7 +963,7 @@ cdef int process_batches(
                 min_read_ani_c, min_read_length_c, max_read_length_c,
                 scale, trim_ends, trim_min, trim_max,
                 verbose,
-                NULL
+                NULL  # No trusted reads filter for regular stats
             )
 
         # After the parallel region, inspect batch error codes and report first error if any.
@@ -982,20 +1007,20 @@ cdef int process_batches(
                 stats_path = output_c if output_c != NULL else None
                 filtered_stats_path = filtered_output_c if filtered_output_c != NULL else None
                 filtered_bam_path = filtered_bam_c if filtered_bam_c != NULL else None
-                _announce_stage("Phase 4: Output Generation", "Writing statistics tables and optional filtered BAM")
+                _announce_stage("Output", "Writing statistics tables and optional filtered BAM")
                 bf_logging.summary("Stats output: %s", _format_path(stats_path))
                 bf_logging.summary("Filtered stats: %s", _format_path(filtered_stats_path))
                 bf_logging.summary("Filtered BAM: %s", _format_path(filtered_bam_path))
 
         ret = write_output_files_complete(output_c, filtered_output_c, global_ref_stats,
-                                          header, n_refs, filters)
+                                          header, n_refs, NULL, gfilters)
 
         # Write filtered BAM if requested
         if ret == 0 and filtered_bam_c != NULL:
             bf_nogil_logf_notime(STATS_TAG, "Creating filtered BAM: %s\n", filtered_bam_c)
-            
+
             # Create reference filter
-            ref_filter = create_reference_filter(global_ref_stats, filters, n_refs)
+            ref_filter = create_reference_filter(global_ref_stats, gfilters, n_refs)
             
             if ref_filter == NULL:
                 bf_nogil_logf_notime(STATS_TAG, "Failed to create reference filter\n")
@@ -1049,7 +1074,7 @@ cdef int process_batches(
 
         if stage_output_started:
             with gil:
-                _stage_duration("Phase 4: Output Generation", output_stage_start)
+                _stage_duration("Output", output_stage_start)
     
     # Cleanup
     # Safe final cleanup: pointers may have been freed earlier to reduce peak memory.
@@ -1087,7 +1112,7 @@ cdef int process_reference_batch(
     int trim_min,
     int trim_max,
     bint verbose,
-    kh_str_t* trusted_reads_hash
+    void* trusted_reads_hash_int
 ) nogil:
     """Process a single batch of references."""
     # htsfile is now passed in, already opened for this thread
@@ -1108,7 +1133,7 @@ cdef int process_reference_batch(
             min_read_ani_c, min_read_length_c, max_read_length_c,
             scale, trim_ends, trim_min, trim_max,
             verbose,
-            trusted_reads_hash
+            trusted_reads_hash_int
         )
 
         # Free unique_reads_map for this reference immediately after processing
@@ -1137,29 +1162,21 @@ def compute_bam_stats(
     bam_file,
     batch_size_param=100,
     verbose=True,
-    num_threads=1, 
+    num_threads=1,
     show_progress=True,
     min_read_length=0,
     max_read_length=0x7fffffff,
-    min_read_ani=90.0,
+    min_read_ani=0.0,
     min_read_count=1,
     output=None,
     filtered_output=None,
-    filtered_bam=None,  # NEW PARAMETER
+    filtered_bam=None,
     scale=1000000,
     trim_ends=0,
     trim_min=10,
     trim_max=90,
     reference_lengths_tsv=None,
-    # All filter conditions default to None (disabled)
-    filter_min_avg_read_ani=None,
-    filter_min_expected_breadth_ratio=None,
-    filter_min_breadth=None,
-    filter_min_coverage_evenness=None,
-    filter_max_coeff_var=None,
-    filter_min_coverage_mean=None,
-    filter_min_norm_entropy=None,
-    filter_max_norm_gini=None,
+    generic_filters=None,  # New: list of (column_index, min, max) tuples
     verbosity_level=None,
 ):
     """
@@ -1223,14 +1240,13 @@ def compute_bam_stats(
     filtered_display = _format_path(filtered_output)
     filtered_bam_display = _format_path(filtered_bam)
 
-    _announce_stage("Phase 1: Input Preparation", "Validating inputs, outputs, and filters")
+    _announce_stage("Input validation", "Validating inputs, outputs, and filters")
     bf_logging.summary("Input BAM: %s", bam_display)
     bf_logging.summary(
-        "Read filters: length %d-%d bp | ANI >= %.2f%% | min reads %d",
+        "Read filters: length %d-%d bp | ANI >= %.2f%%",
         min_read_length,
         max_read_length,
         min_read_ani,
-        min_read_count,
     )
     bf_logging.summary(
         "Output targets: stats=%s | filtered=%s | filtered BAM=%s",
@@ -1401,18 +1417,9 @@ def compute_bam_stats(
         return -1
 
     # Validate that filters are provided if filtered BAM is requested
-    if filtered_bam_c != NULL and not any([
-        filter_min_avg_read_ani is not None,
-        filter_min_expected_breadth_ratio is not None,
-        filter_min_breadth is not None,
-        filter_min_coverage_evenness is not None,
-        filter_max_coeff_var is not None,
-        filter_min_coverage_mean is not None,
-        filter_min_norm_entropy is not None,
-        filter_max_norm_gini is not None
-    ]):
-        bf_nogil_logf_notime(STATS_TAG, "filtered_bam output requires at least one statistical filter to be enabled\n")
-        bf_nogil_logf_notime(STATS_TAG, "  Available filters: filter_min_avg_read_ani, filter_min_breadth, filter_min_coverage_mean, etc.\n")
+    if filtered_bam_c != NULL and (generic_filters is None or len(generic_filters) == 0):
+        bf_nogil_logf_notime(STATS_TAG, "filtered_bam output requires at least one filter to be specified\n")
+        bf_nogil_logf_notime(STATS_TAG, "  Use --filter 'column:min:max' to specify filters\n")
         if tsv_map:
             with nogil:
                 free_tsv_reference_map(tsv_map)
@@ -1429,7 +1436,6 @@ def compute_bam_stats(
     cdef int c_num_threads = max(1, int(num_threads))
     if verbose:
         c_num_threads = 1  # Force single-threaded mode for timing
-    cdef int c_ref_min_read_count = max(1, int(min_read_count))
     cdef int c_min_read_length = max(0, int(min_read_length))
     cdef int c_max_read_length = min(0x7fffffff, max(c_min_read_length, int(max_read_length)))
     cdef double c_min_read_ani = max(0.0, min(100.0, float(min_read_ani)))
@@ -1437,47 +1443,35 @@ def compute_bam_stats(
     cdef int c_trim_ends = max(0, int(trim_ends))
     cdef int c_trim_min = max(0, min(100, int(trim_min)))
     cdef int c_trim_max = max(c_trim_min, min(100, int(trim_max)))
-    
-    # Set up filter conditions
-    cdef FilterConditions filters
+    cdef int c_ref_min_read_count = max(1, int(min_read_count))  # Minimum read count for including a reference
+
+    # Set up generic filters
+    cdef GenericFilters* gfilters = NULL
+    cdef int n_filters = 0
+
+    if generic_filters is not None and len(generic_filters) > 0:
+        n_filters = len(generic_filters)
+        gfilters = create_generic_filters(n_filters)
+        if gfilters == NULL:
+            raise MemoryError("Failed to allocate generic filters")
+
+        # Add each filter from the list
+        for col_idx, min_val, max_val in generic_filters:
+            if add_filter(gfilters, col_idx, min_val, max_val) != 0:
+                destroy_generic_filters(gfilters)
+                raise MemoryError("Failed to add filter")
 
     clock_gettime(CLOCK_MONOTONIC, &ts_end)
     elapsed = (ts_end.tv_sec - ts_start.tv_sec) + (ts_end.tv_nsec - ts_start.tv_nsec) / 1e9
     if verbose:
         bf_nogil_logf_notime(STATS_TAG, "Parameter validation: %.6f sec\n", elapsed)
 
-    _stage_duration("Phase 1: Input Preparation", stage_input_start)
+    _stage_duration("Input validation", stage_input_start)
 
-    _announce_stage("Phase 2: BAM Intake", "Opening BAM handles and scanning references")
+    _announce_stage("BAM processing", "Opening BAM handles and scanning references")
     stage_intake_start = bf_monotonic_seconds()
 
     clock_gettime(CLOCK_MONOTONIC, &ts_start)
-    filters.min_read_count = max(1, int(min_read_count))
-    
-    # Initialize all filters as disabled with safe default values
-    filters.enable_min_avg_read_ani = filter_min_avg_read_ani is not None
-    filters.min_avg_read_ani = max(0.0, min(100.0, float(filter_min_avg_read_ani))) if filter_min_avg_read_ani is not None else 0.0
-    
-    filters.enable_min_expected_breadth_ratio = filter_min_expected_breadth_ratio is not None
-    filters.min_expected_breadth_ratio = max(0.0, min(1.0, float(filter_min_expected_breadth_ratio))) if filter_min_expected_breadth_ratio is not None else 0.0
-    
-    filters.enable_min_breadth = filter_min_breadth is not None
-    filters.min_breadth = max(0.0, min(1.0, float(filter_min_breadth))) if filter_min_breadth is not None else 0.0
-    
-    filters.enable_min_coverage_evenness = filter_min_coverage_evenness is not None
-    filters.min_coverage_evenness = max(0.0, min(1.0, float(filter_min_coverage_evenness))) if filter_min_coverage_evenness is not None else 0.0
-    
-    filters.enable_max_coeff_var = filter_max_coeff_var is not None
-    filters.max_coeff_var = max(0.0, float(filter_max_coeff_var)) if filter_max_coeff_var is not None else float('inf')
-    
-    filters.enable_min_coverage_mean = filter_min_coverage_mean is not None
-    filters.min_coverage_mean = max(0.0, float(filter_min_coverage_mean)) if filter_min_coverage_mean is not None else 0.0
-    
-    filters.enable_min_norm_entropy = filter_min_norm_entropy is not None
-    filters.min_norm_entropy = max(0.0, min(1.0, float(filter_min_norm_entropy))) if filter_min_norm_entropy is not None else 0.0
-    
-    filters.enable_max_norm_gini = filter_max_norm_gini is not None
-    filters.max_norm_gini = max(0.0, min(1.0, float(filter_max_norm_gini))) if filter_max_norm_gini is not None else 1.0
     
     if verbose:
         bf_nogil_logf_notime(STATS_TAG, "Processing parameters:\n")
@@ -1814,9 +1808,9 @@ def compute_bam_stats(
         int(n_tids_to_process // n_batches) if n_batches > 0 else 0,
         c_num_threads,
     )
-    _stage_duration("Phase 2: BAM Intake", stage_intake_start)
+    _stage_duration("BAM processing", stage_intake_start)
 
-    _announce_stage("Phase 3: Statistic Aggregation", "Computing per-reference coverage and abundance metrics")
+    _announce_stage("Statistics calculation", "Computing per-reference coverage and abundance metrics")
     bf_logging.summary("Processing %d batches with %d threads", int(n_batches), c_num_threads)
     stage_processing_start = bf_monotonic_seconds()
 
@@ -1825,22 +1819,22 @@ def compute_bam_stats(
     bf_nogil_logf_notime(STATS_TAG, "Starting batch processing\n")
     ret = process_batches(
         thread_files,
-        bam_file_c, header, idx, tids_to_process, tid_align_counts, 
+        bam_file_c, header, idx, tids_to_process, tid_align_counts,
         ref_lengths_array, bam_ref_lengths_array,
         batch_starts, batch_ends, n_batches, c_num_threads,
         c_min_read_ani, c_min_read_length, c_max_read_length,
         c_scale, c_trim_ends, c_trim_min, c_trim_max,
-        verbose, show_progress, 
+        verbose, show_progress,
         output_c, filtered_output_c, filtered_bam_c,  # Pass filtered_bam_c
-        &filters
+        gfilters
     )
     clock_gettime(CLOCK_MONOTONIC, &ts_proc_end)
     proc_sec = <double>(ts_proc_end.tv_sec - ts_proc_start.tv_sec) + <double>(ts_proc_end.tv_nsec - ts_proc_start.tv_nsec) / 1e9
 
     bf_logging.summary("Batch processing wall time: %.2fs", proc_sec)
-    _stage_duration("Phase 3: Statistic Aggregation", stage_processing_start)
+    _stage_duration("Statistics calculation", stage_processing_start)
 
-    _announce_stage("Phase 5: Cleanup", "Releasing temporary buffers and closing file handles")
+    _announce_stage("Cleanup", "Releasing temporary buffers and closing file handles")
     stage_cleanup_start = bf_monotonic_seconds()
 
     # Cleanup
@@ -1850,6 +1844,10 @@ def compute_bam_stats(
     if tsv_map:
         with nogil:
             free_tsv_reference_map(tsv_map)
+
+    # Cleanup generic filters
+    if gfilters != NULL:
+        destroy_generic_filters(gfilters)
 
     free(batch_starts)
     free(batch_ends)
@@ -1868,7 +1866,7 @@ def compute_bam_stats(
     cdef double close_end = bf_monotonic_seconds()
     bf_log_step_duration_notime(STATS_TAG, "Close pre-opened handles", close_start, close_end)
 
-    _stage_duration("Phase 5: Cleanup", stage_cleanup_start)
+    _stage_duration("Cleanup", stage_cleanup_start)
 
     # Report results
     if ret == 0:

@@ -570,7 +570,7 @@ defaults = {
     "min_norm_entropy": 0,
     "min_norm_gini": 1.0,
     "min_avg_read_ani": 90.0,
-    "min_read_ani": 90.0,
+    "min_read_ani": 0.0,
     "min_breadth": 0,
     "min_coverage_evenness": 0,
     "min_coeff_var": float("inf"),
@@ -628,7 +628,7 @@ help_msg = {
     "trim_max": "Remove coverage that are above this percentile. Used for the Truncated Average Depth (TAD) calculation",
     "min_breadth": "Minimum breadth",
     "min_expected_breadth_ratio": "Minimum expected breadth ratio",
-    "min_norm_entropy": "Minimum normalized entropy",
+    "min_norm_spatial_entropy": "Minimum normalized spatial entropy (positional distribution uniformity)",
     "min_norm_gini": "Minimum normalized Gini coefficient",
     "min_read_ani": "Minimum read ANI to keep a read",
     "min_avg_read_ani": "Minimum average read ANI",
@@ -834,7 +834,7 @@ def get_arguments(argv=None):
     required = common_required.add_argument_group("required arguments")
     required.add_argument(
         "--bam",
-        required=True,
+        required=False,  # Made optional for commands like --list-columns
         dest="bam",
         type=lambda x: is_valid_file(parser, x, "bam"),
         help=help_msg["bam"],
@@ -1448,6 +1448,32 @@ def get_arguments(argv=None):
         default=90,
         help=help_msg["trim_max"],
     )
+    # Generic column-based filtering - replaces all individual filter arguments
+    filtering_filt_args.add_argument(
+        "-f",
+        "--filter",
+        type=str,
+        metavar="SPEC",
+        dest="filter_spec",
+        default=None,
+        help=(
+            "Generic column-based filtering. Format: 'column:min:max' where "
+            "min/max can be empty for unbounded. Multiple filters separated by commas. "
+            "Examples: "
+            "'read_ani_mean:90:' (>= 90), "
+            "'breadth::0.95' (<= 0.95), "
+            "'coverage_mean:5:1000' (between 5 and 1000). "
+            "Use --list-columns to see all filterable columns."
+        ),
+    )
+    filtering_filt_args.add_argument(
+        "--list-columns",
+        action="store_true",
+        dest="list_columns",
+        help="List all available filterable columns with their data types and exit",
+    )
+
+    # Keep read filtering arguments (these are read-level filters, not reference-level)
     filtering_filt_args.add_argument(
         "-A",
         "--min-read-ani",
@@ -1457,7 +1483,7 @@ def get_arguments(argv=None):
         metavar="FLOAT",
         default=defaults["min_read_ani"],
         dest="min_read_ani",
-        help=help_msg["min_read_ani"],
+        help="Minimum read ANI to include in statistics (read-level filter, not reference-level)",
     )
     filtering_filt_args.add_argument(
         "-l",
@@ -1470,7 +1496,7 @@ def get_arguments(argv=None):
         default=defaults["min_read_length"],
         metavar="INT",
         dest="min_read_length",
-        help=help_msg["min_read_length"],
+        help="Minimum read length to include in statistics (read-level filter, not reference-level)",
     )
     filtering_filt_args.add_argument(
         "-L",
@@ -1483,8 +1509,10 @@ def get_arguments(argv=None):
         default=defaults["max_read_length"],
         metavar="INT",
         dest="max_read_length",
-        help=help_msg["max_read_length"],
+        help="Maximum read length to include in statistics (read-level filter, not reference-level)",
     )
+
+    # Reference-level filter for minimum read count (commonly used, kept as shorthand)
     filtering_filt_args.add_argument(
         "-n",
         "--min-read-count",
@@ -1496,111 +1524,8 @@ def get_arguments(argv=None):
         default=defaults["min_read_count"],
         metavar="INT",
         dest="min_read_count",
-        help=help_msg["min_read_count"],
-    )
-    filtering_filt_args.add_argument(
-        "-b",
-        "--min-expected-breadth-ratio",
-        type=lambda x: float(
-            check_values(
-                x, minval=0, maxval=1, parser=parser, var="--min-expected-breadth-ratio"
-            )
-        ),
-        metavar="FLOAT",
-        default=defaults["min_expected_breadth_ratio"],
-        dest="min_expected_breadth_ratio",
-        help=help_msg["min_expected_breadth_ratio"],
-    )
-    filtering_filt_args.add_argument(
-        "-e",
-        "--min-normalized-entropy",
-        type=lambda x: check_values_auto(
-            x, minval=0, maxval=1, parser=parser, var="--min-normalized-entropy"
-        ),
-        default=defaults["min_norm_entropy"],
-        metavar="FLOAT",
-        dest="min_norm_entropy",
-        help=help_msg["min_norm_entropy"],
-    )
-    filtering_filt_args.add_argument(
-        "-g",
-        "--min-normalized-gini",
-        type=lambda x: check_values_auto(
-            x, minval=0, maxval=1, parser=parser, var="--min-normalized-gini"
-        ),
-        default=defaults["min_norm_gini"],
-        metavar="FLOAT",
-        dest="min_norm_gini",
-        help=help_msg["min_norm_gini"],
-    )
-    filtering_filt_args.add_argument(
-        "-B",
-        "--min-breadth",
-        type=lambda x: float(
-            check_values(x, minval=0, maxval=1, parser=parser, var="--min-breadth")
-        ),
-        default=defaults["min_breadth"],
-        metavar="FLOAT",
-        dest="min_breadth",
-        help=help_msg["min_breadth"],
-    )
-    filtering_filt_args.add_argument(
-        "-a",
-        "--min-avg-read-ani",
-        type=lambda x: float(
-            check_values(
-                x, minval=0, maxval=100, parser=parser, var="--min-avg-read-ani"
-            )
-        ),
-        metavar="FLOAT",
-        default=defaults["min_avg_read_ani"],
-        dest="min_avg_read_ani",
-        help=help_msg["min_avg_read_ani"],
-    )
-    filtering_filt_args.add_argument(
-        "-c",
-        "--min-coverage-evenness",
-        type=lambda x: float(
-            check_values(
-                x, minval=0, maxval=1, parser=parser, var="--min-coverage-evenness"
-            )
-        ),
-        metavar="FLOAT",
-        default=defaults["min_coverage_evenness"],
-        dest="min_coverage_evenness",
-        help=help_msg["min_coverage_evenness"],
-    )
-    filtering_filt_args.add_argument(
-        "-V",
-        "--min-coeff-var",
-        type=lambda x: float(
-            check_values(
-                x, minval=0, maxval=float("inf"), parser=parser, var="--min-evenness"
-            )
-        ),
-        default=defaults["min_coeff_var"],
-        metavar="FLOAT",
-        dest="min_coeff_var",
-        help=help_msg["min_coeff_var"],
-    )
-    filtering_filt_args.add_argument(
-        "-C",
-        "--min-coverage-mean",
-        type=lambda x: float(
-            check_values(
-                x, minval=0, maxval=1000000, parser=parser, var="--min-coverage-mean"
-            )
-        ),
-        default=defaults["min_coverage_mean"],
-        metavar="FLOAT",
-        dest="min_coverage_mean",
-        help=help_msg["min_coverage_mean"],
-    )
-    filtering_filt_args.add_argument(
-        "--include-low-detection",
-        dest="transform_cov_evenness",
-        action="store_true",
-        help=help_msg["transform_cov_evenness"],
+        help="Minimum number of reads per reference to pass filter (reference-level filter). "
+             "Equivalent to --filter 'read_count:N:' but provided for convenience.",
     )
     misc_filter_args.add_argument(
         "-m",
@@ -1640,7 +1565,7 @@ def get_arguments(argv=None):
         metavar="FILE",
         nargs="?",
         const="",
-        required=True,
+        required=False,  # Made optional for commands like --list-columns
         help=help_msg["stats"],
     )
     out_filter_args.add_argument(
@@ -2095,10 +2020,19 @@ def create_output_files(
     if prefix is None:
         prefix = Path(bam).with_suffix("").name
 
-    if tmp_dir is not None:
-        tmp_dir = tmp_dir.name
+    # Handle temporary directory
+    if tmp_dir is None:
+        # Create a temporary directory in current working directory
+        tmp_dir_path = tempfile.mkdtemp(dir=os.getcwd())
+    elif isinstance(tmp_dir, str):
+        # User provided a path as string
+        if not os.path.exists(tmp_dir):
+            _error(f"Temporary directory {tmp_dir} does not exist")
+            exit(1)
+        tmp_dir_path = os.path.abspath(tmp_dir)
     else:
-        tmp_dir = check_tmp_dir_exists(tmp_dir).name
+        # tmp_dir is a TemporaryDirectory object
+        tmp_dir_path = tmp_dir.name
 
     if stats == "" or stats is None:
         stats = f"{prefix}_stats.tsv.gz"
@@ -2124,19 +2058,19 @@ def create_output_files(
         out_files = {
             "stats": stats,
             "stats_filtered": stats_filtered,
-            "bam_filtered_tmp": f"{tmp_dir}/{prefix}.filtered.tmp.bam",
+            "bam_filtered_tmp": f"{tmp_dir_path}/{prefix}.filtered.tmp.bam",
             "bam_filtered": bam_filtered,
             "read_length_freqs": read_length_freqs,
             "read_hits_count": read_hits_count,
             "knee_plot": knee_plot,
             "coverage_plot_dir": coverage_plots,
-            "bam_tmp": f"{tmp_dir}/{prefix}.tmp.bam",
-            "bam_tmp_sorted": f"{tmp_dir}/{prefix}.tmp.sorted.bam",
+            "bam_tmp": f"{tmp_dir_path}/{prefix}.tmp.bam",
+            "bam_tmp_sorted": f"{tmp_dir_path}/{prefix}.tmp.sorted.bam",
         }
     elif mode == "reassign":
         out_files = {
-            "bam_reassigned_tmp": f"{tmp_dir}/{prefix}.reassigned.tmp.bam",
-            "bam_reassigned_sorted": f"{tmp_dir}/{prefix}.reassigned.sorted.bam",
+            "bam_reassigned_tmp": f"{tmp_dir_path}/{prefix}.reassigned.tmp.bam",
+            "bam_reassigned_sorted": f"{tmp_dir_path}/{prefix}.reassigned.sorted.bam",
             "bam_reassigned": bam_reassigned,
         }
     elif mode == "lca":
@@ -2146,8 +2080,8 @@ def create_output_files(
     else:
         _error("Mode not recognized")
         exit(1)
-    out_files["tmp_dir"] = tmp_dir
-    out_files["sorted_bam"] = f"{tmp_dir}/{prefix}.bf-sorted.bam"
+    out_files["tmp_dir"] = tmp_dir_path
+    out_files["sorted_bam"] = f"{tmp_dir_path}/{prefix}.bf-sorted.bam"
 
     # check that read_length_freqs is a json file
     if read_length_freqs is not None:

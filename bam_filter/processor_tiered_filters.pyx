@@ -789,7 +789,7 @@ cdef int apply_tiered_filtering(
     if verbose:
         bf_nogil_logf_notime(
             b"TIERED_FILTER",
-            "\\n=== TIER-BASED FILTERING ===\\n"
+            "Applying tier-based filtering\\n"
         )
         bf_nogil_logf_notime(
             b"TIERED_FILTER",
@@ -958,7 +958,7 @@ cdef int apply_tiered_filtering(
         if verbose:
             bf_nogil_logf_notime(
                 b"TIERED_FILTER",
-                "\\n=== EDGE REMOVAL (CROSS-DOMAIN) ===\\n"
+                "Removing cross-domain edges\\n"
             )
 
         # Allocate alignment keep flags (initialized to 1 = keep all)
@@ -1025,7 +1025,7 @@ cdef int apply_tiered_filtering(
                 if verbose:
                     bf_nogil_logf_notime(
                         b"TIERED_FILTER",
-                        "\\n=== MISANNOTATION DETECTION ===\\n"
+                        "Detecting potential misannotations\\n"
                     )
 
                 flagged_confident = 0
@@ -1410,7 +1410,7 @@ cdef int apply_tiered_filtering(
     if verbose:
         bf_nogil_logf_notime(
             b"TIERED_FILTER",
-            "\\n=== STRUCTURAL ROLE DISTRIBUTION ===\\n"
+            "Structural role distribution:\\n"
         )
         bf_nogil_logf_notime(
             b"TIERED_FILTER",
@@ -1434,7 +1434,7 @@ cdef int apply_tiered_filtering(
         )
         bf_nogil_logf_notime(
             b"TIERED_FILTER",
-            "\\n=== FILTERING DECISIONS ===\\n"
+            "Filtering decisions:\\n"
         )
         bf_nogil_logf_notime(
             b"TIERED_FILTER",
@@ -1454,7 +1454,7 @@ cdef int apply_tiered_filtering(
         if count_individual_override > 0:
             bf_nogil_logf_notime(
                 b"TIERED_FILTER",
-                "\\n=== INDIVIDUAL TAXONOMY RESCUE ===\\n"
+                "Individual taxonomy rescue:\\n"
             )
             bf_nogil_logf_notime(
                 b"TIERED_FILTER",

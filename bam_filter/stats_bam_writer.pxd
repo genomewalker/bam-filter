@@ -1,7 +1,8 @@
 # cython: language_level=3
 from libc.stdint cimport int32_t
 
-from bam_filter.stats cimport RefStats, FilterConditions
+from bam_filter.stats cimport RefStats
+from bam_filter.generic_filters cimport GenericFilters
 
 # Use centralized htslib bindings
 from bam_filter.processor_types cimport (
@@ -18,10 +19,8 @@ cdef struct ReferenceFilter:
     int32_t n_filtered_refs
     int32_t n_total_refs
 
-cdef bint passes_filters(RefStats* stats, FilterConditions* filters) noexcept nogil
-
 cdef ReferenceFilter* create_reference_filter(RefStats* global_ref_stats,
-                                              FilterConditions* filters,
+                                              GenericFilters* gfilters,
                                               int n_refs) noexcept nogil
 
 cdef void destroy_reference_filter(ReferenceFilter* ref_filter) noexcept nogil

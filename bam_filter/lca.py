@@ -98,7 +98,7 @@ def do_lca(args):
     if enable_stats:
         _info("LCA taxonomic stats will be merged into %s", summary_path)
 
-    run_lca(
+    lca_result, taxdb = run_lca(
         bam_path=args.bam,
         output_path=str(summary_path),
         rank=getattr(args, "rank_lca", "genus"),
@@ -115,17 +115,21 @@ def do_lca(args):
         per_read_path=per_read_path,
     )
 
-    _info("LCA summary written to %s", summary_path.resolve())
+    _info("LCA taxonomy summary written to %s", summary_path.resolve())
     if per_read_path:
         _info("Per-read LCA written to %s", Path(per_read_path).resolve())
 
     if enable_stats:
+        print("")
+        print("┌─ LCA Stats Phase: Computing per-taxon quality metrics")
+        print("│ Calculating coverage, breadth, and quality statistics for each taxon")
+        print("└─────────────────────────────────────────────────────────────")
         run_lca_stats(
             bam_path=args.bam,
             lca_per_read_path=per_read_path,
             output_path=str(stats_tmp_path),
             taxonomy_db_path=str(taxonomy_db_path),
-            num_threads=1,
+            num_threads=getattr(args, "threads", 1),
             verbose=bf_logging.should_log(bf_logging.LogLevel.INFO),
             min_read_ani=getattr(args, "min_read_ani", 0.0),
             min_read_length=getattr(args, "min_read_length", 0),
@@ -134,9 +138,10 @@ def do_lca(args):
             trim_ends=int(getattr(args, "trim_ends", 0)),
             trim_min=getattr(args, "trim_min", 10),
             trim_max=getattr(args, "trim_max", 90),
+            taxdb=taxdb,
         )
         Path(stats_tmp_path).replace(summary_path)
-        _info("LCA stats written to %s", summary_path.resolve())
+        bf_logging.summary("LCA stats merged into %s (added quality metrics)", summary_path.resolve())
 
         if temp_per_read_path:
             try:

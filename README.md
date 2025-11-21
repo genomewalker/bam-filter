@@ -17,40 +17,36 @@ A simple tool to process a BAM file, filter references with uneven coverages, an
 
 # Installation
 
-We recommend having [**conda**](https://docs.conda.io/en/latest/) installed to manage the virtual environments
+We recommend managing the native dependencies with [**micromamba/conda**](https://mamba.readthedocs.io/en/latest/installation.html); the repository ships an environment specification that provides the compilers, HTSlib, igraph, Arrow, and DuckDB libraries required to compile the Cython extensions.
 
-### Using pip
-
-First, we create a conda virtual environment with:
+### Latest release (PyPI)
 
 ```bash
-wget https://raw.githubusercontent.com/genomewalker/bam-filter/master/environment.yml
-conda env create -f environment.yml
-```
-
-Then we proceed to install using pip:
-
-```bash
+micromamba create -n bam-filter -f https://raw.githubusercontent.com/genomewalker/bam-filter/master/environment.yml
+micromamba activate bam-filter
 pip install bam-filter
 ```
 
-### Install from source to use the development version
+### Development version
 
-Using pip
-
-```bash
-pip install git+https://github.com/genomewalker/bam-filter.git
-```
-
-By cloning in a dedicated conda environment
+Install directly from the repository:
 
 ```bash
-git clone https://github.com/genomewalker/bam-filter.git
-cd bam-filter
-conda env create -f environment.yml
-conda activate bam-filter
-pip install -e .
+micromamba create -n bam-filter-dev -f environment.yml
+micromamba activate bam-filter-dev
+pip install -e .[dev,test]
+pytest --maxfail=1 --disable-warnings -vv
 ```
+
+### Building distribution artifacts
+
+After activating the environment:
+
+```bash
+python -m build
+```
+
+This produces wheels and source distributions in `dist/` using the PEP 517 backend defined in `pyproject.toml`.
 
 
 # Usage
@@ -81,10 +77,11 @@ optional arguments:
 
 Full list of options:
 
+
 ```bash
 $ filterBAM reassign --help
-usage: filterBAM reassign [-h] --bam BAM [-p STR] [-r FILE] [-t INT] [-i INT] [-s FLOAT] [-A FLOAT] [-l INT] [-L INT] [-n INT] [--match-reward INT] [--mismatch-penalty INT] [--gap-open-penalty INT] [--gap-extension-penalty INT] [--squarem-min-improvement FLOAT] [--squarem-max-step-factor FLOAT]
-                          [-o [FILE]] [-m STR] [-M INT] [-N] [--tmp-dir DIR] [--disable-sort]
+usage: filterBAM reassign [-h] --bam BAM [-p STR] [-r FILE] [-t INT] [-i INT] [-s FLOAT] [-A FLOAT] [-l INT] [-L INT] [-n INT] [--match-reward INT] [--mismatch-penalty INT] [--gap-open-penalty INT] [--gap-extension-penalty INT] [--squarem-min-improvement FLOAT] [--squarem-max-step-factor FLOAT] [--anderson-interval INT]
+                         [-o [FILE]] [-m STR] [-M INT] [-N] [--tmp-dir DIR] [--disable-sort]
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -100,7 +97,7 @@ required arguments:
 Re-assign optional arguments:
   -i INT, --iters INT   Number of iterations for the EM algorithm (default: 25)
   -s FLOAT, --scale FLOAT
-                        Scale to select the best weithing alignments (default: 0.9)
+                        Scale to select the best weighting alignments (default: 0.9)
   -A FLOAT, --min-read-ani FLOAT
                         Minimum read ANI to keep a read (default: 90.0)
   -l INT, --min-read-length INT
@@ -120,6 +117,8 @@ Re-assign optional arguments:
                         Minimum relative improvement for SQUAREM convergence (default: 0.0001)
   --squarem-max-step-factor FLOAT
                         Maximum step size multiplier for SQUAREM stability (default: 4.0)
+  --anderson-interval INT
+                        Apply Anderson acceleration every N EM iterations (default: 5; set to 0 to disable Anderson)
   -o [FILE], --out-bam [FILE]
                         Save a BAM file without multimapping reads (default: None)
   -m STR, --sort-memory STR
@@ -140,12 +139,14 @@ One would run filterBAM `reassign` as follows:
 filterBAM reassign --bam c55d4e2df1.dedup.bam  --threads 10 --iters 0 --min-read-ani 92 --reference-lengths gtdb-r202.len.map --out-bam c55d4e2df1.reassigned.bam
 ```
 
+
 **--bam**: BAM file to process
 **--threads**: Number of threads to use
 **--iters**: Number of iterations for the EM algorithm. If set to 0, the EM algorithm will run until there are no more reads to reassign
 **--min-read-ani**: Minimum read ANI to keep a read
-**--reference-lengths**: File with the lengths of the references in the BAM file. This is used when multiple contigs have been concatenad with Ns.
+**--reference-lengths**: File with the lengths of the references in the BAM file. This is used when multiple contigs have been concatenated with Ns.
 **--out-bam**: Save a BAM file without multimapping reads
+**--anderson-interval**: Apply Anderson acceleration every N EM iterations (default: 5). Set to 0 to disable Anderson acceleration entirely. Increasing this value can reduce overhead for large datasets.
 
 
 ## BAM filtering
@@ -304,8 +305,7 @@ Full list of options:
   
 ```bash
 $ filterBAM lca --help
-usage: filterBAM lca [-h] --bam BAM [-p STR] [-r FILE] [-t INT] [--names FILE] [--nodes FILE] [--acc2taxid FILE] [--lca-rank STR] [--lca-summary [FILE]] [--scale STR] [-m STR] [--custom]
-                     [--stats [FILE]]
+usage: filterBAM lca [-h] --bam BAM --taxonomy-db DIR [-p STR] [-r FILE] [-t INT] [--lca-rank STR] [--lca-summary [FILE]] [--scale STR] [-m STR] [--custom] [--stats [FILE]]
 
 optional arguments:
   -h, --help            show this help message and exit
@@ -317,11 +317,9 @@ optional arguments:
 
 required arguments:
   --bam BAM             BAM file containing aligned reads (default: None)
+  --taxonomy-db DIR     Directory with Parquet taxonomy database (includes accession_map.parquet)
 
 LCA optional arguments:
-  --names FILE          Names dmp file from taxonomy (default: None)
-  --nodes FILE          Nodes dmp file from taxonomy (default: None)
-  --acc2taxid FILE      acc2taxid file from taxonomy (default: None)
   --lca-rank STR        Rank to use for LCA calculation (default: species)
   --lca-summary [FILE]  Save a TSV file with the LCA summary (default: None)
   --scale STR           Scale taxonomic abundance by this factor; suffix K/M recognized (default: 1000000.0)
@@ -337,157 +335,83 @@ LCA optional arguments:
 One would run filterBAM `lca` as follows:
 
 ```bash
-filterBAM lca --bam c55d4e2df1.dedup.filtered.bam --names ./taxonomy/names.dmp --nodes ./taxonomy/nodes.dmp --acc2taxid ./taxonomy/acc2taxid.map.gz --threads 10 --lca-rank genus
+filterBAM lca --bam c55d4e2df1.dedup.filtered.bam --taxonomy-db ./taxonomy_db --threads 10 --lca-rank genus
 ```
 
-**--names**: Names dmp file from taxonomy 
-
-**--nodes**: Nodes dmp file from taxonomy 
-
-**--acc2taxid**: acc2taxid file from taxonomy 
+**--taxonomy-db**: Path to the Parquet taxonomy database produced by `filterBAM build-taxonomy` (must include `accession_map.parquet`)
 
 **--rank-lca**: Rank to use for LCA calculation 
 
 **--scale**: Scale taxonomic abundance by this factor; suffix K/M recognized 
 
+
 # Read Reassignment Algorithm in FilterBAM
 
-The algorithm implements a SQUAREM-accelerated Expectation-Maximization (EM) approach to resolve multi-mapping reads by iteratively refining alignment probabilities. This implementation builds on the SQUAREM method for EM acceleration (Varadhan & Roland, 2008).
 
-## Initial Score Calculation
+FilterBAM uses an Expectation-Maximization (EM) algorithm to probabilistically reassign multi-mapping reads based on alignment quality. Anderson acceleration can be enabled to speed up convergence, especially for large and complex datasets.
 
-For each alignment, we first compute a global alignment score $S$ that takes into account different aspects of the alignment quality:
+### EM Initialization, Scoring, and Algorithm
 
-$S = r_m M - p_m X - p_o G - p_e E$
+FilterBAM uses an Expectation-Maximization (EM) algorithm to reassign multi-mapping reads based on alignment quality. The process is as follows:
 
-Where:
-- $M$ represents the number of matching bases in the alignment
-- $X$ represents the number of mismatches in the alignment
-- $G$ represents the number of gap openings in the alignment
-- $E$ represents the number of gap extensions in the alignment
+#### 1. Alignment Scoring
+For each alignment, a raw score $S$ is calculated as:
 
-The penalties and rewards are configurable parameters:
-- $r_m$ is the match reward (default: 1)
-- $p_m$ is the mismatch penalty (default: -2)
-- $p_o$ is the gap open penalty (default: 5)
-- $p_e$ is the gap extension penalty (default: 2)
+$S = r_m \cdot M - p_m \cdot X - p_o \cdot G - p_e \cdot E$
 
-## Score Normalization
+where:
+- $M$: number of matches
+- $X$: number of mismatches
+- $G$: number of gap opens
+- $E$: number of gap extensions
+- $r_m$, $p_m$, $p_o$, $p_e$: user-configurable parameters (see CLI options)
 
-The scores undergo a two-step normalization process:
+To compare alignments of different lengths, the score is normalized:
 
-1. First, a positive shift transformation ensures all scores are positive:
+$S'_{ij} = \frac{S_{ij}}{L_{ij}}$
 
-   $S' = S - \min(S) + 1$
+where $L_{ij}$ is the alignment length for read $i$ and reference $j$.
 
-2. Then, length normalization accounts for different alignment lengths:
+#### 2. Softmax Normalization (Initialization)
+For each read, the set of relative scores $S'_{ij}$ (across all references $j$) is transformed into probabilities using a softmax normalization:
 
-   $S'' = \frac{S'}{L}$
+$P_{ij} = \frac{\exp\left(\frac{S'_{ij} - \max_k S'_{ik}}{\sigma_i}\right)}{\sum_{k} \exp\left(\frac{S'_{ik} - \max_k S'_{ik}}{\sigma_i}\right)}$
 
-   where $L$ is the alignment length
+where $\sigma_i$ is the range of $S'_{ik}$ for read $i$ (or 1 if the range is 0), and $\max_k S'_{ik}$ is subtracted for numerical stability. This ensures the probabilities for all alignments of a read sum to 1. These softmax-normalized probabilities are used as the initial probabilities for the EM algorithm, reflecting the relative quality of each alignment for a given read.
 
-These normalized scores are used to initialize the probability distribution $P(r_i|g_j)$ of read $r_i$ originating from genome $g_j$:
+#### 3. EM Algorithm Steps
 
-$P(r_i|g_j) = \frac{S''\_{ij}}{\sum_{k} S''\_{ik}}$
+- **Initialization:** Use the softmax-normalized probabilities as the starting point for the EM algorithm. The softmax is only used for initialization; subsequent EM steps use linear normalization.
 
-## SQUAREM Acceleration Framework
+- **E-step (Expectation):** For each alignment, update the probability (responsibility) that a read originated from a reference, using the current weights $w_j$ and the alignment scores $S_{ij}$:
+  
+  $P(r_i|g_j) = \frac{S_{ij} w_j}{\sum_k S_{ik} w_k}$
+  
+  This is a linear normalization (not a softmax) and is repeated for each EM iteration. For each read $i$, the probabilities are normalized so that $\sum_j P(r_i|g_j) = 1$.
 
-The algorithm uses SQUAREM to accelerate convergence of the EM process:
+- **M-step (Maximization):** Update the weights for each reference by summing the responsibilities over all reads:
+  
+  $w_j = \frac{\sum_i P(r_i|g_j)}{\sum_{i,j} P(r_i|g_j)}$
 
-### 1. E-step (First Order)
+- **Anderson Acceleration (optional):** To speed up convergence, FilterBAM can use Anderson acceleration, which extrapolates a better solution for the weights using a history of previous EM steps. This is user-configurable and only accepted if it improves the likelihood and produces valid weights.
 
-Calculate first EM evaluation:
+- **Convergence and Filtering:** The EM process repeats E and M steps (optionally with Anderson acceleration) until weights stabilize or a maximum number of iterations is reached. After convergence, alignments are filtered: only those with probability above a minimum threshold and a fraction of the maximum for that read are retained. Probabilities are written to the output BAM as a tag for downstream analysis.
 
-$q_1 = M(x_k)$
+#### Practical Notes
 
-$r = q_1 - x_k$
+- Anderson acceleration can greatly reduce the number of EM iterations required for convergence, especially for large and complex datasets. However, it introduces some computational overhead, so the `--anderson-interval` option allows users to balance speed and resource usage.
+- Score normalization ensures that all alignments are fairly compared, regardless of their length or raw score scale.
+- The EM process logs the likelihood and convergence status at each iteration, helping users monitor progress and diagnose issues.
 
-Calculate second EM evaluation:
+#### Anderson Acceleration (in practice)
 
-$q_2 = M(x_k + r)$
+Anderson acceleration works by combining several previous EM steps to extrapolate a better solution for the weights. In mathematical terms, suppose $w^{(t)}$ is the vector of weights at EM iteration $t$, and $F(w)$ is the EM update operator (i.e., $w^{(t+1)} = F(w^{(t)})$). Anderson acceleration computes the next iterate as a linear combination of the most recent $m$ EM iterates and their residuals:
 
-$v = q_2 - (x_k + r)$
+$$
+w^{(t+1)} = (1 - \beta) F(w^{(t)}) + \beta \sum_{j=0}^{m-1} \alpha_j F(w^{(t-j)})
+$$
 
-Where:
-- $x_k$ is the current estimate
-- $M()$ is the EM mapping function
-- $r$ represents the first-order difference
-- $v$ represents the second-order difference
-
-### 2. M-step (Step Length Calculation)
-
-Calculate the stabilized step length:
-
-$\alpha = -\frac{\|r\|}{\|v - r\|}$
-
-Apply clipping to ensure stability:
-
-$\alpha = \text{clip}(\alpha, -\alpha_{\text{max}}, -\frac{1}{\alpha_{\text{max}}})$
-
-Where:
-- $\alpha_{\text{max}}$ is the maximum step factor (default: 4.0)
-- $\|r\|$ represents the norm of the first-order difference
-- $\|v - r\|$ represents the norm of the difference between second and first-order differences
-
-### 3. SQUAREM Update
-
-Calculate new probabilities:
-
-$x_{k+1} = x_k - 2\alpha r + \alpha^2v$
-
-If the update produces invalid probabilities (e.g., negative values or values > 1), the algorithm falls back to a basic EM step:
-
-$x_{k+1} = q_1$
-
-### 4. Assignment Step
-
-For each read $r_i$:
-
-1. Calculate maximum probability:
-
-   $P_{\text{max}}(r_i) = \max_j P''(r_i|g_j)$
-
-2. Retain alignments that satisfy:
-
-   $P''(r_i|g_j) \geq \beta \cdot P_{\text{max}}(r_i)$
-
-   where $\beta$ is a scaling factor (default 0.9)
-
-## Convergence Criteria
-
-The algorithm iterates until one of these conditions is met:
-
-1. Relative likelihood improvement < $\epsilon$ (default $10^{-4}$)
-2. Maximum iterations reached (if specified)
-3. Complete resolution of multi-mapping reads
-4. No further alignments can be removed
-
-
-## Weighted Reference Length Normalization
-
-FilterBAM implements an asymmetric weighting scheme that penalizes mappings to shorter reference sequences while maintaining equal weights for longer sequences. This helps resolve ambiguous mappings by giving preference to longer references above a certain threshold.
-
-### Method Overview
-
-The weighting uses a one-sided sigmoid transformation that only penalizes references shorter than the mean length of all mappings for a given read:
-
-1. For each read's mappings, calculate log-space statistics:
-   - Mean of log-transformed reference lengths ($\mu_{\ln(S)}$)
-   - Standard deviation of log-transformed lengths ($\sigma_{\ln(S)}$)
-
-2. Calculate z-score (only penalizing shorter sequences):
-   
-   $z_i = \max(0, \frac{\mu_{\ln(S)} - \ln(S_i)}{\sigma_{\ln(S)}})$
-
-3. Transform to weight via sigmoid:
-   
-   $w_i = \frac{1}{1 + e^{(z_i - 2.0)}}$
-
-The weighted probabilities are then calculated as:
-
-$s_w = w_i \cdot P(g_j)$
-
-This approach helps resolve ambiguous mappings between fragments and full-length sequences while maintaining equal treatment of references above the mean length.
+where the coefficients $\alpha_j$ and $\beta$ are chosen to minimize the norm of the residuals $F(w^{(t-j)}) - w^{(t-j)}$ over the last $m$ steps (subject to $\sum_j \alpha_j = 1$). In practice, this means Anderson acceleration extrapolates a new solution from a small window of previous EM steps, and only accepts it if it improves the likelihood and produces valid weights. The `--anderson-interval` option allows users to control how often it is applied. All steps are implemented efficiently for large-scale data, using Numba and memory-mapped arrays.
 
 ### Applications and recommendations
 

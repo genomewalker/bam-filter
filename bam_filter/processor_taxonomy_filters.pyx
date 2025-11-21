@@ -219,7 +219,7 @@ cdef uint32_t weight_anomaly_scores_by_taxonomy(
     if verbose:
         bf_nogil_logf_notime(
             b"TAXONOMY_FILTER",
-            "\n=== TAXONOMY-WEIGHTED ANOMALY SCORING ===\n"
+            "Applying taxonomy-weighted anomaly scoring\n"
         )
         bf_nogil_logf_notime(
             b"TAXONOMY_FILTER",
@@ -442,7 +442,7 @@ cdef TaxonomyFilterStats apply_taxonomy_informed_filtering(
     if verbose:
         bf_nogil_logf_notime(
             b"TAXONOMY_FILTER",
-            "\n=== TAXONOMY FILTERING SUMMARY ===\n"
+            "Taxonomy filtering summary:\n"
         )
         bf_nogil_logf_notime(
             b"TAXONOMY_FILTER",

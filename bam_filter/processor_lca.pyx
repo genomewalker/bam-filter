@@ -92,6 +92,7 @@ from bam_filter.processor_types cimport (
     sam_hdr_read,
     sam_hdr_destroy,
     sam_hdr_tid2name,
+    sam_hdr_name2tid,
     sam_hdr_tid2len,
     sam_hdr_nref,
     sam_itr_queryi,
@@ -431,7 +432,7 @@ cdef int process_lca_batch_alignments(
             temp_alignment.read_index = local_sequential_id
             temp_alignment.reference_index = <uint32_t>reference_id
             
-            # **OPTIMIZATION: Try to reuse ZS:f TAG from filter/reassign step**
+            # Try to reuse ZS:f TAG from filter/reassign step
             zs_aux = bam_aux_get(bam_record, ZS_TAG_C)
             if zs_aux != NULL and not scoring_config.calculate_pmd:
                 # Reuse pre-computed score from TAG (fast path)
@@ -918,9 +919,10 @@ cdef void process_lca_from_pool_parallel(
                 per_read_results_tls[tid][read_id].num_alignments = count
                 per_read_results_tls[tid][read_id].norm_ref_index = best_ref_idx_out
                 # Determine if this read's LCA rank meets the threshold (trusted for stats)
-                # Higher rank_id values are more specific (species > genus > family)
+                # IMPORTANT: Lower rank_id = more specific (subspecies=1, species=2, genus=6)
+                # A read is trusted if its rank is at or BELOW (<=) the threshold rank
                 lca_rank_id_actual = get_node_rank_id_nogil(taxdb_c, lca_taxid)
-                if lca_rank_id_actual >= rank_id:
+                if lca_rank_id_actual <= rank_id and lca_rank_id_actual > 0:
                     per_read_results_tls[tid][read_id].is_trusted = 1
                 else:
                     per_read_results_tls[tid][read_id].is_trusted = 0
@@ -988,6 +990,7 @@ cdef int _write_tree(TaxonomyDB* db,
 from bam_filter.reference_lengths cimport (
     TSVReferenceMap,
     load_tsv_reference_file,
+    get_tsv_reference_count,
     lookup_reference_length,
     free_tsv_reference_map,
     print_tsv_reference_stats,
@@ -1226,7 +1229,7 @@ def _log_phase_duration(phase: str, double start_time) -> None:
 # Main LCA processing function
 # ------------------------------------------------------------------
 
-cpdef _LCAStatistics run_lca(
+cpdef tuple run_lca(
     str bam_path,
     str output_path,
     str rank="genus",
@@ -1311,30 +1314,35 @@ cpdef _LCAStatistics run_lca(
     cdef TSVReferenceMap* tsv_map = NULL
     cdef bytes ref_len_bytes
     cdef const char* ref_len_c = NULL
-    
+    cdef double tsv_start, tsv_end, tax_start, tax_end, bam_idx_start, bam_idx_end
+
     # Build detail message based on what's being loaded
     cdef str init_detail = "Loading taxonomy databases"
     if reference_lengths_tsv is not None and reference_lengths_tsv != "":
         init_detail = "Loading reference lengths and taxonomy databases"
-    
+
     cdef double phase0_start = bf_monotonic_seconds()
-    _announce_stage("LCA Phase 0: Initialization", init_detail)
-    
+    _announce_stage("Initialization", init_detail)
+
     if reference_lengths_tsv is not None and reference_lengths_tsv != "":
         if not os.path.exists(reference_lengths_tsv):
             bf_logging.warn("Reference lengths TSV not found: %s", reference_lengths_tsv)
         else:
             if verbose:
                 bf_logging.log(LOG_TAG, "Loading reference length overrides from %s", reference_lengths_tsv)
+            tsv_start = bf_monotonic_seconds()
             ref_len_bytes = reference_lengths_tsv.encode("utf-8")
             ref_len_c = ref_len_bytes
             with nogil:
                 tsv_map = load_tsv_reference_file(ref_len_c)
+            tsv_end = bf_monotonic_seconds()
             if tsv_map == NULL:
                 bf_logging.warn("Failed to load reference length TSV; falling back to BAM header lengths")
-            elif verbose:
+            else:
                 with nogil:
                     print_tsv_reference_stats(tsv_map)
+                if verbose:
+                    bf_logging.log(LOG_TAG, "TSV loading time: %.2f seconds", tsv_end - tsv_start)
 
     cdef str taxonomy_db_dir_str = None
     cdef str nodes_path_str = None
@@ -1346,7 +1354,12 @@ cpdef _LCAStatistics run_lca(
         taxonomy_db_dir_str = os.fspath(taxonomy_db_dir)
         if verbose:
             bf_logging.log(LOG_TAG, "Loading taxonomy database from %s", taxonomy_db_dir_str)
+        tax_start = bf_monotonic_seconds()
         tax_db_obj = TaxonomyDatabase.from_parquet(taxonomy_db_dir_str)
+        tax_end = bf_monotonic_seconds()
+        if verbose:
+            bf_logging.log(LOG_TAG, "Taxonomy loading time: %.2f seconds", tax_end - tax_start)
+            bf_logging.log(LOG_TAG, "About to process BAM file at time %.2fs into Phase 0", tax_end - phase0_start)
     else:
         if nodes_path is None or names_path is None:
             raise ValueError(
@@ -1406,8 +1419,8 @@ cpdef _LCAStatistics run_lca(
     cdef int64_t i
     cdef const char* ref_name
     cdef bint reference_lengths_from_tsv = False
-    cdef list ref_names_py = None
-    cdef list ref_lengths_py = None
+    cdef int32_t nentries, tid32
+    cdef int64_t tsv_length
     
     cdef AlignmentScoringConfig scoring_config
     scoring_config.minimum_read_identity = min_read_ani
@@ -1458,28 +1471,31 @@ cpdef _LCAStatistics run_lca(
             reference_lengths[i] = sam_hdr_tid2len(bam_header, i)
             if reference_lengths[i] <= 0:
                 reference_lengths[i] = 1000
-    # Build Python lists for reference names and lengths for per-read output
-    ref_names_py = []
-    ref_lengths_py = []
-    for i in range(total_references):
-        ref_name = sam_hdr_tid2name(bam_header, i)
-        if ref_name != NULL:
-            ref_names_py.append(ref_name.decode('utf-8'))
-        else:
-            ref_names_py.append("")
-        ref_lengths_py.append(int(reference_lengths[i]))
+    # NOTE: We'll query reference names from bam_header when writing per-read output
+    # to avoid 166k+ Python list.append() calls in Phase 0
 
     if tsv_map != NULL:
         reference_lengths_from_tsv = True
+        # Fast approach: iterate TSV entries and lookup in BAM header (not the other way around!)
+        # This is 100x faster than looping through 166k BAM refs and doing TSV hash lookups
         with nogil:
-            for i in range(total_references):
-                ref_name = sam_hdr_tid2name(bam_header, i)
-                if ref_name != NULL:
-                    reference_lengths[i] = lookup_reference_length(tsv_map, ref_name, reference_lengths[i])
+            nentries = get_tsv_reference_count(tsv_map)
+            for i in range(nentries):
+                ref_name = tsv_map.entries[i].reference_name
+                tsv_length = tsv_map.entries[i].reference_length
+                tid32 = sam_hdr_name2tid(bam_header, ref_name)
+                if 0 <= tid32 < total_references and tsv_length > 0:
+                    reference_lengths[tid32] = tsv_length
         free_tsv_reference_map(tsv_map)
         tsv_map = NULL
 
+    bam_idx_start = bf_monotonic_seconds()
+    if verbose:
+        bf_logging.log(LOG_TAG, "Loading BAM index...")
     bam_index = sam_index_load(bam_handle, bam_file_path)
+    bam_idx_end = bf_monotonic_seconds()
+    if verbose:
+        bf_logging.log(LOG_TAG, "BAM index loaded in %.2f seconds", bam_idx_end - bam_idx_start)
     if not bam_index:
         free(reference_alignment_counts)
         free(reference_ids)
@@ -1496,7 +1512,7 @@ cpdef _LCAStatistics run_lca(
     cdef double phase1_start = bf_monotonic_seconds()
     
     # Extract reference accessions for filtered accession map loading
-    _announce_stage("LCA Phase 1: Accession Mapping", "Loading taxonomy mappings for BAM references")
+    _announce_stage("Accession Mapping", "Loading taxonomy mappings for BAM references")
     
     if verbose:
         bf_logging.log(LOG_TAG, "Extracting reference accessions for filtered loading...")
@@ -1702,7 +1718,7 @@ cpdef _LCAStatistics run_lca(
     # ------------------------------------------------------------------
     cdef double phase2_start = bf_monotonic_seconds()
     
-    _announce_stage("LCA Phase 2: Batch Streaming", "Processing BAM alignments in parallel batches with global ID assignment")
+    _announce_stage("Batch Streaming", "Processing BAM alignments in parallel batches with global ID assignment")
 
     # Process batches (serial or parallel depending on threads)
     bf_nogil_logf_notime(
@@ -2101,7 +2117,7 @@ cpdef _LCAStatistics run_lca(
     # ------------------------------------------------------------------
     # Memory pool creation - allocate global sorted pool like processor.py
     # ------------------------------------------------------------------
-    _announce_stage("LCA Phase 3: Memory Pool", "Creating global sorted pool for efficient per-read LCA computation")
+    _announce_stage("Memory Pool", "Creating global sorted pool for efficient per-read LCA computation")
     bf_nogil_logf_notime(
         LOG_TAG_B,
         "Creating global LCA pool for %lld alignments, %lld unique reads",
@@ -2211,7 +2227,7 @@ cpdef _LCAStatistics run_lca(
     # ------------------------------------------------------------------
     # Parallel LCA processing - per-read dedup, LCA, mode-specific weighting
     # ------------------------------------------------------------------
-    _announce_stage("LCA Phase 4: Parallel LCA", "Computing taxonomic assignments with strict path intersection across %d threads" % threads)
+    _announce_stage("Parallel LCA", "Computing taxonomic assignments with strict path intersection across %d threads" % threads)
     bf_nogil_logf_notime(
         LOG_TAG_B,
         "Starting parallel per-read LCA processing (%lld reads, %d threads, strict mode)",
@@ -2307,10 +2323,11 @@ cpdef _LCAStatistics run_lca(
     # ------------------------------------------------------------------
     # Per-read output writing (if requested)
     # ------------------------------------------------------------------
+    cdef const char* norm_ref_cstr = NULL
     if write_per_read and per_read_results_tls != NULL:
         if verbose:
             bf_logging.log(LOG_TAG, "Writing per-read LCA assignments to %s", per_read_path)
-        
+
         # Merge per-thread results into a single list (Python side for simplicity)
         # Output ALL reads, including those without valid LCA (lca_taxid <= 0)
         per_read_list = []
@@ -2340,8 +2357,10 @@ cpdef _LCAStatistics run_lca(
                         lineage = PyUnicode_FromString(lineage_buf_perread)
                     else:
                         lineage = "unassigned"
-                    norm_ref = ref_names_py[norm_ref_idx] if ref_names_py is not None and norm_ref_idx < len(ref_names_py) else str(norm_ref_idx)
-                    norm_ref_len = ref_lengths_py[norm_ref_idx] if ref_lengths_py is not None and norm_ref_idx < len(ref_lengths_py) else 0
+                    # Query BAM header directly to avoid 166k+ Python list building in Phase 0
+                    norm_ref_cstr = sam_hdr_tid2name(bam_header, norm_ref_idx) if norm_ref_idx >= 0 else NULL
+                    norm_ref = norm_ref_cstr.decode('utf-8') if norm_ref_cstr != NULL else str(norm_ref_idx)
+                    norm_ref_len = reference_lengths[norm_ref_idx] if norm_ref_idx >= 0 and norm_ref_idx < total_references else 0
                     f.write(f"{read_name}\t{lca_taxid}\t{rank_name}\t{num_alignments}\t{lineage}\t{norm_ref}\t{norm_ref_len}\t{is_trusted}\n")
         else:
             with open(per_read_path, 'w') as f:
@@ -2353,8 +2372,10 @@ cpdef _LCAStatistics run_lca(
                         lineage = PyUnicode_FromString(lineage_buf_perread)
                     else:
                         lineage = "unassigned"
-                    norm_ref2 = ref_names_py[norm_ref_idx2] if ref_names_py is not None and norm_ref_idx2 < len(ref_names_py) else str(norm_ref_idx2)
-                    norm_ref_len2 = ref_lengths_py[norm_ref_idx2] if ref_lengths_py is not None and norm_ref_idx2 < len(ref_lengths_py) else 0
+                    # Query BAM header directly to avoid 166k+ Python list building in Phase 0
+                    norm_ref_cstr = sam_hdr_tid2name(bam_header, norm_ref_idx2) if norm_ref_idx2 >= 0 else NULL
+                    norm_ref2 = norm_ref_cstr.decode('utf-8') if norm_ref_cstr != NULL else str(norm_ref_idx2)
+                    norm_ref_len2 = reference_lengths[norm_ref_idx2] if norm_ref_idx2 >= 0 and norm_ref_idx2 < total_references else 0
                     f.write(f"{read_name}\t{lca_taxid}\t{rank_name}\t{num_alignments}\t{lineage}\t{norm_ref2}\t{norm_ref_len2}\t{is_trusted}\n")
         
         if verbose:
@@ -2376,7 +2397,7 @@ cpdef _LCAStatistics run_lca(
     # ------------------------------------------------------------------
     # Taxonomy aggregation - propagate TAD-normalized weights up tree
     # ------------------------------------------------------------------
-    _announce_stage("LCA Phase 5: Taxonomy Aggregation", "Propagating abundances through taxonomy hierarchy with TAD normalization")
+    _announce_stage("Taxonomy Aggregation", "Propagating abundances through taxonomy hierarchy with TAD normalization")
     bf_nogil_logf_notime(
         LOG_TAG_B,
         "Aggregating taxonomy assignments across %d references",
@@ -2672,4 +2693,4 @@ cpdef _LCAStatistics run_lca(
     }
     if tsv_map != NULL:
         free_tsv_reference_map(tsv_map)
-    return _LCAStatistics(rows, metadata)
+    return _LCAStatistics(rows, metadata), tax_db_obj

@@ -1303,7 +1303,7 @@ cdef CommunityResults* community_clustering(WeightedGraph* graph,
         return NULL
 
     t_step_start = clock()
-    # OPTIMIZATION: Use pre-computed connected nodes list (only nodes with degree > 0)
+    # Use pre-computed connected nodes list (only nodes with degree > 0)
     # This avoids processing ~88k isolated nodes that would become singleton communities
     if graph.connected_node_ids and graph.n_connected_nodes > 0:
         # Use connected nodes list from Phase 5
@@ -1704,7 +1704,7 @@ cdef CommunityResults* community_clustering(WeightedGraph* graph,
 
     # NOW calculate num_neighbor_communities for each node (AFTER communities are assigned)
     # This is used for bridge detection (Tier 1 filtering)
-    # OPTIMIZATION: Only calculate for connected nodes (isolated nodes have 0 neighbors)
+    # Only calculate for connected nodes (isolated nodes have 0 neighbors)
     t_step_start = clock()
     cdef uint32_t nodes_to_check = graph.n_connected_nodes if graph.connected_node_ids else graph.num_nodes
     bf_nogil_logf_notime(b"COMMUNITY", "Calculating neighbor community counts for %u connected nodes...\n", nodes_to_check)
@@ -1802,7 +1802,7 @@ cdef CommunityResults* community_clustering(WeightedGraph* graph,
     max_bridge_nodes = 10000  # Safety limit
 
     # Identify bridge candidates: nodes with num_neighbor_communities > 1
-    # OPTIMIZATION: Only check connected nodes (isolated nodes have num_neighbor_communities=0)
+    # Only check connected nodes (isolated nodes have num_neighbor_communities=0)
     ret = igraph_vector_int_init(&bridge_candidates, 0)
     if ret == IGRAPH_SUCCESS:
         if graph.connected_node_ids and graph.n_connected_nodes > 0:
