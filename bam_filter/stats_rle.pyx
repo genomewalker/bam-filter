@@ -736,7 +736,7 @@ cdef void calculate_rle_coverage_stats(RLECoverage* rle, RefStats* stats, int tr
         events[j*2] = iv.start
         events[j*2+1] = iv.count
         j += 1
-        events[j*2] = iv.endc
+        events[j*2] = iv.end
         events[j*2+1] = -iv.count
         j += 1
 
