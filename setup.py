@@ -55,6 +55,15 @@ ext_modules = [
         libraries=common_libraries,
     ),
     Extension(
+        "bam_filter.generic_filters",
+        ["bam_filter/generic_filters.pyx"],
+        extra_compile_args=common_compile_args,
+        extra_link_args=common_link_args,
+        include_dirs=common_include_dirs,
+        library_dirs=common_library_dirs,
+        libraries=common_libraries,
+    ),
+    Extension(
         "bam_filter.stats_helpers",
         ["bam_filter/stats_helpers.pyx"],
         extra_compile_args=common_compile_args,
@@ -314,16 +323,7 @@ ext_modules = [
         library_dirs=common_library_dirs,
         libraries=common_libraries,
     ),
-    # LCA Stats V2 - simple, fast, correct version (DISABLED - merged into main)
-    # Extension(
-    #     "bam_filter.processor_lca_stats_v2",
-    #     ["bam_filter/processor_lca_stats_v2.pyx"],
-    #     extra_compile_args=common_compile_args,
-    #     extra_link_args=common_link_args,
-    #     include_dirs=common_include_dirs,
-    #     library_dirs=common_library_dirs,
-    #     libraries=common_libraries,
-    # ),
+
     # Tiny helper: read-name hashing (extracted from processor.pyx)
     Extension(
         "bam_filter.processor_hash",
@@ -395,6 +395,16 @@ ext_modules = [
     Extension(
         "bam_filter.reference_lengths",
         ["bam_filter/reference_lengths.pyx"],
+        extra_compile_args=common_compile_args,
+        extra_link_args=common_link_args,
+        include_dirs=common_include_dirs,
+        library_dirs=common_library_dirs,
+        libraries=common_libraries,
+    ),
+    # Unified TSV writer with optional compression (replaces fast_gzip_writer + fast_tsv_writer)
+    Extension(
+        "bam_filter.tsv_writer",
+        ["bam_filter/tsv_writer.pyx"],
         extra_compile_args=common_compile_args,
         extra_link_args=common_link_args,
         include_dirs=common_include_dirs,
