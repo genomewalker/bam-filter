@@ -475,6 +475,151 @@ ext_modules = [
             ("_GNU_SOURCE", None),
         ],
     ),
+    # DuckDB-based Parquet converter (SAM/SAM.gz/BAM support, dual-table design)
+    Extension(
+        "bam_filter.parquet_converter_duckdb",
+        ["bam_filter/parquet_converter_duckdb.pyx"],
+        extra_compile_args=common_compile_args,
+        extra_link_args=common_link_args,
+        include_dirs=common_include_dirs,
+        library_dirs=common_library_dirs,
+        libraries=common_libraries + ["duckdb"],
+        define_macros=[
+            ("NPY_NO_DEPRECATED_API", "NPY_1_7_API_VERSION"),
+            ("_GNU_SOURCE", None),
+        ],
+    ),
+    # Streaming Parquet converter (parallel, batched writes, individual tag columns)
+    # Temporarily disabled - has syntax errors
+    # Extension(
+    #     "bam_filter.parquet_converter_streaming",
+    #     ["bam_filter/parquet_converter_streaming.pyx"],
+    #     extra_compile_args=common_compile_args,
+    #     extra_link_args=common_link_args,
+    #     include_dirs=common_include_dirs,
+    #     library_dirs=common_library_dirs,
+    #     libraries=common_libraries + ["duckdb"],
+    #     define_macros=[
+    #         ("NPY_NO_DEPRECATED_API", "NPY_1_7_API_VERSION"),
+    #         ("_GNU_SOURCE", None),
+    #     ],
+    # ),
+    # Batched Parquet converter (smart buffering, single-pass, columnar batches)
+    Extension(
+        "bam_filter.parquet_converter_batched",
+        ["bam_filter/parquet_converter_batched.pyx"],
+        extra_compile_args=common_compile_args,
+        extra_link_args=common_link_args,
+        include_dirs=common_include_dirs,
+        library_dirs=common_library_dirs,
+        libraries=common_libraries + ["duckdb"],
+        define_macros=[
+            ("NPY_NO_DEPRECATED_API", "NPY_1_7_API_VERSION"),
+            ("_GNU_SOURCE", None),
+        ],
+    ),
+    # # Arrow C++ Parquet converter (fastest: HTSlib + Arrow C++ API directly, no DuckDB)
+    # Extension(
+    #     "bam_filter.parquet_converter_arrow_cpp",
+    #     sources=[
+    #         "bam_filter/parquet_converter_arrow_cpp.pyx",
+    #         "bam_filter/arrow_parquet_writer.cpp",
+    #     ],
+    #     extra_compile_args=common_compile_args + ["-std=c++17"],
+    #     extra_link_args=common_link_args,
+    #     include_dirs=common_include_dirs,
+    #     library_dirs=common_library_dirs,
+    #     libraries=common_libraries + ["arrow", "parquet"],
+    #     language="c++",
+    #     define_macros=[
+    #         ("NPY_NO_DEPRECATED_API", "NPY_1_7_API_VERSION"),
+    #         ("_GNU_SOURCE", None),
+    #     ],
+    # ),
+    # # PURE C++ Parquet converter (ZERO Python overhead - maximum performance)
+    # Extension(
+    #     "bam_filter.parquet_converter_pure_cpp",
+    #     sources=[
+    #         "bam_filter/parquet_converter_pure_cpp.pyx",
+    #         "bam_filter/arrow_parquet_writer.cpp",
+    #     ],
+    #     extra_compile_args=common_compile_args + ["-std=c++17", "-fopenmp"],
+    #     extra_link_args=common_link_args + ["-fopenmp"],
+    #     include_dirs=common_include_dirs,
+    #     library_dirs=common_library_dirs,
+    #     libraries=common_libraries + ["arrow", "parquet"],
+    #     language="c++",
+    #     define_macros=[
+    #         ("NPY_NO_DEPRECATED_API", "NPY_1_7_API_VERSION"),
+    #         ("_GNU_SOURCE", None),
+    #     ],
+    # ),
+    # # MINIMAL schema Parquet converter (only 16 fields - MAXIMUM SPEED)
+    # Extension(
+    #     "bam_filter.parquet_converter_minimal",
+    #     sources=[
+    #         "bam_filter/parquet_converter_minimal.pyx",
+    #         "bam_filter/arrow_parquet_writer_minimal.cpp",
+    #     ],
+    #     extra_compile_args=common_compile_args + ["-std=c++17"],
+    #     extra_link_args=common_link_args,
+    #     include_dirs=common_include_dirs,
+    #     library_dirs=common_library_dirs,
+    #     libraries=common_libraries + ["arrow", "parquet"],
+    #     language="c++",
+    #     define_macros=[
+    #         ("NPY_NO_DEPRECATED_API", "NPY_1_7_API_VERSION"),
+    #         ("_GNU_SOURCE", None),
+    #     ],
+    # ),
+    # # Pure C/OpenMP Parquet converter (TRUE parallel threading, shared memory)
+    # Extension(
+    #     "bam_filter.parquet_converter_openmp",
+    #     sources=[
+    #         "bam_filter/parquet_converter_openmp.pyx",
+    #         "bam_filter/arrow_parquet_writer.cpp",
+    #     ],
+    #     extra_compile_args=common_compile_args + ["-std=c++17", "-fopenmp"],
+    #     extra_link_args=common_link_args + ["-fopenmp"],
+    #     include_dirs=common_include_dirs,
+    #     library_dirs=common_library_dirs,
+    #     libraries=common_libraries + ["arrow", "parquet"],
+    #     language="c++",
+    #     define_macros=[
+    #         ("NPY_NO_DEPRECATED_API", "NPY_1_7_API_VERSION"),
+    #         ("_GNU_SOURCE", None),
+    #     ],
+    # ),
+    # # Fast unified alignment reader (SAM/SAM.gz/BAM) - replaced by DuckDB converter
+    # Extension(
+    #     "bam_filter.fast_alignment_reader",
+    #     ["bam_filter/fast_alignment_reader.pyx"],
+    #     extra_compile_args=common_compile_args,
+    #     extra_link_args=common_link_args,
+    #     include_dirs=common_include_dirs,
+    #     library_dirs=common_library_dirs,
+    #     libraries=common_libraries,
+    # ),
+    # # Fast dual-table Parquet writer (by_reference + by_read) - replaced by DuckDB converter
+    # Extension(
+    #     "bam_filter.fast_parquet_writer",
+    #     ["bam_filter/fast_parquet_writer.pyx"],
+    #     extra_compile_args=common_compile_args,
+    #     extra_link_args=common_link_args,
+    #     include_dirs=common_include_dirs,
+    #     library_dirs=common_library_dirs,
+    #     libraries=common_libraries,
+    # ),
+    # # Fast BAM/SAM to Parquet conversion pipeline - replaced by DuckDB converter
+    # Extension(
+    #     "bam_filter.bam_to_parquet_fast",
+    #     ["bam_filter/bam_to_parquet_fast.pyx"],
+    #     extra_compile_args=common_compile_args,
+    #     extra_link_args=common_link_args,
+    #     include_dirs=common_include_dirs,
+    #     library_dirs=common_library_dirs,
+    #     libraries=common_libraries,
+    # ),
     # # Modular architecture - Core batch processing framework
     # Extension(
     #     "bam_filter.batch_processor",

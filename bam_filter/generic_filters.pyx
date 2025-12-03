@@ -140,12 +140,12 @@ cdef double get_column_value(RefStats* stats, int column_index) noexcept nogil:
         return <double>stats.read_length_median
     elif column_index == 8:  # read_length_mode
         return <double>stats.read_length_mode
-    elif column_index == 9:  # gc_content_mean
-        return stats.gc_content_mean
-    elif column_index == 10:  # gc_content_std
-        return stats.gc_content_std
-    elif column_index == 11:  # gc_content_total
-        return stats.gc_content_total
+    elif column_index == 9:  # gc_content_mean (backward compat: maps to read_gc)
+        return stats.read_gc_content_mean
+    elif column_index == 10:  # gc_content_std (backward compat: maps to read_gc)
+        return stats.read_gc_content_std
+    elif column_index == 11:  # gc_content_total (backward compat: maps to read_gc)
+        return stats.read_gc_content_total
     elif column_index == 12:  # dust_mean
         return stats.dust_mean
     elif column_index == 13:  # dust_std

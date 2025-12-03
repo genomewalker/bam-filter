@@ -91,6 +91,7 @@ from bam_filter.stats_rle cimport (
 )
 from bam_filter.stats_helpers cimport (
     count_gc_bases,
+    count_reference_gc_bases,
     get_query_alignment_length,
     fnv1a_hash_read_id,
     compare_int32,
@@ -265,9 +266,12 @@ cdef struct RefStats:
     double mapq_std
     double edit_dist_mean
     double edit_dist_std
-    double gc_content_mean         # Mean of per-read GC%
-    double gc_content_std          # Std of per-read GC%
-    double gc_content_total        # Overall GC content (total GC bases / total read length * 100)
+    double read_gc_content_mean         # Mean of per-read GC% (READ sequence)
+    double read_gc_content_std          # Std of per-read GC% (READ sequence)
+    double read_gc_content_total        # Overall GC content (total GC bases / total read length * 100) (READ)
+    double ref_gc_content_mean          # Mean of per-read reference GC%
+    double ref_gc_content_std           # Std of per-read reference GC%
+    double ref_gc_content_total         # Overall reference GC content (total ref GC / total ref length * 100)
     
     # Coverage statistics
     int64_t bases_covered
@@ -547,7 +551,9 @@ cdef int calculate_reference_stats(
     # Counters and accumulators
     cdef int64_t n_alns = 0
     cdef int64_t total_read_length = 0
-    cdef int64_t total_gc_bases = 0
+    cdef int64_t total_read_gc_bases = 0
+    cdef int64_t total_ref_gc_bases = 0
+    cdef int64_t total_ref_length = 0
     cdef double total_ani = 0.0
     
     # Min/max tracking
@@ -556,18 +562,19 @@ cdef int calculate_reference_stats(
     
     # Welford's algorithm variables (combined for efficiency)
     cdef double qaln_mean = 0.0, qaln_M2 = 0.0
-    cdef double as_mean = 0.0, as_M2 = 0.0  
+    cdef double as_mean = 0.0, as_M2 = 0.0
     cdef double nm_mean = 0.0, nm_M2 = 0.0
     cdef double mapq_mean = 0.0, mapq_M2 = 0.0
     cdef double ani_mean = 0.0, ani_M2 = 0.0
     cdef double dust_mean_acc = 0.0, dust_M2 = 0.0
-    cdef double gc_mean = 0.0, gc_M2 = 0.0
-    cdef int64_t qaln_count = 0, as_count = 0, nm_count = 0, mapq_count = 0, gc_count = 0
+    cdef double read_gc_mean = 0.0, read_gc_M2 = 0.0
+    cdef double ref_gc_mean = 0.0, ref_gc_M2 = 0.0
+    cdef int64_t qaln_count = 0, as_count = 0, nm_count = 0, mapq_count = 0, read_gc_count = 0, ref_gc_count = 0
     
     # Main processing loop
     cdef int ret = 0
-    cdef int32_t read_length, gc_bases, nm_val, mapq_val
-    cdef double ani, qaln_len, as_val, gc_percent, dust_val
+    cdef int32_t read_length, read_gc_bases, ref_gc_bases, ref_length, nm_val, mapq_val
+    cdef double ani, qaln_len, as_val, read_gc_percent, ref_gc_percent, dust_val
     cdef int64_t dust_count = 0
     cdef double delta  # Reused for all Welford calculations
     cdef int64_t start_pos, end_pos, i  # Add missing 'i' variable
@@ -615,9 +622,18 @@ cdef int calculate_reference_stats(
         mapq_val = 255 if b.core.qual == 255 else b.core.qual
         
         # Analyze sequence data
-        # Calculate GC content in one pass
-        gc_bases = count_gc_bases(b)
-        gc_percent = (<double>gc_bases / read_length) * 100.0
+        # Calculate READ GC content in one pass
+        read_gc_bases = count_gc_bases(b)
+        read_gc_percent = (<double>read_gc_bases / read_length) * 100.0
+
+        # Calculate REFERENCE GC content
+        ref_gc_bases = count_reference_gc_bases(b, &ref_length)
+        if ref_length > 0:
+            ref_gc_percent = (<double>ref_gc_bases / ref_length) * 100.0
+        else:
+            ref_gc_percent = read_gc_percent  # Fallback to read GC if no MD tag
+            ref_length = read_length
+            ref_gc_bases = read_gc_bases
 
         # Calculate DUST score (normalized 0-1)
         dust_val = calculate_dust_score(b)
@@ -676,7 +692,9 @@ cdef int calculate_reference_stats(
         # fprintf(stderr, "Coverage updated: start=%lld, end=%lld, depth=1\n", start_pos, end_pos)
         # Update all running statistics in one pass
         total_read_length += read_length
-        total_gc_bases += gc_bases
+        total_read_gc_bases += read_gc_bases
+        total_ref_gc_bases += ref_gc_bases
+        total_ref_length += ref_length
         total_ani += ani
         
         # Min/max tracking
@@ -718,12 +736,18 @@ cdef int calculate_reference_stats(
         delta = mapq_val - mapq_mean
         mapq_mean += delta / mapq_count
         mapq_M2 += delta * (mapq_val - mapq_mean)
-        
-        # GC content (using pre-calculated value)
-        gc_count += 1
-        delta = gc_percent - gc_mean
-        gc_mean += delta / gc_count
-        gc_M2 += delta * (gc_percent - gc_mean)
+
+        # READ GC content (using pre-calculated value)
+        read_gc_count += 1
+        delta = read_gc_percent - read_gc_mean
+        read_gc_mean += delta / read_gc_count
+        read_gc_M2 += delta * (read_gc_percent - read_gc_mean)
+
+        # REFERENCE GC content (using pre-calculated value)
+        ref_gc_count += 1
+        delta = ref_gc_percent - ref_gc_mean
+        ref_gc_mean += delta / ref_gc_count
+        ref_gc_M2 += delta * (ref_gc_percent - ref_gc_mean)
     
     # Post-processing and final calculations
     
@@ -751,24 +775,57 @@ cdef int calculate_reference_stats(
     for i in range(n_alns):
         diff = read_lengths[i] - stats.read_length_mean
         sum_sq_diff += diff * diff
-    stats.read_length_std = sqrt(sum_sq_diff / (n_alns - 1)) if n_alns > 1 else 0.0
-    
+    if n_alns > 1:
+        stats.read_length_std = sqrt(sum_sq_diff / (n_alns - 1))
+    else:
+        stats.read_length_std = 0.0
+
     # Set all the Welford-calculated statistics
     stats.aligned_length_mean = qaln_mean
     stats.ani_mean = ani_mean
-    stats.ani_std = sqrt(ani_M2 / (n_alns - 1)) if n_alns > 1 else 0.0
+    if n_alns > 1:
+        stats.ani_std = sqrt(ani_M2 / (n_alns - 1))
+    else:
+        stats.ani_std = 0.0
     stats.aln_score_mean = as_mean
-    stats.aln_score_std = sqrt(as_M2 / (as_count - 1)) if as_count > 1 else 0.0
+    if as_count > 1:
+        stats.aln_score_std = sqrt(as_M2 / (as_count - 1))
+    else:
+        stats.aln_score_std = 0.0
     stats.edit_dist_mean = nm_mean
-    stats.edit_dist_std = sqrt(nm_M2 / (nm_count - 1)) if nm_count > 1 else 0.0
+    if nm_count > 1:
+        stats.edit_dist_std = sqrt(nm_M2 / (nm_count - 1))
+    else:
+        stats.edit_dist_std = 0.0
     stats.mapq_mean = mapq_mean
-    stats.mapq_std = sqrt(mapq_M2 / (mapq_count - 1)) if mapq_count > 1 else 0.0
-    stats.gc_content_mean = gc_mean
-    stats.gc_content_std = sqrt(gc_M2 / (gc_count - 1)) if gc_count > 1 else 0.0
-    stats.gc_content_total = ((<double>total_gc_bases / total_read_length) * 100.0) if total_read_length > 0 else 0.0
+    if mapq_count > 1:
+        stats.mapq_std = sqrt(mapq_M2 / (mapq_count - 1))
+    else:
+        stats.mapq_std = 0.0
+    stats.read_gc_content_mean = read_gc_mean
+    if read_gc_count > 1:
+        stats.read_gc_content_std = sqrt(read_gc_M2 / (read_gc_count - 1))
+    else:
+        stats.read_gc_content_std = 0.0
+    if total_read_length > 0:
+        stats.read_gc_content_total = (<double>total_read_gc_bases / <double>total_read_length) * 100.0
+    else:
+        stats.read_gc_content_total = 0.0
+    stats.ref_gc_content_mean = ref_gc_mean
+    if ref_gc_count > 1:
+        stats.ref_gc_content_std = sqrt(ref_gc_M2 / (ref_gc_count - 1))
+    else:
+        stats.ref_gc_content_std = 0.0
+    if total_ref_length > 0:
+        stats.ref_gc_content_total = (<double>total_ref_gc_bases / <double>total_ref_length) * 100.0
+    else:
+        stats.ref_gc_content_total = 0.0
     if dust_count > 0:
         stats.dust_mean = dust_mean_acc
-        stats.dust_std = sqrt(dust_M2 / (dust_count - 1)) if dust_count > 1 else 0.0
+        if dust_count > 1:
+            stats.dust_std = sqrt(dust_M2 / (dust_count - 1))
+        else:
+            stats.dust_std = 0.0
     else:
         stats.dust_mean = 0.0
         stats.dust_std = 0.0

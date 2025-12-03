@@ -27,6 +27,7 @@ from bam_filter.processor_types cimport (
 
 cdef int32_t get_query_alignment_length(bam1_t *src) noexcept nogil
 cdef int count_gc_bases(bam1_t* b) noexcept nogil
+cdef int count_reference_gc_bases(bam1_t* b, int32_t* ref_length_out) noexcept nogil
 cdef float compute_ani(bam1_t* b) noexcept nogil
 cdef int extract_aux_int(uint8_t* aux) noexcept nogil
 cdef int64_t fnv1a_hash_read_id(char* qname) noexcept nogil

@@ -1083,10 +1083,10 @@ cdef void _accumulate_taxid_metrics(dict entry, RefStats* stats, str ref_name):
     cdef dict accum = entry['_accum']
     cdef int64_t weight = stats.n_alns
     cdef double read_mean = stats.read_length_mean
-    cdef double gc_mean = stats.gc_content_mean
+    cdef double gc_mean = stats.read_gc_content_mean
     cdef double ani_mean = stats.ani_mean
     cdef double total_read_bases = read_mean * weight if weight > 0 else 0.0
-    cdef double total_gc_bases = (stats.gc_content_total / 100.0) * total_read_bases if total_read_bases > 0 else 0.0
+    cdef double total_gc_bases = (stats.read_gc_content_total / 100.0) * total_read_bases if total_read_bases > 0 else 0.0
 
     entry['n_refs'] += 1
     entry['total_alns'] += stats.n_alns
@@ -1116,7 +1116,7 @@ cdef void _accumulate_taxid_metrics(dict entry, RefStats* stats, str ref_name):
         accum['sum_read_length'] += read_mean * weight
         accum['sum_read_length_sq'] += _compute_sum_of_squares(read_mean, stats.read_length_std, weight)
         accum['sum_gc'] += gc_mean * weight
-        accum['sum_gc_sq'] += _compute_sum_of_squares(gc_mean, stats.gc_content_std, weight)
+        accum['sum_gc_sq'] += _compute_sum_of_squares(gc_mean, stats.read_gc_content_std, weight)
         accum['sum_ani'] += ani_mean * weight
         accum['sum_ani_sq'] += _compute_sum_of_squares(ani_mean, stats.ani_std, weight)
         accum['sum_dust'] += stats.dust_mean * weight

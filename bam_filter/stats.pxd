@@ -50,9 +50,12 @@ cdef struct RefStats:
     double mapq_std
     double edit_dist_mean
     double edit_dist_std
-    double gc_content_mean
-    double gc_content_std
-    double gc_content_total
+    double read_gc_content_mean
+    double read_gc_content_std
+    double read_gc_content_total
+    double ref_gc_content_mean
+    double ref_gc_content_std
+    double ref_gc_content_total
     double dust_mean
     double dust_std
 
