@@ -2239,36 +2239,19 @@ cdef class TaxonomyDatabase:
         # Build database
         tax_db = _build_taxonomy_db_from_parsed_data(nodes_data, names_dict, num_threads=1)
         t5 = time.time()
-        print(f"Taxonomy database object created ({t5-t4:.2f}s total for C structures), checking for LCA cache...")
-        import sys
-        sys.stdout.flush()
+        print(f"Taxonomy database object created ({t5-t4:.2f}s total for C structures)")
 
-        # Load LCA cache if exists
         lca_cache_path = os.path.join(input_dir, 'lca_cache_taxids.parquet')
-        t6 = time.time()
         if os.path.exists(lca_cache_path):
-            print(f"LCA cache file exists at {lca_cache_path}, loading...")
-            sys.stdout.flush()
             t7 = time.time()
             cache_table = pq.read_table(lca_cache_path)
-            t8 = time.time()
-            print(f"  Cache parquet loaded in {t8-t7:.2f}s, converting to list...")
-            sys.stdout.flush()
             cached_taxids = cache_table['cached_taxids'].to_pylist()
-            t9 = time.time()
-            print(f"  Converted to list in {t9-t8:.2f}s ({len(cached_taxids):,} taxids), building cache...")
-            sys.stdout.flush()
             tax_db.build_lca_cache(cached_taxids)
             t10 = time.time()
-            print(f"  LCA cache built in {t10-t9:.2f}s (total cache loading: {t10-t7:.2f}s)")
-            sys.stdout.flush()
-        else:
-            print(f"No LCA cache file found at {lca_cache_path}")
-            sys.stdout.flush()
+            print(f"LCA cache loaded ({len(cached_taxids):,} taxids) in {t10-t7:.2f}s")
 
         t11 = time.time()
-        print(f"Returning taxonomy database (total from_parquet time: {t11-t0:.2f}s)")
-        sys.stdout.flush()
+        print(f"Total from_parquet time: {t11-t0:.2f}s")
         return tax_db
 
     @property

@@ -20,13 +20,12 @@ RESPONSIBILITIES:
 - Graph data structures (WeightedGraph, GraphNode)
 - Graph creation and destruction
 - Graph building from alignment data
-- Edge weight pruning using tail-focused broken-stick model
+- Edge weight pruning using maximum drop ratio detection
 - Graph statistics calculation
 
 EDGE WEIGHT FILTERING:
-- Uses tail-focused broken-stick model to detect threshold
-- Focuses on upper tail of edge weight distribution (typically 75th-90th percentile)
-- Detects where high-weight edges exceed harmonic expectations
+- Uses maximum drop ratio to find threshold separating noise from signal
+- Finds where histogram[w]/histogram[w+1] is maximum (biggest relative drop)
 - INTERPRETATION: Edge weight >= threshold → KEEP, < threshold → REMOVE
 - Consistent with clustering coefficient filtering approach
 
@@ -57,7 +56,7 @@ from bam_filter.processor_graph_ops cimport GraphNode, WeightedGraph
 
 # igraph C API (used for direct igraph creation)
 from bam_filter.processor_igraph cimport *
-from libc.math cimport ceil
+from libc.math cimport ceil, log, sqrt, fabs
 
 cdef extern from "bam_filter/c_logging.h":
     void bf_nogil_logf_notime(const char* tag, const char* fmt, ...) nogil
@@ -390,34 +389,41 @@ cdef uint64_t count_edges_from_read_index(
     cdef uint32_t kk
     cdef uint32_t* new_neighbors
     cdef uint64_t new_cap
-    cdef uint64_t total_neighbors = 0  # DIAGNOSTIC
-    cdef uint32_t max_neighbors = 0    # DIAGNOSTIC
+    cdef uint64_t total_neighbors = 0
+    cdef uint32_t max_neighbors = 0
     cdef uint8_t* read_seen_refs = NULL
-    
+    cdef uint32_t* seen_refs_this_read = NULL
+    cdef uint32_t seen_count = 0
+
     if not edge_weights:
         return 0
-    
+
+    # Allocate read_seen_refs ONCE outside the loop - major performance fix
+    read_seen_refs = <uint8_t*>calloc(num_refs, sizeof(uint8_t))
+    if not read_seen_refs:
+        free(edge_weights)
+        return 0
+
+    # Track which refs were marked per-read so we only clear those (not full memset)
+    seen_refs_this_read = <uint32_t*>malloc(1024 * sizeof(uint32_t))
+    if not seen_refs_this_read:
+        free(read_seen_refs)
+        free(edge_weights)
+        return 0
+    cdef uint32_t seen_capacity = 1024
+
     if verbose:
         bf_nogil_logf_notime(b"IGRAPH OPS", "Counting edges from ReadIndex...\n")
-    
+
     for ref_idx in range(num_refs):
         if ref_stats and ref_stats[ref_idx].total_reads < min_read_count:
             continue
-        
+
         read_count = read_index.ref_read_counts[ref_idx]
         if read_count == 0 or not read_index.ref_to_reads[ref_idx]:
             continue
-        
-        neighbor_count = 0
 
-        # Accumulate weights AND track which neighbors exist
-        # Use a temporary marker array to track which references this read has seen
-        read_seen_refs = <uint8_t*>calloc(num_refs, sizeof(uint8_t))
-        if not read_seen_refs:
-            if neighbors:
-                free(neighbors)
-            free(edge_weights)
-            return 0
+        neighbor_count = 0
 
         for read_i in range(read_count):
             read_idx64 = read_index.ref_to_reads[ref_idx][read_i]
@@ -429,6 +435,8 @@ cdef uint64_t count_edges_from_read_index(
 
             if aln_end_i > pool.alignment_count:
                 continue
+
+            seen_count = 0
 
             # First pass: mark which references this read maps to (unique per read)
             aln_idx64 = aln_start_i
@@ -442,47 +450,49 @@ cdef uint64_t count_edges_from_read_index(
                     continue
 
                 # Mark that this read has an alignment to other_ref_idx
-                read_seen_refs[other_ref_idx] = 1
+                if read_seen_refs[other_ref_idx] == 0:
+                    read_seen_refs[other_ref_idx] = 1
+                    # Track for efficient clearing
+                    if seen_count >= seen_capacity:
+                        seen_capacity = seen_capacity * 2
+                        seen_refs_this_read = <uint32_t*>realloc(seen_refs_this_read, seen_capacity * sizeof(uint32_t))
+                        if not seen_refs_this_read:
+                            if neighbors: free(neighbors)
+                            free(read_seen_refs)
+                            free(edge_weights)
+                            return 0
+                    seen_refs_this_read[seen_count] = other_ref_idx
+                    seen_count += 1
 
             # Second pass: increment edge weight once per unique reference for this read
-            aln_idx64 = aln_start_i
-            while aln_idx64 < aln_end_i:
-                other_ref_idx = pool.alignments[aln_idx64].reference_index
-                aln_idx64 += 1
+            for kk in range(seen_count):
+                other_ref_idx = seen_refs_this_read[kk]
 
-                if other_ref_idx >= num_refs or other_ref_idx == ref_idx:
-                    continue
-                if ref_stats and ref_stats[other_ref_idx].total_reads < min_read_count:
-                    continue
+                # First time seeing this neighbor reference across all reads?
+                if edge_weights[other_ref_idx] == 0:
+                    if neighbor_count >= neighbor_capacity:
+                        new_cap = neighbor_capacity * 2 if neighbor_capacity > 0 else 256
+                        new_neighbors = <uint32_t*>safe_realloc(
+                            neighbors,
+                            neighbor_capacity * sizeof(uint32_t),
+                            new_cap * sizeof(uint32_t)
+                        )
+                        if not new_neighbors:
+                            if neighbors: free(neighbors)
+                            free(seen_refs_this_read)
+                            free(read_seen_refs)
+                            free(edge_weights)
+                            return 0
+                        neighbors = new_neighbors
+                        neighbor_capacity = new_cap
+                    neighbors[neighbor_count] = other_ref_idx
+                    neighbor_count += 1
 
-                # Only increment once per read (check and clear the marker)
-                if read_seen_refs[other_ref_idx] == 1:
-                    # First time seeing this neighbor reference across all reads?
-                    if edge_weights[other_ref_idx] == 0:
-                        if neighbor_count >= neighbor_capacity:
-                            new_cap = neighbor_capacity * 2 if neighbor_capacity > 0 else 256
-                            new_neighbors = <uint32_t*>safe_realloc(
-                                neighbors,
-                                neighbor_capacity * sizeof(uint32_t),
-                                new_cap * sizeof(uint32_t)
-                            )
-                            if not new_neighbors:
-                                if neighbors:
-                                    free(neighbors)
-                                free(edge_weights)
-                                free(read_seen_refs)
-                                return 0
-                            neighbors = new_neighbors
-                            neighbor_capacity = new_cap
-                        neighbors[neighbor_count] = other_ref_idx
-                        neighbor_count += 1
+                # Increment edge weight once per unique shared read
+                edge_weights[other_ref_idx] += 1
+                # Clear marker for next read
+                read_seen_refs[other_ref_idx] = 0
 
-                    # Increment edge weight once per unique shared read
-                    edge_weights[other_ref_idx] += 1
-                    # Clear marker so we don't count this reference again for this read
-                    read_seen_refs[other_ref_idx] = 0
-        
-        # DIAGNOSTIC: Track neighbor counts
         total_neighbors += neighbor_count
         if neighbor_count > max_neighbors:
             max_neighbors = neighbor_count
@@ -497,8 +507,8 @@ cdef uint64_t count_edges_from_read_index(
         for kk in range(neighbor_count):
             edge_weights[neighbors[kk]] = 0
 
-        # Free per-reference temporary array
-        free(read_seen_refs)
+    free(seen_refs_this_read)
+    free(read_seen_refs)
 
     if neighbors:
         free(neighbors)
@@ -527,7 +537,7 @@ cdef uint64_t count_edges_from_read_index(
 
 
 # ---------------------------------------------------------------------------
-# Broken-stick based min-edge-weight picker
+# Elbow-based min-edge-weight picker
 # ---------------------------------------------------------------------------
 
 
@@ -579,7 +589,7 @@ cdef int _float_compare_ascending(const void* a, const void* b) noexcept nogil:
         return 0
 
 
-cdef uint32_t pick_min_edge_weight_broken_stick(
+cdef uint32_t pick_min_edge_weight_elbow(
     MemoryPool* pool,
     ReadIndex* read_index,
     ReferenceStats* ref_stats,
@@ -590,19 +600,24 @@ cdef uint32_t pick_min_edge_weight_broken_stick(
     double tail_percentile,
     uint32_t min_tail_size
 ) noexcept nogil:
-    """Suggest an integer min_edge_weight using a tail-focused broken-stick model.
+    """Select edge weight threshold using maximum drop ratio detection.
 
-    The routine analyzes the distribution of undirected edge weights (shared
-    read counts) and returns a conservative integer threshold. It focuses on
-    the upper tail of the distribution to avoid being dominated by the large
-    number of low-weight noise edges.
+    Uses a READ-CENTRIC approach for cache efficiency:
+    1. Iterate over reads sequentially (cache-friendly memory access)
+    2. For each read, get the small list of references it maps to
+    3. Use open-addressing hash table keyed by (ref_i, ref_j) pairs
+    4. Build histogram directly from hash table values
+    5. Find maximum drop ratio: threshold where count[w]/count[w+1] is maximum
+
+    The maximum drop ratio identifies the boundary between noise and signal.
+    Example: 71.7% at w=1 -> 12.9% at w=2 = 5.6x drop (biggest) -> threshold=2
 
     Parameters
     ----------
     pool : MemoryPool*
         Memory pool containing alignment data.
     read_index : ReadIndex*
-        ReadIndex used to enumerate edges.
+        ReadIndex (unused in new algorithm, kept for API compatibility).
     ref_stats : ReferenceStats*
         Optional per-reference stats used to skip low-coverage refs.
     num_refs : uint32_t
@@ -610,409 +625,262 @@ cdef uint32_t pick_min_edge_weight_broken_stick(
     min_read_count : uint32_t
         Minimum reads for a reference to be included.
     tol : double
-        Tolerance factor used to detect deviation from harmonic expectation.
+        Unused (kept for API compatibility).
     verbose : int
         Verbosity flag.
     tail_percentile : double
-        Fraction (0-1) indicating tail start (e.g., 0.75 for 75th percentile).
+        Unused (kept for API compatibility).
     min_tail_size : uint32_t
-        Minimum number of tail samples required to run tail-focused detection.
+        Unused (kept for API compatibility).
 
     Returns
     -------
     uint32_t
-        Suggested integer threshold; returns 0 when insufficient data is
-        available (no filtering) or when allocations fail.
+        Suggested integer threshold; returns 1 when insufficient data.
     """
-    cdef uint64_t edge_count = 0
-    cdef uint32_t* edge_weights = NULL
-    cdef uint32_t* neighbors = NULL
-    cdef uint32_t neighbor_count = 0
-    cdef uint32_t neighbor_capacity = 0
-    cdef uint64_t i, kk
-    cdef uint64_t read_idx64
-    cdef uint32_t read_i, read_count
-    cdef uint64_t aln_start_i, aln_end_i, aln_idx64
-    cdef uint32_t other_ref_idx
-    cdef uint32_t ref_idx
-    cdef uint32_t new_cap_i
-    cdef uint32_t* new_neighbors
-    cdef uint64_t written = 0
-    cdef uint32_t* weights = NULL
-    cdef float* sorted_vals = NULL
-    cdef double sumv = 0.0
-    cdef float* harmonic_suffix = NULL
-    cdef uint32_t cutoff_rank = 0
-    cdef uint32_t threshold_u = 0
-    cdef float expected
-    cdef uint64_t count_w1 = 0, count_w2 = 0, count_w3 = 0, count_w5 = 0, count_w10 = 0
-    # Tail-focused analysis temporaries (declare at function scope)
-    cdef uint32_t tail_start = 0
-    cdef uint32_t tail_len = 0
-    cdef double tail_sum = 0.0
-    cdef uint32_t jj = 0
-    cdef float* tail_harmonic = NULL
-    cdef int tail_cutoff = -1
-    cdef uint32_t threshold_tail = 0
-    cdef uint32_t threshold_pct = 0
-    cdef uint32_t chosen_tail_thr = 0
-    cdef uint8_t* read_seen_refs = NULL
+    # Read iteration variables
+    cdef uint32_t read_idx
+    cdef uint64_t aln_start, aln_end, aln_idx
+    cdef uint32_t aln_count
 
-    # First, count edges to know exact allocation size
-    edge_count = count_edges_from_read_index(read_index, ref_stats, num_refs, min_read_count, 1, pool, verbose)
-    if edge_count == 0:
-        return 0
+    # Per-read reference collection (small, cache-friendly)
+    cdef uint32_t* read_refs = NULL
+    cdef uint32_t read_refs_count = 0
+    cdef uint32_t read_refs_capacity = 64
+    cdef uint32_t ref_a, ref_b, tmp_ref
+    cdef uint32_t ii, jj
 
-    # Allocate arrays
-    weights = <uint32_t*>malloc(edge_count * sizeof(uint32_t))
-    if not weights:
-        return 0
+    # Hash table for edge weights: key = (ref_lo << 32 | ref_hi), value = count
+    # Open-addressing with linear probing
+    cdef uint64_t hash_capacity = 1 << 27  # 128M slots (~1.5GB) for complete data
+    cdef uint64_t* hash_keys = NULL    # 0 = empty slot
+    cdef uint32_t* hash_values = NULL
+    cdef uint64_t edge_key, slot, probe
+    cdef uint64_t edges_inserted = 0
+    cdef uint32_t shared_reads = 0
+    cdef uint32_t skipped_high_multimap = 0
 
-    # Temporary accumulator for neighbor weights
-    edge_weights = <uint32_t*>calloc(num_refs, sizeof(uint32_t))
-    if not edge_weights:
-        free(weights)
-        return 0
+    # Histogram (built directly, max reasonable edge weight ~1000)
+    cdef uint32_t HIST_SIZE = 4096
+    cdef uint64_t* histogram = <uint64_t*>calloc(HIST_SIZE, sizeof(uint64_t))
+    cdef uint32_t max_weight = 0
+    cdef uint64_t total_count = 0
+    cdef double total_sum = 0.0
+    cdef uint32_t w
 
-    # Iterate reads and collect undirected edge weights (only other_ref_idx > ref_idx)
-    written = 0
-    for ref_idx in range(num_refs):
-        if ref_stats and ref_stats[ref_idx].total_reads < min_read_count:
-            continue
+    # Weight distribution stats for logging
+    cdef uint64_t count_w1 = 0, count_w2 = 0, count_w3 = 0
 
-        read_count = read_index.ref_read_counts[ref_idx]
-        if read_count == 0 or not read_index.ref_to_reads[ref_idx]:
-            continue
+    # Progress tracking
+    cdef uint32_t progress_interval = pool.unique_read_count // 20 if pool.unique_read_count > 20 else 1
+    cdef uint32_t reads_processed = 0
 
-        neighbor_count = 0
-        neighbor_capacity = 0
-        neighbors = NULL
+    if not histogram:
+        return 1
 
-        # Temporary marker array to track which references each read has seen
-        read_seen_refs = <uint8_t*>calloc(num_refs, sizeof(uint8_t))
-        if not read_seen_refs:
-            free(edge_weights)
-            free(weights)
-            return 0
+    # Allocate hash table
+    hash_keys = <uint64_t*>calloc(hash_capacity, sizeof(uint64_t))
+    hash_values = <uint32_t*>calloc(hash_capacity, sizeof(uint32_t))
+    if not hash_keys or not hash_values:
+        if hash_keys: free(hash_keys)
+        if hash_values: free(hash_values)
+        free(histogram)
+        return 1
 
-        # accumulate counts for neighbors of this ref (count each read once per reference)
-        for read_i in range(read_count):
-            read_idx64 = read_index.ref_to_reads[ref_idx][read_i]
-            if read_idx64 >= pool.unique_read_count:
-                continue
-
-            aln_start_i = pool.read_alignment_starts[read_idx64]
-            aln_end_i = aln_start_i + pool.read_alignment_counts[read_idx64]
-            if aln_end_i > pool.alignment_count:
-                continue
-
-            # First pass: mark which references this read maps to
-            aln_idx64 = aln_start_i
-            while aln_idx64 < aln_end_i:
-                other_ref_idx = pool.alignments[aln_idx64].reference_index
-                aln_idx64 += 1
-                if other_ref_idx >= num_refs or other_ref_idx == ref_idx:
-                    continue
-                if ref_stats and ref_stats[other_ref_idx].total_reads < min_read_count:
-                    continue
-                read_seen_refs[other_ref_idx] = 1
-
-            # Second pass: increment edge weight once per unique reference for this read
-            aln_idx64 = aln_start_i
-            while aln_idx64 < aln_end_i:
-                other_ref_idx = pool.alignments[aln_idx64].reference_index
-                aln_idx64 += 1
-                if other_ref_idx >= num_refs or other_ref_idx == ref_idx:
-                    continue
-                if ref_stats and ref_stats[other_ref_idx].total_reads < min_read_count:
-                    continue
-
-                if read_seen_refs[other_ref_idx] == 1:
-                    if edge_weights[other_ref_idx] == 0:
-                        # add to neighbor list
-                        if neighbor_count >= neighbor_capacity:
-                            new_cap_i = neighbor_capacity * 2 if neighbor_capacity > 0 else 256
-                            new_neighbors = <uint32_t*>safe_realloc(neighbors, neighbor_capacity * sizeof(uint32_t), new_cap_i * sizeof(uint32_t))
-                            if not new_neighbors:
-                                if neighbors:
-                                    free(neighbors)
-                                free(edge_weights)
-                                free(weights)
-                                free(read_seen_refs)
-                                return 0
-                            neighbors = new_neighbors
-                            neighbor_capacity = new_cap_i
-                        neighbors[neighbor_count] = other_ref_idx
-                        neighbor_count += 1
-
-                    edge_weights[other_ref_idx] += 1
-                    read_seen_refs[other_ref_idx] = 0  # Clear marker
-
-        # For each neighbor > ref_idx add undirected edge weight
-        for kk in range(neighbor_count):
-            other_ref_idx = neighbors[kk]
-            if other_ref_idx > ref_idx:
-                weights[written] = edge_weights[other_ref_idx]
-                written += 1
-
-        # reset accumulator for seen neighbors
-        for kk in range(neighbor_count):
-            edge_weights[neighbors[kk]] = 0
-
-        # Free per-reference temporary array
-        free(read_seen_refs)
-
-        if neighbors:
-            free(neighbors)
-
-    # written should equal edge_count (or less if min_edge_weight >1 in first pass)
-    if written == 0:
-        free(edge_weights)
-        free(weights)
-        return 0
-
-    # convert to float and sort ascending
-    sorted_vals = <float*>malloc(written * sizeof(float))
-    if not sorted_vals:
-        free(edge_weights)
-        free(weights)
-        return 0
-    sumv = 0.0
-    for i in range(written):
-        sorted_vals[i] = <float>weights[i]
-        sumv += sorted_vals[i]
-
-    qsort(sorted_vals, written, sizeof(float), _float_compare_ascending)
+    # Allocate per-read reference buffer
+    read_refs = <uint32_t*>malloc(read_refs_capacity * sizeof(uint32_t))
+    if not read_refs:
+        free(hash_keys)
+        free(hash_values)
+        free(histogram)
+        return 1
 
     if verbose:
-        bf_nogil_logf_notime(b"BROKEN-STICK", "Collected %llu edge weights for analysis\n", <unsigned long long>written)
-        bf_nogil_logf_notime(b"BROKEN-STICK", "Edge weight statistics:\n")
-        bf_nogil_logf_notime(b"BROKEN-STICK", "  Min: %.0f, Max: %.0f, Mean: %.2f\n", sorted_vals[0], sorted_vals[written-1], sumv / <double>written)
-        bf_nogil_logf_notime(
-            b"BROKEN-STICK",
-            "  Median: %.0f, 75th percentile: %.0f, 90th percentile: %.0f\n",
-            sorted_vals[written // 2],
-            sorted_vals[<uint64_t>(written * 0.75)],
-            sorted_vals[<uint64_t>(written * 0.9)],
-        )
-        bf_nogil_logf_notime(
-            b"BROKEN-STICK",
-            "  95th percentile: %.0f, 99th percentile: %.0f, 99.9th percentile: %.0f\n",
-            sorted_vals[<uint64_t>(written * 0.95)],
-            sorted_vals[<uint64_t>(written * 0.99)],
-            sorted_vals[<uint64_t>(written * 0.999)],
-        )
-        bf_nogil_logf_notime(b"BROKEN-STICK", "  Total weight sum: %.0f\n", sumv)
-        
-        # Count edges at low weights for distribution insight
-        for i in range(written):
-            if sorted_vals[i] == 1:
-                count_w1 += 1
-            elif sorted_vals[i] == 2:
-                count_w2 += 1
-            elif sorted_vals[i] == 3:
-                count_w3 += 1
-            elif sorted_vals[i] <= 5:
-                count_w5 += 1
-            elif sorted_vals[i] <= 10:
-                count_w10 += 1
-        bf_nogil_logf_notime(b"BROKEN-STICK", "  Distribution (cumulative counts):\n")
-        bf_nogil_logf_notime(
-            b"BROKEN-STICK",
-            "    Weight=1: %llu (%.1f%%), Weight<=2: %llu (%.1f%%), Weight<=3: %llu (%.1f%%)\n",
-            count_w1,
-            100.0 * count_w1 / written,
-            count_w1 + count_w2,
-            100.0 * (count_w1 + count_w2) / written,
-            count_w1 + count_w2 + count_w3,
-            100.0 * (count_w1 + count_w2 + count_w3) / written,
-        )
-        bf_nogil_logf_notime(
-            b"BROKEN-STICK",
-            "    Weight<=5: %llu (%.1f%%), Weight<=10: %llu (%.1f%%)\n",
-            count_w5,
-            100.0 * count_w5 / written,
-            count_w10,
-            100.0 * count_w10 / written,
-        )
+        bf_nogil_logf_notime(b"EDGE-THRESHOLD", "Collecting edge weights (read-centric, %u reads)...\n", pool.unique_read_count)
 
-    # TAIL-FOCUSED BROKEN-STICK (consistent with CC filtering approach)
-    # Run broken-stick detection only on the upper tail of the distribution
-    # (above tail_percentile, typically 75th-90th percentile for edge weights).
-    #
-    # RATIONALE:
-    # - Edge weight distributions are heavily skewed: massive number of low-weight edges (1-2 reads)
-    # - These low-weight edges dominate global broken-stick calculations
-    # - Tail-focused approach detects meaningful breaks in the high-weight signal region
-    # - Ignores the noise-dominated lower distribution
-    #
-    # INTERPRETATION:
-    # - Edges with weight >= threshold are true co-mapping signal → KEEP
-    # - Edges with weight < threshold are spurious co-mapping → REMOVE
-    if tail_percentile > 0.0 and tail_percentile < 1.0 and written >= min_tail_size:
-        tail_start = <uint32_t>(written * tail_percentile)
-        if tail_start >= written:
-            tail_start = written - 1
-        tail_len = <uint32_t>(written - tail_start)
-        if tail_len >= min_tail_size:
-            # compute tail sum
-            tail_sum = 0.0
-            for jj in range(tail_start, written):
-                tail_sum += sorted_vals[jj]
+    # Iterate over reads sequentially - CACHE FRIENDLY
+    for read_idx in range(pool.unique_read_count):
+        aln_start = pool.read_alignment_starts[read_idx]
+        aln_count = pool.read_alignment_counts[read_idx]
+        aln_end = aln_start + aln_count
 
-            # allocate harmonic suffix for tail
-            tail_harmonic = <float*>malloc(tail_len * sizeof(float))
-            if tail_harmonic:
-                for jj in range(tail_len - 1, -1, -1):
-                    if jj == tail_len - 1:
-                        tail_harmonic[jj] = 1.0 / (<float>(jj + 1))
-                    else:
-                        tail_harmonic[jj] = tail_harmonic[jj + 1] + 1.0 / (<float>(jj + 1))
+        if aln_count < 2 or aln_end > <uint64_t>pool.alignment_count:
+            continue
 
-                # Detect cutoff within tail: find where observed > expected * (1 + tolerance)
-                # This identifies where edge weights exceed uniform harmonic expectations
-                tail_cutoff = -1
-                for jj in range(tail_len):
-                    observed = sorted_vals[tail_start + jj]
-                    expected_tail = tail_harmonic[jj] * (<float>(tail_sum) / <float>tail_len)
-                    if observed > expected_tail * (1.0 + <float>tol):
-                        tail_cutoff = jj
+        # Collect unique references for this read (typically small: 2-20)
+        # Cap at 50 refs to avoid combinatorial explosion from highly multi-mapping reads
+        read_refs_count = 0
+        for aln_idx in range(aln_start, aln_end):
+            ref_a = pool.alignments[aln_idx].reference_index
+            if ref_a >= num_refs:
+                continue
+            if ref_stats and ref_stats[ref_a].total_reads < min_read_count:
+                continue
+
+            # Check if already in read_refs (linear search is fast for small arrays)
+            for ii in range(read_refs_count):
+                if read_refs[ii] == ref_a:
+                    break
+            else:
+                # Not found, add it
+                if read_refs_count >= read_refs_capacity:
+                    read_refs_capacity = read_refs_capacity * 2
+                    read_refs = <uint32_t*>realloc(read_refs, read_refs_capacity * sizeof(uint32_t))
+                    if not read_refs:
+                        free(hash_keys)
+                        free(hash_values)
+                        free(histogram)
+                        return 1
+                read_refs[read_refs_count] = ref_a
+                read_refs_count += 1
+
+        # Skip reads that map to only 1 reference (no edges to create)
+        if read_refs_count < 2:
+            continue
+
+        # Track shared reads for statistics
+        shared_reads += 1
+
+        # Skip highly multi-mapping reads (>50 refs) - they create combinatorial explosion
+        if read_refs_count > 50:
+            skipped_high_multimap += 1
+            continue
+
+        # For each pair of references in this read, increment edge weight
+        # Only count (i, j) where i < j to avoid double counting
+        for ii in range(read_refs_count):
+            for jj in range(ii + 1, read_refs_count):
+                ref_a = read_refs[ii]
+                ref_b = read_refs[jj]
+                # Ensure ref_a < ref_b for consistent key
+                if ref_a > ref_b:
+                    tmp_ref = ref_a
+                    ref_a = ref_b
+                    ref_b = tmp_ref
+
+                # Hash key: pack two 32-bit refs into 64-bit key
+                # Add 1 to ref_a so key is never 0 (0 = empty slot)
+                edge_key = ((<uint64_t>(ref_a + 1)) << 32) | <uint64_t>ref_b
+
+                # Linear probing hash lookup/insert
+                slot = (edge_key * 11400714819323198485ULL) % hash_capacity  # fast hash
+                probe = 0
+                while probe < hash_capacity:
+                    if hash_keys[slot] == 0:
+                        # Empty slot - insert new edge
+                        hash_keys[slot] = edge_key
+                        hash_values[slot] = 1
+                        edges_inserted += 1
                         break
-
-                threshold_tail = 0
-                if tail_cutoff >= 0:
-                    threshold_tail = <uint32_t>ceil(sorted_vals[tail_start + tail_cutoff])
-
-                # Percentile candidate at tail start (conservative fallback)
-                # If no break detected in tail, use the tail start percentile
-                threshold_pct = <uint32_t>ceil(sorted_vals[tail_start])
-
-                # Choose the MORE CONSERVATIVE (higher) threshold
-                # Higher threshold = keep more edges (less aggressive filtering)
-                chosen_tail_thr = threshold_pct
-                if threshold_tail > chosen_tail_thr:
-                    chosen_tail_thr = threshold_tail
-
-                if verbose:
-                    bf_nogil_logf_notime(
-                        b"BROKEN-STICK",
-                        "Tail-focused analysis: tail_start=%u tail_len=%u min_tail_size=%u\n",
-                        tail_start,
-                        tail_len,
-                        min_tail_size,
-                    )
-                    if threshold_tail > 0:
-                        bf_nogil_logf_notime(
-                            b"BROKEN-STICK",
-                            "Tail broken-stick cutoff observed: %u (tail_cutoff=%d)\n",
-                            threshold_tail,
-                            tail_cutoff,
-                        )
+                    elif hash_keys[slot] == edge_key:
+                        # Found existing edge - increment
+                        hash_values[slot] += 1
+                        break
                     else:
-                        bf_nogil_logf_notime(
-                            b"BROKEN-STICK",
-                            "No tail broken-stick cutoff detected; using tail percentile candidate: %u\n",
-                            threshold_pct,
-                        )
-                    bf_nogil_logf_notime(b"BROKEN-STICK", "Chosen tail-focused threshold: %u\n", chosen_tail_thr)
+                        # Collision - linear probe
+                        slot = (slot + 1) % hash_capacity
+                        probe += 1
 
-                free(tail_harmonic)
+        # Progress reporting
+        reads_processed += 1
+        if verbose and reads_processed % progress_interval == 0:
+            bf_nogil_logf_notime(b"EDGE-THRESHOLD", "  Progress: %u/%u reads (%.0f%%), %llu unique edges, %u shared reads\n",
+                reads_processed, pool.unique_read_count, 100.0 * reads_processed / pool.unique_read_count, edges_inserted, shared_reads)
 
-                # If tail produced a non-zero suggestion, use it immediately.
-                if chosen_tail_thr > 0:
-                    free(edge_weights)
-                    free(weights)
-                    free(sorted_vals)
-                    return chosen_tail_thr
+    free(read_refs)
 
-    # FALLBACK: Global broken-stick (if tail-focused didn't apply or succeed)
-    # Only used when insufficient edges for tail analysis
-    if written < 20:
+    if edges_inserted == 0:
+        free(hash_keys)
+        free(hash_values)
+        free(histogram)
         if verbose:
-            bf_nogil_logf_notime(
-                b"BROKEN-STICK",
-                "Too few edges (%llu < 20), using 75th percentile fallback\n",
-                <unsigned long long>written,
-            )
-        # Use 75th percentile as conservative fallback
-        # This removes the bottom 75% of edges (keeps top 25% high-weight edges)
-        cutoff_rank = <uint32_t>(written * 0.75)
-        if cutoff_rank >= written:
-            cutoff_rank = written - 1
-        threshold_u = <uint32_t>ceil(sorted_vals[cutoff_rank])
-        free(edge_weights)
-        free(weights)
-        free(sorted_vals)
-        return threshold_u if threshold_u > 0 else 1
+            bf_nogil_logf_notime(b"EDGE-THRESHOLD", "No edges found, using threshold=1\n")
+        return 1
 
-    # GLOBAL BROKEN-STICK (secondary fallback if tail-focused not used)
-    # Apply classical broken-stick model to full distribution
-    harmonic_suffix = <float*>malloc(written * sizeof(float))
-    if not harmonic_suffix:
-        free(edge_weights)
-        free(weights)
-        free(sorted_vals)
-        return 0
+    # Build histogram from hash table
+    for slot in range(hash_capacity):
+        if hash_keys[slot] != 0:
+            w = hash_values[slot]
+            if w < HIST_SIZE:
+                histogram[w] += 1
+            else:
+                histogram[HIST_SIZE - 1] += 1  # overflow bin
+            if w > max_weight:
+                max_weight = w
+            total_sum += w
+            total_count += 1
+            if w == 1:
+                count_w1 += 1
+            elif w == 2:
+                count_w2 += 1
+            elif w == 3:
+                count_w3 += 1
 
-    # Build harmonic suffix array for broken-stick calculation
-    for i in range(written - 1, -1, -1):
-        if i == written - 1:
-            harmonic_suffix[i] = 1.0 / (<float>(i + 1))
-        else:
-            harmonic_suffix[i] = harmonic_suffix[i + 1] + 1.0 / (<float>(i + 1))
-
-    # Detect where observed exceeds expected by tolerance
-    cutoff_rank = written  # default: no cutoff found
-    for i in range(written):
-        expected = harmonic_suffix[i] * (sumv / <float>written)
-        if sorted_vals[i] > expected * (1.0 + <float>tol):
-            cutoff_rank = i
-            break
-
-    if cutoff_rank < written:
-        # Broken-stick detected a cutoff
-        threshold_u = <uint32_t>ceil(sorted_vals[cutoff_rank])
-        if verbose:
-            bf_nogil_logf_notime(
-                b"BROKEN-STICK",
-                "Global broken-stick detected cutoff at rank %u/%llu\n",
-                cutoff_rank,
-                <unsigned long long>written,
-            )
-            bf_nogil_logf_notime(
-                b"BROKEN-STICK",
-                "Observed weight: %.0f, Expected: %.2f (tol=%.2f)\n",
-                sorted_vals[cutoff_rank],
-                harmonic_suffix[cutoff_rank] * (sumv / <float>written),
-                <float>tol,
-            )
-    else:
-        # No break detected - use 75th percentile as fallback
-        if verbose:
-            bf_nogil_logf_notime(b"BROKEN-STICK", "No global cutoff found, using 75th percentile fallback\n")
-        cutoff_rank = <uint32_t>(written * 0.75)
-        if cutoff_rank >= written:
-            cutoff_rank = written - 1
-        threshold_u = <uint32_t>ceil(sorted_vals[cutoff_rank])
-
-    # Ensure threshold is at least 1 (never return 0 which would disable filtering)
-    if threshold_u == 0:
-        threshold_u = 1
+    free(hash_keys)
+    free(hash_values)
 
     if verbose:
-        bf_nogil_logf_notime(
-            b"BROKEN-STICK",
-            "Final edge weight threshold: %u (edges < %u will be REMOVED)\n",
-            threshold_u,
-            threshold_u,
-        )
+        bf_nogil_logf_notime(b"EDGE-THRESHOLD", "Shared reads: %u, skipped (>50 refs): %u\n", shared_reads, skipped_high_multimap)
+        bf_nogil_logf_notime(b"EDGE-THRESHOLD", "Unique edges: %llu, max_weight=%u\n", total_count, max_weight)
+        if total_count > 0:
+            bf_nogil_logf_notime(b"EDGE-THRESHOLD", "  Weight=1: %llu (%.1f%%), =2: %llu (%.1f%%), =3: %llu (%.1f%%)\n",
+                count_w1, 100.0 * count_w1 / total_count,
+                count_w2, 100.0 * count_w2 / total_count,
+                count_w3, 100.0 * count_w3 / total_count)
 
-    free(harmonic_suffix)
-    free(edge_weights)
-    free(weights)
-    free(sorted_vals)
+    # Maximum drop ratio detection in the LOW WEIGHT region only
+    # Find the weight where histogram[w] / histogram[w+1] is maximum
+    # This identifies the boundary between noise (steep drop) and signal (gradual decline)
+    #
+    # IMPORTANT: Only search weights 1-10 to avoid spurious gaps in the sparse tail
+    # The noise/signal boundary is always in the low-weight region
+    #
+    # Example: weight=1 (71.7%) -> weight=2 (12.9%) = 5.6x drop (biggest)
+    #          weight=2 (12.9%) -> weight=3 (5.4%) = 2.4x drop
+    # Threshold = 2 (first weight after the biggest drop)
 
-    return threshold_u
+    cdef uint32_t hist_max = max_weight + 1 if max_weight < HIST_SIZE else HIST_SIZE
+    cdef uint32_t search_limit = 10 if hist_max > 10 else hist_max - 1  # Only search low weights
+
+    cdef uint32_t final_threshold = 2  # fallback
+    cdef double max_ratio = 0.0
+    cdef double ratio
+    cdef uint32_t best_w = 1
+
+    # Find maximum drop ratio in low-weight region only
+    if verbose:
+        bf_nogil_logf_notime(b"EDGE-THRESHOLD", "Searching weights 1-%u for max drop ratio:\n", search_limit)
+
+    for w in range(1, search_limit):
+        if histogram[w] > 0 and histogram[w + 1] > 0:
+            ratio = <double>histogram[w] / <double>histogram[w + 1]
+            if verbose and w <= 5:
+                bf_nogil_logf_notime(b"EDGE-THRESHOLD", "  w=%u->%u: %llu/%llu = %.2fx\n",
+                    w, w + 1, histogram[w], histogram[w + 1], ratio)
+            if ratio > max_ratio:
+                max_ratio = ratio
+                best_w = w
+
+    # Threshold is the weight AFTER the biggest drop (i.e., first "signal" weight)
+    final_threshold = best_w + 1
+
+    if verbose:
+        bf_nogil_logf_notime(b"EDGE-THRESHOLD", "Max drop ratio: %.2fx at weight=%u->%u\n",
+            max_ratio, best_w, best_w + 1)
+        bf_nogil_logf_notime(b"EDGE-THRESHOLD", "Threshold: %u (edges with weight < %u are noise)\n",
+            final_threshold, final_threshold)
+
+    # Sanity: threshold must be at least 2 (remove single-read noise)
+    if final_threshold < 2:
+        final_threshold = 2
+
+    free(histogram)
+
+    if verbose:
+        bf_nogil_logf_notime(b"EDGE-THRESHOLD", "Final threshold: %u (edges with weight < %u removed)\n",
+            final_threshold, final_threshold)
+
+    return final_threshold
 
 
 
@@ -1032,12 +900,10 @@ cdef int build_igraph_direct_from_read_index(
     igraph_integer_t* out_n_components,
     igraph_integer_t* out_singletons
 ) except -1 nogil:
-    """Build an igraph directly from ReadIndex using exact pre-allocation.
+    """Build an igraph using READ-CENTRIC approach with hash table.
 
-    This builder first counts the exact number of edges that will be emitted
-    and then allocates exact-sized arrays for edge "from", "to" and weights,
-    avoiding intermediate growth and large reallocations. It then fills the
-    edge arrays and creates an ``igraph_t`` and associated weight vector.
+    Iterates over reads sequentially (cache-friendly), accumulates edge weights
+    in a hash table, then filters by min_edge_weight and builds igraph.
 
     Parameters
     ----------
@@ -1048,7 +914,7 @@ cdef int build_igraph_direct_from_read_index(
     pool : MemoryPool*
         Memory pool with alignment/read data.
     read_index : ReadIndex*
-        ReadIndex mapping references to read lists.
+        ReadIndex (unused in read-centric approach, kept for API compatibility).
     ref_stats : ReferenceStats*
         Optional per-reference stats (used to skip low-coverage refs).
     num_refs : uint32_t
@@ -1058,7 +924,7 @@ cdef int build_igraph_direct_from_read_index(
     min_edge_weight : uint32_t
         Minimum shared-read weight to keep an edge.
     num_threads : int
-        Number of threads hint for counting/build steps.
+        Number of threads hint (unused currently).
     verbose : int
         Verbosity flag; non-zero prints progress messages.
     out_n_components : igraph_integer_t*
@@ -1074,33 +940,40 @@ cdef int build_igraph_direct_from_read_index(
     """
     cdef igraph_t* ig_graph = <igraph_t*>ig_graph_ptr
     cdef igraph_vector_t* ig_weights = <igraph_vector_t*>ig_weights_ptr
-    cdef uint32_t ref_idx, other_ref_idx
-    cdef uint64_t read_idx64
-    cdef uint32_t read_i, read_count
-    cdef uint64_t aln_start_i, aln_end_i, aln_idx64
     cdef int ret
-    cdef uint32_t tmp_i, kk
+    cdef uint32_t tmp_i
     cdef bint success = False
-    
-    # Edge storage - EXACT SIZE
+
+    # Read iteration variables
+    cdef uint32_t read_idx
+    cdef uint64_t aln_start, aln_end, aln_idx
+    cdef uint32_t aln_count
+
+    # Per-read reference collection
+    cdef uint32_t* read_refs = NULL
+    cdef uint32_t read_refs_count = 0
+    cdef uint32_t read_refs_capacity = 64
+    cdef uint32_t ref_a, ref_b, tmp_ref
+    cdef uint32_t ii, jj
+
+    # Hash table for edge weights
+    cdef uint64_t hash_capacity = 1 << 27  # 128M slots
+    cdef uint64_t* hash_keys = NULL
+    cdef uint32_t* hash_values = NULL
+    cdef uint64_t edge_key, slot, probe
+    cdef uint64_t edges_inserted = 0
+    cdef uint32_t shared_reads = 0
+
+    # Edge arrays for igraph
     cdef uint32_t* edge_from = NULL
     cdef uint32_t* edge_to = NULL
-    cdef uint32_t* edge_weight = NULL
-    cdef uint64_t edge_capacity = 0
+    cdef uint32_t* edge_weights_arr = NULL
     cdef uint64_t edge_count = 0
-    
-    # Neighbor tracking
-    cdef uint32_t* neighbors = NULL
-    cdef uint32_t neighbor_count = 0
-    cdef uint32_t neighbor_capacity = 50000
-    cdef uint32_t* new_neighbors = NULL
-    cdef uint64_t new_cap
-    
-    # Weight accumulation
-    cdef uint32_t* ref_weights = NULL
+    cdef uint64_t edges_passing_threshold = 0
 
-    # Read marker for tracking unique references per read
-    cdef uint8_t* read_seen_marker = NULL
+    # Progress tracking
+    cdef uint32_t progress_interval = pool.unique_read_count // 20 if pool.unique_read_count > 20 else 1
+    cdef uint32_t reads_processed = 0
 
     # Component analysis
     cdef igraph_vector_int_t comp_membership
@@ -1115,26 +988,128 @@ cdef int build_igraph_direct_from_read_index(
     cdef igraph_vector_int_t edges_vec
 
     if verbose:
-        bf_nogil_logf_notime(b"IGRAPH OPS", "Direct igraph builder with exact pre-allocation\n")
+        bf_nogil_logf_notime(b"IGRAPH OPS", "Read-centric igraph builder (min_edge_weight=%u)\n", min_edge_weight)
 
     # Validate inputs
-    if not read_index or not read_index.ref_read_counts or not read_index.ref_to_reads:
-        if verbose:
-            bf_nogil_logf_notime(b"IGRAPH OPS", "ERROR: Invalid read_index\n")
-        return -1
     if not pool.read_alignment_starts or not pool.read_alignment_counts or not pool.alignments:
         if verbose:
             bf_nogil_logf_notime(b"IGRAPH OPS", "ERROR: Invalid pool arrays\n")
         return -1
 
-    # STEP 1: Count edges exactly
-    edge_capacity = count_edges_from_read_index(
-        read_index, ref_stats, num_refs, min_read_count, min_edge_weight, pool, verbose
-    )
-    
-    if edge_capacity == 0:
+    # Allocate hash table
+    hash_keys = <uint64_t*>calloc(hash_capacity, sizeof(uint64_t))
+    hash_values = <uint32_t*>calloc(hash_capacity, sizeof(uint32_t))
+    if not hash_keys or not hash_values:
+        if hash_keys: free(hash_keys)
+        if hash_values: free(hash_values)
         if verbose:
-            bf_nogil_logf_notime(b"IGRAPH OPS", "No edges found, creating empty graph\n")
+            bf_nogil_logf_notime(b"IGRAPH OPS", "ERROR: Failed to allocate hash table\n")
+        return -1
+
+    # Allocate per-read reference buffer
+    read_refs = <uint32_t*>malloc(read_refs_capacity * sizeof(uint32_t))
+    if not read_refs:
+        free(hash_keys)
+        free(hash_values)
+        return -1
+
+    if verbose:
+        bf_nogil_logf_notime(b"IGRAPH OPS", "Building edge weights from %u reads...\n", pool.unique_read_count)
+
+    # STEP 1: Iterate over reads to accumulate edge weights in hash table
+    for read_idx in range(pool.unique_read_count):
+        aln_start = pool.read_alignment_starts[read_idx]
+        aln_count = pool.read_alignment_counts[read_idx]
+        aln_end = aln_start + aln_count
+
+        if aln_count < 2 or aln_end > <uint64_t>pool.alignment_count:
+            continue
+
+        # Collect unique references for this read
+        read_refs_count = 0
+        for aln_idx in range(aln_start, aln_end):
+            ref_a = pool.alignments[aln_idx].reference_index
+            if ref_a >= num_refs:
+                continue
+            if ref_stats and ref_stats[ref_a].total_reads < min_read_count:
+                continue
+
+            # Check if already in read_refs
+            for ii in range(read_refs_count):
+                if read_refs[ii] == ref_a:
+                    break
+            else:
+                # Not found, add it
+                if read_refs_count >= read_refs_capacity:
+                    read_refs_capacity = read_refs_capacity * 2
+                    read_refs = <uint32_t*>realloc(read_refs, read_refs_capacity * sizeof(uint32_t))
+                    if not read_refs:
+                        free(hash_keys)
+                        free(hash_values)
+                        return -1
+                read_refs[read_refs_count] = ref_a
+                read_refs_count += 1
+
+        if read_refs_count < 2:
+            continue
+
+        shared_reads += 1
+
+        # Skip highly multi-mapping reads (>50 refs)
+        if read_refs_count > 50:
+            continue
+
+        # For each pair, increment edge weight in hash table
+        for ii in range(read_refs_count):
+            for jj in range(ii + 1, read_refs_count):
+                ref_a = read_refs[ii]
+                ref_b = read_refs[jj]
+                if ref_a > ref_b:
+                    tmp_ref = ref_a
+                    ref_a = ref_b
+                    ref_b = tmp_ref
+
+                edge_key = ((<uint64_t>(ref_a + 1)) << 32) | <uint64_t>ref_b
+
+                slot = (edge_key * 11400714819323198485ULL) % hash_capacity
+                probe = 0
+                while probe < hash_capacity:
+                    if hash_keys[slot] == 0:
+                        hash_keys[slot] = edge_key
+                        hash_values[slot] = 1
+                        edges_inserted += 1
+                        break
+                    elif hash_keys[slot] == edge_key:
+                        hash_values[slot] += 1
+                        break
+                    else:
+                        slot = (slot + 1) % hash_capacity
+                        probe += 1
+
+        reads_processed += 1
+        if verbose and reads_processed % progress_interval == 0:
+            bf_nogil_logf_notime(b"IGRAPH OPS", "  Progress: %u/%u reads (%.0f%%), %llu unique edges\n",
+                reads_processed, pool.unique_read_count, 100.0 * reads_processed / pool.unique_read_count, edges_inserted)
+
+    free(read_refs)
+
+    if verbose:
+        bf_nogil_logf_notime(b"IGRAPH OPS", "Shared reads processed: %u, unique edges: %llu\n", shared_reads, edges_inserted)
+
+    # STEP 2: Count edges passing threshold
+    edges_passing_threshold = 0
+    for slot in range(hash_capacity):
+        if hash_keys[slot] != 0 and hash_values[slot] >= min_edge_weight:
+            edges_passing_threshold += 1
+
+    if verbose:
+        bf_nogil_logf_notime(b"IGRAPH OPS", "Edges passing threshold (>=%u): %llu\n", min_edge_weight, edges_passing_threshold)
+
+    if edges_passing_threshold == 0:
+        free(hash_keys)
+        free(hash_values)
+        if verbose:
+            bf_nogil_logf_notime(b"IGRAPH OPS", "No edges pass threshold, creating empty graph\n")
         ret = igraph_vector_int_init(&empty_edges, 0)
         ret = igraph_vector_init(ig_weights, 0)
         ret = igraph_create(ig_graph, &empty_edges, <igraph_integer_t>num_refs, 0)
@@ -1143,229 +1118,78 @@ cdef int build_igraph_direct_from_read_index(
             out_n_components[0] = 0
         if out_singletons:
             out_singletons[0] = 0
-        return 0 if ret == 0 else -1
+        return 0
 
-    # STEP 2: Allocate EXACT size (no growth needed)
-    if verbose:
-        bf_nogil_logf_notime(b"IGRAPH OPS", "Allocating exact capacity: %llu edges\n", edge_capacity)
-    
-    edge_from = <uint32_t*>malloc(edge_capacity * sizeof(uint32_t))
-    edge_to = <uint32_t*>malloc(edge_capacity * sizeof(uint32_t))
-    edge_weight = <uint32_t*>malloc(edge_capacity * sizeof(uint32_t))
-    
-    if not edge_from or not edge_to or not edge_weight:
-        if verbose:
-            bf_nogil_logf_notime(b"IGRAPH OPS", "ERROR: Failed to allocate edge arrays\n")
-        if edge_from:
-            free(edge_from)
-        if edge_to:
-            free(edge_to)
-        if edge_weight:
-            free(edge_weight)
+    # STEP 3: Allocate edge arrays
+    edge_from = <uint32_t*>malloc(edges_passing_threshold * sizeof(uint32_t))
+    edge_to = <uint32_t*>malloc(edges_passing_threshold * sizeof(uint32_t))
+    edge_weights_arr = <uint32_t*>malloc(edges_passing_threshold * sizeof(uint32_t))
+    if not edge_from or not edge_to or not edge_weights_arr:
+        if edge_from: free(edge_from)
+        if edge_to: free(edge_to)
+        if edge_weights_arr: free(edge_weights_arr)
+        free(hash_keys)
+        free(hash_values)
         return -1
 
-    ref_weights = <uint32_t*>calloc(num_refs, sizeof(uint32_t))
-    if not ref_weights:
-        free(edge_from)
-        free(edge_to)
-        free(edge_weight)
-        return -1
-
-    neighbors = <uint32_t*>malloc(neighbor_capacity * sizeof(uint32_t))
-    if not neighbors:
-        free(edge_from)
-        free(edge_to)
-        free(edge_weight)
-        free(ref_weights)
-        return -1
-
-    # STEP 3: Build edges (no reallocation)
-    if verbose:
-        bf_nogil_logf_notime(b"IGRAPH OPS", "Building edges...\n")
-    
+    # STEP 4: Extract edges from hash table
     edge_count = 0
-    
-    for ref_idx in range(num_refs):
-        if ref_stats and ref_stats[ref_idx].total_reads < min_read_count:
-            continue
+    for slot in range(hash_capacity):
+        if hash_keys[slot] != 0 and hash_values[slot] >= min_edge_weight:
+            edge_key = hash_keys[slot]
+            ref_a = <uint32_t>((edge_key >> 32) - 1)
+            ref_b = <uint32_t>(edge_key & <uint64_t>0xFFFFFFFF)
+            edge_from[edge_count] = ref_a
+            edge_to[edge_count] = ref_b
+            edge_weights_arr[edge_count] = hash_values[slot]
+            edge_count += 1
 
-        read_count = read_index.ref_read_counts[ref_idx]
-        if read_count == 0 or not read_index.ref_to_reads[ref_idx]:
-            continue
-
-        if verbose and (ref_idx & 0x3FFF) == 0:
-            bf_nogil_logf_notime(
-                b"IGRAPH OPS",
-                "Processing ref %u/%u, edges: %llu/%llu (%.1f%%)\n",
-                ref_idx,
-                num_refs,
-                edge_count,
-                edge_capacity,
-                100.0 * edge_count / edge_capacity,
-            )
-
-        neighbor_count = 0
-
-        # Allocate temporary marker array for tracking unique references per read
-        read_seen_marker = <uint8_t*>calloc(num_refs, sizeof(uint8_t))
-        if not read_seen_marker:
-            if verbose:
-                bf_nogil_logf_notime(b"IGRAPH OPS", "ERROR: Failed to allocate read marker array\n")
-            free(neighbors)
-            free(edge_from)
-            free(edge_to)
-            free(edge_weight)
-            free(ref_weights)
-            return -1
-
-        # Accumulate weights (count each read once per unique reference)
-        for read_i in range(read_count):
-            read_idx64 = read_index.ref_to_reads[ref_idx][read_i]
-            if read_idx64 >= pool.unique_read_count:
-                continue
-
-            aln_start_i = pool.read_alignment_starts[read_idx64]
-            aln_end_i = aln_start_i + pool.read_alignment_counts[read_idx64]
-
-            if aln_end_i > pool.alignment_count:
-                continue
-
-            # First pass: mark which references this read maps to
-            aln_idx64 = aln_start_i
-            while aln_idx64 < aln_end_i:
-                other_ref_idx = pool.alignments[aln_idx64].reference_index
-                aln_idx64 += 1
-
-                if other_ref_idx >= num_refs or other_ref_idx == ref_idx:
-                    continue
-                if ref_stats and ref_stats[other_ref_idx].total_reads < min_read_count:
-                    continue
-
-                read_seen_marker[other_ref_idx] = 1
-
-            # Second pass: increment edge weight once per unique reference for this read
-            aln_idx64 = aln_start_i
-            while aln_idx64 < aln_end_i:
-                other_ref_idx = pool.alignments[aln_idx64].reference_index
-                aln_idx64 += 1
-
-                if other_ref_idx >= num_refs or other_ref_idx == ref_idx:
-                    continue
-                if ref_stats and ref_stats[other_ref_idx].total_reads < min_read_count:
-                    continue
-
-                # Only increment once per read
-                if read_seen_marker[other_ref_idx] == 1:
-                    # First time seeing this neighbor reference across all reads?
-                    if ref_weights[other_ref_idx] == 0:
-                        if neighbor_count >= neighbor_capacity:
-                            # Grow neighbors (only list, not edge arrays)
-                            new_cap = neighbor_capacity * 2
-                            new_neighbors = <uint32_t*>safe_realloc(
-                                neighbors,
-                                neighbor_capacity * sizeof(uint32_t),
-                                new_cap * sizeof(uint32_t)
-                            )
-                            if not new_neighbors:
-                                if verbose:
-                                    bf_nogil_logf_notime(b"IGRAPH OPS", "ERROR: Failed to grow neighbors\n")
-                                free(read_seen_marker)
-                                free(neighbors)
-                                free(edge_from)
-                                free(edge_to)
-                                free(edge_weight)
-                                free(ref_weights)
-                                return -1
-                            neighbors = new_neighbors
-                            neighbor_capacity = new_cap
-
-                        neighbors[neighbor_count] = other_ref_idx
-                        neighbor_count += 1
-
-                    ref_weights[other_ref_idx] += 1
-                    read_seen_marker[other_ref_idx] = 0
-
-        # Emit edges (no realloc - we allocated exact size)
-        for kk in range(neighbor_count):
-            other_ref_idx = neighbors[kk]
-
-            if ref_weights[other_ref_idx] >= min_edge_weight and other_ref_idx > ref_idx:
-                if edge_count >= edge_capacity:
-                    if verbose:
-                        bf_nogil_logf_notime(
-                            b"IGRAPH OPS",
-                            "ERROR: Edge overflow at ref %u (count=%llu, cap=%llu)\n",
-                            ref_idx,
-                            edge_count,
-                            edge_capacity,
-                        )
-                    break
-
-                edge_from[edge_count] = ref_idx
-                edge_to[edge_count] = other_ref_idx
-                edge_weight[edge_count] = ref_weights[other_ref_idx]
-                edge_count += 1
-
-            ref_weights[other_ref_idx] = 0
-
-        # Free marker array for this reference
-        free(read_seen_marker)
+    free(hash_keys)
+    free(hash_values)
 
     if verbose:
-        bf_nogil_logf_notime(
-            b"IGRAPH OPS",
-            "Built %llu/%llu edges (%.1f%% utilization)\n",
-            edge_count,
-            edge_capacity,
-            100.0 * edge_count / edge_capacity,
-        )
+        bf_nogil_logf_notime(b"IGRAPH OPS", "Extracted %llu edges for igraph\n", edge_count)
 
-    # STEP 4: Create igraph
+    # STEP 5: Create igraph
     ret = igraph_vector_int_init(&edges_vec, edge_count * 2)
     if ret != 0:
         if verbose:
             bf_nogil_logf_notime(b"IGRAPH OPS", "ERROR: Failed to init edges vector\n")
-        free(neighbors)
         free(edge_from)
         free(edge_to)
-        free(edge_weight)
-        free(ref_weights)
+        free(edge_weights_arr)
         return -1
-    
+
     ret = igraph_vector_init(ig_weights, edge_count)
     if ret != 0:
         if verbose:
             bf_nogil_logf_notime(b"IGRAPH OPS", "ERROR: Failed to init weights vector\n")
         igraph_vector_int_destroy(&edges_vec)
-        free(neighbors)
         free(edge_from)
         free(edge_to)
-        free(edge_weight)
-        free(ref_weights)
+        free(edge_weights_arr)
         return -1
-    
+
     # Copy edges to igraph
-    for tmp_i in range(edge_count):
+    for tmp_i in range(<uint32_t>edge_count):
         igraph_vector_int_set(&edges_vec, tmp_i * 2, <igraph_integer_t>edge_from[tmp_i])
         igraph_vector_int_set(&edges_vec, tmp_i * 2 + 1, <igraph_integer_t>edge_to[tmp_i])
-        igraph_vector_set(ig_weights, tmp_i, <igraph_real_t>edge_weight[tmp_i])
-    
+        igraph_vector_set(ig_weights, tmp_i, <igraph_real_t>edge_weights_arr[tmp_i])
+
     ret = igraph_create(ig_graph, &edges_vec, <igraph_integer_t>num_refs, 0)
     igraph_vector_int_destroy(&edges_vec)
-    
+
     if ret != 0:
         if verbose:
             bf_nogil_logf_notime(b"IGRAPH OPS", "ERROR: igraph_create failed\n")
         igraph_vector_destroy(ig_weights)
-        free(neighbors)
         free(edge_from)
         free(edge_to)
-        free(edge_weight)
-        free(ref_weights)
+        free(edge_weights_arr)
         return -1
 
     success = True
-    
+
     if verbose:
         bf_nogil_logf_notime(
             b"IGRAPH OPS",
@@ -1374,7 +1198,7 @@ cdef int build_igraph_direct_from_read_index(
             <long>igraph_ecount(ig_graph),
         )
 
-    # STEP 5: Compute components
+    # STEP 6: Compute components
     if out_n_components or out_singletons:
         ret = igraph_vector_int_init(&comp_membership, num_refs)
         if ret == 0:
@@ -1391,19 +1215,17 @@ cdef int build_igraph_direct_from_read_index(
                         out_n_components[0] = n_components
                     if out_singletons:
                         out_singletons[0] = <igraph_integer_t>singletons
-        
+
         if comp_sizes_initialized:
             igraph_vector_int_destroy(&comp_sizes)
         if comp_initialized:
             igraph_vector_int_destroy(&comp_membership)
 
     # Cleanup
-    free(neighbors)
     free(edge_from)
     free(edge_to)
-    free(edge_weight)
-    free(ref_weights)
-    
+    free(edge_weights_arr)
+
     return 0 if success else -1
 
 cdef void destroy_weighted_graph(WeightedGraph* graph) noexcept nogil:

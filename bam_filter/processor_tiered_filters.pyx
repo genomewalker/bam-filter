@@ -574,7 +574,10 @@ cdef int remove_cross_domain_edges_for_reference(
     ReferencePattern* pattern_data,
     TaxonomyDB* taxonomy_db,
     char* alignment_keep_flags,
-    EdgeRemovalStats* stats
+    EdgeRemovalStats* stats,
+    int64_t* ref_aln_offsets,
+    int64_t* ref_aln_counts,
+    int64_t* ref_aln_indices
 ) noexcept nogil:
     """
     Remove alignments between this reference and its cross-domain neighbors.
@@ -606,6 +609,12 @@ cdef int remove_cross_domain_edges_for_reference(
         Flags for each alignment (1=keep, 0=remove), modified in-place
     stats : EdgeRemovalStats*
         Statistics structure to update
+    ref_aln_offsets : int64_t*
+        Start offset in ref_aln_indices for each reference
+    ref_aln_counts : int64_t*
+        Number of alignments for each reference
+    ref_aln_indices : int64_t*
+        Flat array of alignment indices, grouped by reference
 
     Returns
     -------
@@ -616,6 +625,9 @@ cdef int remove_cross_domain_edges_for_reference(
         return -1
 
     if alignment_keep_flags == NULL or stats == NULL:
+        return -1
+
+    if ref_aln_offsets == NULL or ref_aln_counts == NULL or ref_aln_indices == NULL:
         return -1
 
     # Get taxonomy for this reference
@@ -665,9 +677,8 @@ cdef int remove_cross_domain_edges_for_reference(
         free(cross_domain_neighbors)
         return 0
 
-    # Now iterate through alignments and mark those to cross-domain neighbors
-    cdef int64_t aln_idx
-    cdef uint32_t aln_ref_idx
+    # Use reference alignment index to iterate only alignments for this reference
+    cdef int64_t aln_idx, aln_offset, aln_count
     cdef int64_t removed_count = 0
     cdef bint found
     cdef uint32_t read_idx
@@ -676,13 +687,14 @@ cdef int remove_cross_domain_edges_for_reference(
     cdef uint64_t other_aln_idx
     cdef uint32_t other_ref_idx
     cdef uint32_t cd_idx
+    cdef int64_t i
 
-    for aln_idx in range(pool.alignment_count):
-        # Check if this alignment involves ref_idx
-        aln_ref_idx = pool.alignments[aln_idx].reference_index
+    aln_offset = ref_aln_offsets[ref_idx]
+    aln_count = ref_aln_counts[ref_idx]
 
-        if aln_ref_idx != ref_idx:
-            continue  # Not this reference
+    for i in range(aln_count):
+        # Get actual alignment index from the indirect index
+        aln_idx = ref_aln_indices[aln_offset + i]
 
         # Check if the READ mapped to this alignment also maps to a cross-domain neighbor
         # We need to check all alignments of this read to find cross-domain pairs
@@ -851,6 +863,8 @@ cdef int apply_tiered_filtering(
     cdef int64_t end = 0
     cdef int64_t idx_pos = 0
     cdef bint original_removed = False
+    cdef int64_t running_offset = 0
+    cdef uint32_t r_idx = 0
 
     # ========================================================================
     # TIER 2 PREPARATION: Build community membership and check coherence
@@ -952,6 +966,15 @@ cdef int apply_tiered_filtering(
     edge_stats.references_lost_all_edges = 0
     edge_stats.references_lost_most_edges = 0
 
+    # Reference alignment index: scattered indices stored in flat array
+    # ref_aln_offsets[r] = start in ref_aln_indices for reference r
+    # ref_aln_counts[r] = number of alignments for reference r
+    # ref_aln_indices[offset..offset+count] = alignment indices for that ref
+    cdef int64_t* ref_aln_offsets = NULL
+    cdef int64_t* ref_aln_counts = NULL
+    cdef int64_t* ref_aln_indices = NULL
+    cdef int64_t* ref_aln_write_pos = NULL  # Temp: current write position per ref
+
     if enable_edge_removal and pool_handle != NULL and neighbor_lists != NULL and neighbor_counts != NULL:
         pool = <MemoryPool*>pool_handle
 
@@ -961,15 +984,68 @@ cdef int apply_tiered_filtering(
                 "Removing cross-domain edges\\n"
             )
 
-        # Allocate alignment keep flags (initialized to 1 = keep all)
-        alignment_keep_flags = <char*>calloc(pool.alignment_count, sizeof(char))
+        # Allocate alignment keep flags - use malloc + memset (faster than calloc + loop)
+        alignment_keep_flags = <char*>malloc(pool.alignment_count * sizeof(char))
         if alignment_keep_flags == NULL:
             if verbose:
                 bf_nogil_logf_notime(b"TIERED_FILTER", "ERROR: Failed to allocate alignment flags\\n")
         else:
-            # Initialize all to 1 (keep)
-            for aln_idx in range(pool.alignment_count):
-                alignment_keep_flags[aln_idx] = 1
+            # Initialize all to 1 (keep) using memset - much faster than loop
+            memset(alignment_keep_flags, 1, pool.alignment_count)
+
+            # Build reference-to-alignment index
+            # Alignments are sorted by read_id, NOT reference_index, so we need
+            # to build an indirect index: for each reference, store list of alignment indices
+            ref_aln_counts = <int64_t*>calloc(pool.reference_count, sizeof(int64_t))
+            ref_aln_offsets = <int64_t*>malloc(pool.reference_count * sizeof(int64_t))
+            ref_aln_indices = <int64_t*>malloc(pool.alignment_count * sizeof(int64_t))
+            ref_aln_write_pos = <int64_t*>malloc(pool.reference_count * sizeof(int64_t))
+
+            if (ref_aln_counts == NULL or ref_aln_offsets == NULL or
+                ref_aln_indices == NULL or ref_aln_write_pos == NULL):
+                if verbose:
+                    bf_nogil_logf_notime(b"TIERED_FILTER", "ERROR: Failed to allocate ref alignment index\\n")
+                if ref_aln_counts != NULL:
+                    free(ref_aln_counts)
+                    ref_aln_counts = NULL
+                if ref_aln_offsets != NULL:
+                    free(ref_aln_offsets)
+                    ref_aln_offsets = NULL
+                if ref_aln_indices != NULL:
+                    free(ref_aln_indices)
+                    ref_aln_indices = NULL
+                if ref_aln_write_pos != NULL:
+                    free(ref_aln_write_pos)
+                    ref_aln_write_pos = NULL
+            else:
+                # First pass: count alignments per reference
+                for aln_idx in range(pool.alignment_count):
+                    ref_aln_counts[pool.alignments[aln_idx].reference_index] += 1
+
+                # Compute start offsets (cumulative sum)
+                running_offset = 0
+                for r_idx in range(pool.reference_count):
+                    ref_aln_offsets[r_idx] = running_offset
+                    ref_aln_write_pos[r_idx] = running_offset
+                    running_offset += ref_aln_counts[r_idx]
+
+                # Second pass: populate alignment indices
+                for aln_idx in range(pool.alignment_count):
+                    r_idx = pool.alignments[aln_idx].reference_index
+                    ref_aln_indices[ref_aln_write_pos[r_idx]] = aln_idx
+                    ref_aln_write_pos[r_idx] += 1
+
+                # Free temp write positions
+                free(ref_aln_write_pos)
+                ref_aln_write_pos = NULL
+
+                if verbose:
+                    bf_nogil_logf_notime(
+                        b"TIERED_FILTER",
+                        "  Built reference alignment index (%u refs, %ld alns)\\n",
+                        pool.reference_count,
+                        pool.alignment_count
+                    )
 
             # Process each reference in an incoherent community
             for ref_idx in range(array_size):
@@ -983,7 +1059,7 @@ cdef int apply_tiered_filtering(
                 # Check if community is incoherent
                 if community_id < num_communities and community_coherence_cache[community_id] == 0:
                     # Incoherent community - apply edge removal
-                    if neighbor_counts[ref_idx] > 0:
+                    if neighbor_counts[ref_idx] > 0 and ref_aln_offsets != NULL and ref_aln_counts != NULL:
                         remove_cross_domain_edges_for_reference(
                             pool,
                             ref_idx,
@@ -992,8 +1068,22 @@ cdef int apply_tiered_filtering(
                             pattern_data,
                             taxonomy_db,
                             alignment_keep_flags,
-                            &edge_stats
+                            &edge_stats,
+                            ref_aln_offsets,
+                            ref_aln_counts,
+                            ref_aln_indices
                         )
+
+            # Free reference alignment index
+            if ref_aln_counts != NULL:
+                free(ref_aln_counts)
+                ref_aln_counts = NULL
+            if ref_aln_offsets != NULL:
+                free(ref_aln_offsets)
+                ref_aln_offsets = NULL
+            if ref_aln_indices != NULL:
+                free(ref_aln_indices)
+                ref_aln_indices = NULL
 
             # Report edge removal statistics (compaction will happen later in processor_filters)
             if edge_stats.alignments_removed > 0:

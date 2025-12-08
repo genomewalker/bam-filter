@@ -34,7 +34,7 @@ from .batch_utils cimport create_balanced_batches_greedy
 from .processor_memory cimport create_memory_pool, destroy_memory_pool, shrink_memory_pool, cleanup_presorted_memory
 from .processor_fast_math cimport stable_log_sum_exp, safe_normalize_weights
 from .processor_types cimport PrecomputedWeights, EMAlgorithmConfig
-from .processor_graph_ops cimport WeightedGraph, destroy_weighted_graph, pick_min_edge_weight_broken_stick
+from .processor_graph_ops cimport WeightedGraph, destroy_weighted_graph, pick_min_edge_weight_elbow
 from .processor_igraph cimport igraph_t, igraph_vcount, igraph_ecount
 
 from .processor_batch cimport (
@@ -325,12 +325,10 @@ cdef score_alignments(
     init_prior_strength=0.1,
     information_threshold=-999.0,
     graph_min_edge_weight=2,
-    graph_auto_tol=0.10,
-    graph_global_tail=0.99,
     clustering=False,
     community_resolution=1.0,
     community_max_iterations=10,
-    outlier_method="mad",
+    outlier_method="otsu",
     graph_export=None,
     # Taxonomy parameters
     taxonomy_db=None,
@@ -347,8 +345,10 @@ cdef score_alignments(
     taxonomy_anomaly_weight=2.0,
     taxonomy_second_chance=True,
     taxonomy_second_chance_cc=0.3,
-    remove_cross_domain_edges=False,
-    flag_misannotations=False,
+    # Cross-domain removal options
+    remove_cross_domain_alignments=False,
+    remove_cross_domain_references=False,
+    detect_misannotations=False,
 ):
     """Core BAM alignment scoring and filtering engine.
 
@@ -555,9 +555,7 @@ cdef score_alignments(
     cdef int community_max_iter_c  # C int for community_max_iterations
     cdef int outlier_method_c  # C int for outlier_method (0=MAD, 1=IQR, 2=IFOREST, 3=LOF, 4=ZSCORE)
     cdef uint32_t graph_min_edge_weight_c  # C uint32_t for graph_min_edge_weight
-    cdef double graph_auto_tol_c  # C double copy of graph_auto_tol
-    cdef double graph_global_tail_c  # C double copy of graph_global_tail
-    cdef uint32_t thr_c  # temporary holder for broken-stick threshold (declared at function scope)
+    cdef uint32_t thr_c  # temporary holder for edge weight threshold
     cdef uint32_t min_read_count_c  # C copy of min_read_count for nogil calls
     cdef int64_t aligns_filtered_information = 0
     cdef int64_t alignments_before_filtering = 0  # Alignments before filtering
@@ -569,8 +567,6 @@ cdef score_alignments(
         bam_file_path = bam_file_bytes
 
         # Copy python parameters into C types for nogil calls
-        graph_auto_tol_c = <double>graph_auto_tol
-        graph_global_tail_c = <double>graph_global_tail
         min_read_count_c = <uint32_t>min_read_count
         # C int version of verbose for use inside nogil regions
         verbose_c = 1 if verbose else 0
@@ -609,7 +605,8 @@ cdef score_alignments(
 
         # Configure taxonomy-informed filtering
         taxonomy_filter_config.enabled = taxonomy_filter_enabled
-        taxonomy_filter_config.enable_strict_filtering = taxonomy_strict_filter and (not remove_cross_domain_edges)
+        # Enable strict filtering if --remove-cross-domain-references is set (or if legacy strict_filter is True and no alignment removal)
+        taxonomy_filter_config.enable_strict_filtering = remove_cross_domain_references or (taxonomy_strict_filter and not remove_cross_domain_alignments)
         taxonomy_filter_config.strict_min_connections = <uint32_t>taxonomy_strict_min_connections
         taxonomy_filter_config.enable_weighted_outlier_detection = taxonomy_weighted_outlier
         taxonomy_filter_config.taxonomy_anomaly_weight = <float>taxonomy_anomaly_weight
@@ -620,7 +617,11 @@ cdef score_alignments(
 
         if verbose:
             _info("Taxonomy filtering config: enabled=%s, strict=%s, weighted=%s, second_chance=%s",
-                  taxonomy_filter_enabled, taxonomy_strict_filter, taxonomy_weighted_outlier, taxonomy_second_chance)
+                  taxonomy_filter_enabled, taxonomy_filter_config.enable_strict_filtering, taxonomy_weighted_outlier, taxonomy_second_chance)
+            if remove_cross_domain_alignments:
+                _info("Cross-domain alignment removal: ENABLED")
+            if remove_cross_domain_references:
+                _info("Cross-domain reference removal: ENABLED")
 
         if output_bam:
             output_bam_bytes = output_bam.encode('utf-8')
@@ -650,19 +651,12 @@ cdef score_alignments(
                         print_tsv_reference_stats(tsv_map)
 
         if reference_stats_tsv is not None:
-            try:
-                tsv_file_bytes = reference_stats_tsv.encode('utf-8') if reference_stats_tsv != '' else b''
-                tsv_file_path_c = tsv_file_bytes
-            except Exception:
-                tsv_file_path_c = NULL
+            tsv_file_bytes = reference_stats_tsv.encode('utf-8') if reference_stats_tsv != '' else b''
+            tsv_file_path_c = tsv_file_bytes
 
-    # Convert graph export path to C string
         if graph_export is not None:
-            try:
-                graph_export_bytes = graph_export.encode('utf-8') if graph_export != '' else b''
-                graph_export_path_c = graph_export_bytes
-            except Exception:
-                graph_export_path_c = NULL
+            graph_export_bytes = graph_export.encode('utf-8') if graph_export != '' else b''
+            graph_export_path_c = graph_export_bytes
 
         # Open BAM file and initialize
         bam_handle = hts_open(bam_file_path, b"r")
@@ -700,7 +694,6 @@ cdef score_alignments(
                     reference_lengths[i] = 1000  # Consistent default
                     invalid_original_lengths += 1
 
-        # Apply TSV overrides to original array (if provided)
         if tsv_map:
             if verbose:
                 _info(f"Applying TSV overrides to original reference array...")
@@ -718,14 +711,11 @@ cdef score_alignments(
                     if tsv_length > 0:
                         reference_lengths[tid32] = tsv_length
                         used_tsv += 1
-                    # else: keep BAM default (already set above)
-
             if verbose:
                 _info(f"TSV overrides applied to original array:")
                 _info(f"  TSV overrides applied: {used_tsv}")
                 _info(f"  BAM defaults used: {total_references - used_tsv}")
 
-        # Analyze reference alignment counts
         reference_alignment_counts = <int64_t*>malloc(total_references * sizeof(int64_t))
         if not reference_alignment_counts:
             raise MemoryError("Failed to allocate reference alignment counts")
@@ -734,7 +724,6 @@ cdef score_alignments(
             result_code = hts_idx_get_stat(bam_index, reference_idx, &mapped_alignments, &unmapped_alignments)
             reference_alignment_counts[reference_idx] = <int64_t>mapped_alignments if result_code == 0 else 0
 
-        # Filter references by minimum coverage
         references_to_process = 0
         for reference_idx in range(total_references):
             if reference_alignment_counts[reference_idx] >= min_read_count:
@@ -743,7 +732,6 @@ cdef score_alignments(
         if references_to_process <= 0:
             raise RuntimeError(f"No references with >= {min_read_count} alignments found")
 
-        # Create reference processing list
         reference_ids = <int64_t*>malloc(references_to_process * sizeof(int64_t))
         if not reference_ids:
             raise MemoryError("Failed to allocate reference IDs")
@@ -1005,7 +993,6 @@ cdef score_alignments(
 
             _announce_stage("Confidence Filtering", "Removing low-confidence alignments based on posterior probabilities")
             stage_timer = bf_monotonic_seconds()
-            # Apply probability filtering (this removes low-probability alignments)
             if apply_probability_filtering(memory_pool, &em_config) != 0:
                 raise RuntimeError("Probability filtering failed")
             _log_stage("Probability filtering", stage_timer)
@@ -1027,33 +1014,18 @@ cdef score_alignments(
                 destroy_reference_mapping(mapping)
                 raise RuntimeError("Failed to remap alignment reference IDs")
 
-            # Ensure the memory pool reflects the compacted reference space immediately
-            # after remapping so subsequent allocations/iterations use the correct bounds.
-            # This keeps pool.reference_count consistent with mapping.n_retained_refs.
             if mapping != NULL:
                 memory_pool.reference_count = mapping.n_retained_refs
                 _debug(1, f"APPLY MAPPING: Updated memory_pool.reference_count -> {mapping.n_retained_refs}")
                 if memory_pool.stats != NULL:
                     memory_pool.stats.post_probability_references = mapping.n_retained_refs
 
-            # Allocate pattern data for graph analysis (only used when TSV/graph requested)
-            # Use calloc to zero-initialize Community fields (prevents garbage values in TSV)
             pattern_data = <ReferencePattern*>calloc(memory_pool.reference_count, sizeof(ReferencePattern))
             if not pattern_data:
                 destroy_reference_mapping(mapping)
                 raise MemoryError("Failed to allocate pattern_data array")
 
-            # Only run heavy graph analysis and statistics if the user requested a TSV
-            # (reference_stats_tsv) or clustering (which requires TSV). Otherwise skip.
             if tsv_file_path_c:
-                # Before running the potentially-expensive igraph build inside
-                # analyze_reference_graph, compute reference statistics and build
-                # a read index so we can run the broken-stick selector when the
-                # user requested auto (graph_min_edge_weight == 0). This ensures
-                # the igraph is constructed with the inferred threshold just like
-                # when the user passes a positive CLI weight.
-
-                # Allocate and compute reference statistics (needed for broken-stick)
                 ref_stats = <ReferenceStats*>malloc(memory_pool.reference_count * sizeof(ReferenceStats))
                 if not ref_stats:
                     free(pattern_data)
@@ -1063,7 +1035,6 @@ cdef score_alignments(
                 with nogil:
                     calculate_reference_stats(memory_pool, bam_header, ref_stats)
 
-                # Build read index now so broken-stick can inspect full connectivity
                 with nogil:
                     read_index = build_read_index_parallel(memory_pool, memory_pool.reference_count, num_threads_c)
 
@@ -1073,55 +1044,32 @@ cdef score_alignments(
                     destroy_reference_mapping(mapping)
                     raise RuntimeError("Failed to build read index for graph analysis")
 
-                # If user requested auto, run broken-stick now and update threshold
                 if graph_min_edge_weight == 0:
                     if verbose:
-                        bf_logging.log("GRAPH", f"Deferred auto detected: running broken-stick prior to igraph build (tol={graph_auto_tol_c}, min_read_count={min_read_count})")
+                        bf_logging.log("GRAPH", f"Auto edge threshold: running elbow detection (min_read_count={min_read_count})")
                     try:
                         with nogil:
-                            # Two-stage policy: for the global igraph build we use a
-                            # very conservative tail so the graph only contains the
-                            # heaviest edges (reduce noisy, low-weight connectivity).
-                            # Per-community CC filtering later still uses the
-                            # standard, more sensitive tail (0.75) so local structure
-                            # is evaluated finely. Use the 99th percentile here.
-                            thr_c = pick_min_edge_weight_broken_stick(<MemoryPool*>memory_pool, <ReadIndex*>read_index, <ReferenceStats*>ref_stats, <uint32_t>memory_pool.reference_count, min_read_count_c, graph_auto_tol_c, verbose_c, graph_global_tail_c, 20)
+                            thr_c = pick_min_edge_weight_elbow(<MemoryPool*>memory_pool, <ReadIndex*>read_index, <ReferenceStats*>ref_stats, <uint32_t>memory_pool.reference_count, min_read_count_c, 0.0, verbose_c, 0.0, 0)
                         graph_min_edge_weight_c = thr_c
                         if verbose:
-                            bf_logging.log("GRAPH", f"Broken-stick selector returned threshold = {graph_min_edge_weight_c} (global_tail={graph_global_tail_c:.3f})")
+                            bf_logging.log("GRAPH", f"Elbow threshold = {graph_min_edge_weight_c}")
                     except Exception as e:
                         if verbose:
-                            bf_logging.warn(f"GRAPH: Broken-stick selection failed; proceeding with threshold={graph_min_edge_weight_c}. Error: {e}")
+                            bf_logging.warn(f"GRAPH: Edge threshold selection failed; proceeding with threshold={graph_min_edge_weight_c}. Error: {e}")
 
                 _announce_stage("Connectivity Analysis", "Constructing reference connectivity graph and analyzing read categories")
                 stage_timer = bf_monotonic_seconds()
-                # Now run graph analysis which may build an igraph using the selected threshold
                 filtered_graph = analyze_reference_graph(memory_pool, pattern_data, em_config.minimum_read_coverage,
                                           &em_config, bam_header, mapping, verbose, clustering, tsv_file_path_c,
-                                          graph_min_edge_weight_c, NULL)
+                                          graph_min_edge_weight_c, NULL, read_index)
                 _log_stage("Reference graph analysis", stage_timer)
-
-                # Debug: Log what we received
-                if verbose:
-                    import sys
-                    print(f"[DEBUG] processor.pyx: Checking taxonomy parameters:", file=sys.stderr)
-                    print(f"[DEBUG]   taxonomy_db = {taxonomy_db}", file=sys.stderr)
-                    print(f"[DEBUG]   taxonomy_accession_map = {taxonomy_accession_map}", file=sys.stderr)
-                    sys.stderr.flush()
 
                 # Taxonomy-aware graph analysis (if databases provided)
                 if taxonomy_db is not None and taxonomy_accession_map is not None:
                     _announce_stage("Taxonomy Enrichment", "Enriching graph with taxonomic information")
-                    import sys
-                    sys.stdout.flush()
-                    sys.stderr.flush()
                     taxonomy_stage_timer = bf_monotonic_seconds()
 
-                    # Load taxonomy database from path
                     from bam_filter.taxonomy_db import TaxonomyDatabase, load_accession_map_from_file
-
-                    if verbose:
-                        print(f"[DEBUG] Loading taxonomy database from: {taxonomy_db}", flush=True)
 
                     _info("Loading taxonomy database from %s", taxonomy_db)
                     try:
@@ -1129,16 +1077,10 @@ cdef score_alignments(
                         _info("  Loaded taxonomy: %d nodes", taxdb_obj.n_nodes)
                     except Exception as e:
                         _error("Failed to load taxonomy database: %s", str(e))
-                        if verbose:
-                            import traceback
-                            traceback.print_exc()
                         raise
 
-                    # Extract C pointer from Python object
                     taxdb_c = taxdb_obj.db
 
-                    # Load accession map with reference filtering
-                    # Extract reference accessions for filtering
                     _info("Extracting reference accessions for filtered loading...")
                     reference_accessions = []
                     for ref_idx in range(memory_pool.reference_count):
@@ -1161,25 +1103,18 @@ cdef score_alignments(
                         _info("Accession map loaded successfully")
                     except Exception as e:
                         _error("Failed to load accession map: %s", str(e))
-                        if verbose:
-                            import traceback
-                            traceback.print_exc()
                         raise
 
-                    # Extract C pointer from Python object
                     accmap_c = accmap_obj.amap
 
-                    # Configure taxonomy analysis
                     tax_config.enabled = True
                     tax_config.min_rank_id_for_comparison = taxonomy_min_rank
                     tax_config.cross_domain_threshold = taxonomy_cross_domain_threshold
                     tax_config.kingdom_mismatch_threshold = taxonomy_kingdom_threshold
                     tax_config.genus_mismatch_threshold = taxonomy_genus_threshold
 
-                    # Phase 5b: Basic taxonomy enrichment (just map accessions to taxids)
-                    # Anomaly detection will happen in Phase 6 after Community clustering
                     if verbose:
-                        _info("Enriching references with taxonomy IDs (anomaly detection deferred to Phase 6)...")
+                        _info("Enriching references with taxonomy IDs...")
 
                     with nogil:
                         enrich_patterns_with_taxonomy(
@@ -1194,35 +1129,22 @@ cdef score_alignments(
 
                     _log_stage("Taxonomy ID enrichment", taxonomy_stage_timer)
 
-                # If clustering (igraph + Community) was requested, a non-NULL filtered_graph
-                # is required because it contains the cached igraph/weights used by Community.
-                # For TSV-only runs we allow analyze_reference_graph to return NULL
-                # (it may compute and write TSV metrics without allocating an igraph).
                 if clustering and not filtered_graph:
                     free(pattern_data)
                     destroy_reference_mapping(mapping)
                     raise RuntimeError("Reference pattern detection failed")
 
-                # Update graph stats (patterns computed = references analyzed)
-                # Use the memory pool's current reference_count (compacted by mapping)
-                # rather than the earlier pre-compaction unique_reference_count so
-                # reported "References analyzed" matches the remapped/compacted space.
                 if memory_pool.stats != NULL:
                     with nogil:
                         update_graph_stats(memory_pool.stats, memory_pool.reference_count, memory_pool.reference_count)
 
-                # Convert verbose to C int for nogil context
                 verbose_c = 1 if verbose else 0
-                
-                # Alignments before filtering
                 alignments_before_filtering = memory_pool.alignment_count
             else:
                 _announce_stage_skip("Connectivity Analysis", "Graph analysis disabled")
-                # No graph/TSV requested: skip analysis and free pattern_data
                 filtered_graph = NULL
                 verbose_c = 1 if verbose else 0
                 alignments_before_filtering = memory_pool.alignment_count
-                # pattern_data was only allocated for graph analysis, free it now
                 free(pattern_data)
                 pattern_data = NULL
                 if memory_pool.stats != NULL:
@@ -1231,25 +1153,17 @@ cdef score_alignments(
 
             aligns_filtered_information = 0
             if clustering:
-                # Determine which algorithm will be used based on graph size
                 if filtered_graph and filtered_graph.num_nodes >= 10000:
                     _announce_stage("Graph Filtering", "Applying cluster-aware refinement using Label Propagation Algorithm (fast, for large graphs)")
                 else:
                     _announce_stage("Graph Filtering", "Applying cluster-aware refinement using Community algorithm")
 
-                # Validate filtered_graph before proceeding
                 if not filtered_graph:
                     raise RuntimeError("filtered_graph is NULL at Phase 6 start")
-
-                _info(f"graph_filtering: using_cached_igraph handle={<unsigned long>filtered_graph.igraph_handle:x} weights={<unsigned long>filtered_graph.weights_handle:x} nodes={filtered_graph.num_nodes}")
-
                 if not filtered_graph.igraph_handle:
                     raise RuntimeError("filtered_graph.igraph_handle is NULL at Phase 6 start")
                 if not filtered_graph.weights_handle:
                     raise RuntimeError("filtered_graph.weights_handle is NULL at Phase 6 start")
-
-                # Validate TSV arrays that community_clustering will access
-                _info(f"graph_filtering: checking_tsv_arrays exact_conn={<unsigned long>filtered_graph.tsv_exact_connection_counts:x} co_mapping={<unsigned long>filtered_graph.tsv_co_mapping_averages:x}")
                 if not filtered_graph.tsv_exact_connection_counts:
                     raise RuntimeError("filtered_graph.tsv_exact_connection_counts is NULL")
                 if not filtered_graph.tsv_co_mapping_averages:
@@ -1259,12 +1173,7 @@ cdef score_alignments(
                 if not filtered_graph.tsv_neighbor_multimap_avg:
                     raise RuntimeError("filtered_graph.tsv_neighbor_multimap_avg is NULL")
 
-                _info("graph_filtering: all_tsv_arrays_valid")
-
-                # Build required data structures for cluster-aware filtering
-                # Allocate and calculate reference statistics / read_index if not already present
                 if not ref_stats:
-                    _info(f"graph_filtering: calculating_reference_stats refs={memory_pool.reference_count}")
                     ref_stats = <ReferenceStats*>malloc(memory_pool.reference_count * sizeof(ReferenceStats))
                     if not ref_stats:
                         free(pattern_data)
@@ -1274,10 +1183,7 @@ cdef score_alignments(
                     with nogil:
                         calculate_reference_stats(memory_pool, bam_header, ref_stats)
 
-                    _info("graph_filtering: reference_stats_complete")
-
                 if not read_index:
-                    _info(f"graph_filtering: building_read_index refs={memory_pool.reference_count} threads={num_threads_c}")
                     with nogil:
                         read_index = build_read_index_parallel(memory_pool, memory_pool.reference_count, num_threads_c)
 
@@ -1289,43 +1195,33 @@ cdef score_alignments(
                         destroy_reference_mapping(mapping)
                         raise RuntimeError("Failed to build read index for cluster filtering")
 
-                    _info("graph_filtering: read_index_complete")
-
                 # If user selected auto (0), ensure we have a concrete threshold.
-                # Prefer the earlier selection (if we ran broken-stick prior to igraph build).
-                # Only run broken-stick here if the threshold is still the 0 sentinel.
+                # Prefer the earlier selection (if we ran Otsu prior to igraph build).
+                # Only run Otsu here if the threshold is still the 0 sentinel.
                 if graph_min_edge_weight == 0:
                     if graph_min_edge_weight_c == 0:
                         if verbose:
-                            bf_logging.log("GRAPH", f"Auto mode still unresolved: running broken-stick selection on read index (tol={graph_auto_tol_c}, min_read_count={min_read_count})")
-                        # Call the nogil C helper directly while releasing the GIL
+                            bf_logging.log("GRAPH", f"Auto edge threshold: running elbow detection (min_read_count={min_read_count})")
                         try:
                             with nogil:
-                                thr_c = pick_min_edge_weight_broken_stick(<MemoryPool*>memory_pool, <ReadIndex*>read_index, <ReferenceStats*>ref_stats, <uint32_t>memory_pool.reference_count, min_read_count_c, graph_auto_tol_c, verbose_c, 0.75, 20)
-                            # Update C threshold with the selected value
+                                thr_c = pick_min_edge_weight_elbow(<MemoryPool*>memory_pool, <ReadIndex*>read_index, <ReferenceStats*>ref_stats, <uint32_t>memory_pool.reference_count, min_read_count_c, 0.0, verbose_c, 0.0, 0)
                             graph_min_edge_weight_c = thr_c
                             if verbose:
-                                bf_logging.log("GRAPH", f"Broken-stick selector returned threshold = {graph_min_edge_weight_c}")
+                                bf_logging.log("GRAPH", f"Elbow threshold = {graph_min_edge_weight_c}")
                         except Exception as e:
-                            # Fallback: keep existing graph_min_edge_weight_c (was set earlier as 0 sentinel).
                             if verbose:
-                                bf_logging.warn(f"GRAPH: Broken-stick threshold selection failed; keeping threshold={graph_min_edge_weight_c}. Error: {e}")
+                                bf_logging.warn(f"GRAPH: Edge threshold selection failed; keeping threshold={graph_min_edge_weight_c}. Error: {e}")
                     else:
                         if verbose:
                             bf_logging.log("GRAPH", f"Using previously selected auto threshold = {graph_min_edge_weight_c}")
-                
-                # Convert clustering flag to C int: if clustering enabled, use Community (default)
+
                 use_community_c = 1 if clustering else 0
                 community_res_c = community_resolution if community_resolution else 1.0
                 community_parallel_c = 0
                 community_max_iter_c = community_max_iterations if community_max_iterations else 10
-                # Note: graph_min_edge_weight_c and outlier_method_c already assigned at start of try block
 
-                # Apply cluster-aware filtering (includes TSV writing after Community)
                 stage_timer = bf_monotonic_seconds()
 
-                # Validate pointers before clustering (filtered_graph can be NULL - will be rebuilt)
-                _info(f"graph_filtering: validating_pointers memory_pool={<unsigned long>memory_pool:x} pattern_data={<unsigned long>pattern_data:x} ref_stats={<unsigned long>ref_stats:x} read_index={<unsigned long>read_index:x} filtered_graph={<unsigned long>filtered_graph:x}")
                 if not memory_pool:
                     raise RuntimeError("memory_pool is NULL before clustering")
                 if not pattern_data:
@@ -1334,16 +1230,12 @@ cdef score_alignments(
                     raise RuntimeError("ref_stats is NULL before clustering")
                 if not read_index:
                     raise RuntimeError("read_index is NULL before clustering")
-                # Note: filtered_graph can be NULL here - it will be rebuilt inside apply_cluster_aware_filtering()
-                _info("graph_filtering: pointer_validation_passed")
-
-                # Initialize taxonomy filtering statistics
                 taxonomy_stats.strict_removed = 0
                 taxonomy_stats.weighted_count = 0
                 taxonomy_stats.second_chance_restored = 0
 
-                remove_cross_domain_edges_c = 1 if remove_cross_domain_edges else 0
-                flag_misannotations_c = 1 if flag_misannotations else 0
+                remove_cross_domain_alignments_c = 1 if remove_cross_domain_alignments else 0
+                detect_misannotations_c = 1 if detect_misannotations else 0
 
                 cluster_result = apply_cluster_aware_filtering(
                     memory_pool, pattern_data, ref_stats, read_index,
@@ -1365,14 +1257,13 @@ cdef score_alignments(
                     0.3,   # cc_threshold: hub detection
                     5,     # hub_degree_threshold: minimum degree for hub/core
                     False,  # strict_mode: non-strict by default
-                    remove_cross_domain_edges_c,  # Edge removal toggle
-                    flag_misannotations_c  # Misannotation detection toggle
+                    remove_cross_domain_alignments_c,  # Alignment removal toggle
+                    detect_misannotations_c  # Misannotation detection toggle
                 )
-                
-                # Clean up structures
+
                 with nogil:
                     destroy_read_index(read_index)
-                    destroy_weighted_graph(filtered_graph)  # Clean up the graph (nogil function)
+                    destroy_weighted_graph(filtered_graph)
                 free(ref_stats)
                 
                 if cluster_result != 0:
@@ -1380,24 +1271,16 @@ cdef score_alignments(
                     destroy_reference_mapping(mapping)
                     raise RuntimeError("Cluster-aware filtering failed")
 
-                # Store taxonomy filtering statistics in memory pool stats
                 if memory_pool.stats != NULL:
                     memory_pool.stats.taxonomy_strict_removed = taxonomy_stats.strict_removed
                     memory_pool.stats.taxonomy_weighted_count = taxonomy_stats.weighted_count
                     memory_pool.stats.taxonomy_second_chance_restored = taxonomy_stats.second_chance_restored
 
-                # For cluster filtering, track total alignments removed as information-based filtering
-                # since cluster filtering is an information-theoretic approach
                 aligns_filtered_information = alignments_before_filtering - memory_pool.alignment_count
-                
-                if verbose:
-                    bf_logging.log("CLUSTER", "Filtering complete")
 
-                # Clean up pattern data
                 free(pattern_data)
                 pattern_data = NULL
 
-                # Update mapping after filtering (SINGLE UPDATE) - this compacts references
                 if update_reference_mapping_after_filtering(mapping, memory_pool) != 0:
                     destroy_reference_mapping(mapping)
                     raise RuntimeError("Failed to update reference mapping after filtering")
@@ -1414,8 +1297,6 @@ cdef score_alignments(
                                                     0, aligns_filtered_information, 0)
             else:
                 _announce_stage_skip("Advanced Filtering", "Cluster-aware filtering disabled")
-                # Clustering disabled: keep graph metrics (TSV) but skip any filtering steps.
-                # Ensure we free graph resources and pattern data allocated for analysis.
                 if filtered_graph:
                     with nogil:
                         destroy_weighted_graph(filtered_graph)
@@ -1427,7 +1308,6 @@ cdef score_alignments(
                 if ref_stats:
                     free(ref_stats)
                     ref_stats = NULL
-                # free pattern data that was allocated for graph analysis
                 free(pattern_data)
                 pattern_data = NULL
                 if memory_pool.stats != NULL:
@@ -1530,12 +1410,8 @@ cdef score_alignments(
                     }
                 }
             
-            # Include graph analysis TSV path if provided
             if tsv_file_path_c:
-                try:
-                    result['reference_stats_tsv'] = tsv_file_bytes.decode('utf-8')
-                except Exception:
-                    result['reference_stats_tsv'] = None
+                result['reference_stats_tsv'] = tsv_file_bytes.decode('utf-8')
 
         return result
 
@@ -1625,17 +1501,15 @@ def process_bam_with_em(
     emergency_min_dominant_refs=0,
     init_prior_strength=0.1,
     information_threshold=-999.0,  # Information-theoretic filtering (-999.0 = disabled)
-    
+
     # Graph construction parameters (cluster-aware filtering always enabled)
-    graph_min_edge_weight=0,  # Minimum edge weight to keep in graph (0=auto, -1=no filtering)
-    graph_auto_tol=0.10,  # Tolerance fraction for broken-stick auto threshold (e.g., 0.10 = 10%)
-    graph_global_tail=0.99,  # Tail percentile used for global (pre-igraph) broken-stick selection
-    
+    graph_min_edge_weight=0,  # Minimum edge weight to keep in graph (0=auto via elbow, -1=no filtering)
+
     # Clustering parameters
     clustering=False,  # Enable clustering/community detection (requires reference_stats_tsv)
     community_resolution=1.0,
     community_max_iterations=10,
-    outlier_method="mad",  # "mad" or "iqr" - Statistical outlier detection method
+    outlier_method="otsu",  # CC threshold method (Otsu bimodal separation)
 
     # Graph export
     graph_export=None,  # Export graph to GraphML format (optional)
@@ -1655,9 +1529,10 @@ def process_bam_with_em(
     taxonomy_anomaly_weight=2.0,
     taxonomy_second_chance=True,
     taxonomy_second_chance_cc=0.3,
-    # Edge removal and misannotation detection
-    remove_cross_domain_edges=False,
-    flag_misannotations=False,
+    # Cross-domain removal options
+    remove_cross_domain_alignments=False,
+    remove_cross_domain_references=False,
+    detect_misannotations=False,
 ):
     """
     High-level entry point to process a BAM file with the EM-based pipeline.
@@ -1771,8 +1646,6 @@ def process_bam_with_em(
             init_prior_strength=init_prior_strength,
             information_threshold=information_threshold,
             graph_min_edge_weight=graph_min_edge_weight,
-            graph_auto_tol=graph_auto_tol,
-            graph_global_tail=graph_global_tail,
             clustering=clustering,
             community_resolution=community_resolution,
             community_max_iterations=community_max_iterations,
@@ -1791,8 +1664,9 @@ def process_bam_with_em(
             taxonomy_anomaly_weight=taxonomy_anomaly_weight,
             taxonomy_second_chance=taxonomy_second_chance,
             taxonomy_second_chance_cc=taxonomy_second_chance_cc,
-            remove_cross_domain_edges=remove_cross_domain_edges,
-            flag_misannotations=flag_misannotations,
+            remove_cross_domain_alignments=remove_cross_domain_alignments,
+            remove_cross_domain_references=remove_cross_domain_references,
+            detect_misannotations=detect_misannotations,
         )
 
         processing_time = bf_monotonic_seconds() - clock_start

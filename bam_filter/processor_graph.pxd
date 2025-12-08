@@ -60,7 +60,7 @@ cdef struct ReferencePattern:
     uint32_t community_id       # Community ID assigned by the detection algorithm
     float community_cc          # Average clustering coefficient for this reference's community
     float community_individual_cc         # Individual clustering coefficient for this reference (Barrat's method)
-    float community_cc_threshold          # Broken-stick threshold used for filtering this reference's community
+    float community_cc_threshold          # Otsu threshold used for filtering this reference's community
     char community_keep_flag              # 1=keep, 0=remove from Community filtering
     float community_anomaly_score         # Anomaly score from multi-metric outlier detection (0=normal, 1=anomalous)
     float betweenness_centrality       # Betweenness centrality (bridge-ness metric from igraph)
@@ -251,7 +251,8 @@ cdef WeightedGraph* analyze_reference_graph(MemoryPool* pool, ReferencePattern* 
                                            int32_t min_read_count, EMAlgorithmConfig* config,
                                            sam_hdr_t* bam_header, ReferenceMapping* mapping,
                                            bint verbose, bint build_igraph, const char* tsv_export_path,
-                                           uint32_t graph_min_edge_weight, TaxonomyDB* taxonomy_db) noexcept nogil
+                                           uint32_t graph_min_edge_weight, TaxonomyDB* taxonomy_db,
+                                           ReadIndex* existing_read_index) noexcept nogil
 
 # Helper functions for cluster-aware filtering
 cdef ReadIndex* build_read_index_parallel(MemoryPool* pool, uint32_t array_size, int num_threads) noexcept nogil

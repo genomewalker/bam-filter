@@ -9,20 +9,14 @@
 # cython: infer_types=True
 # distutils: language = c++
 # -*- coding: utf-8 -*-
-
-# batch_utils.pyx
-# Shared batching and sorting utilities for BAM processing
 from libc.stdint cimport int64_t
 from libc.stdlib cimport malloc, free
 from bam_filter import logging as bf_logging
+from bam_filter.processor_types cimport ProcessingError, CompactAlignment, ProcessingBatch
 
 LOG_TAG = "BATCH"
 
 
-# Shared batching and sorting utilities for BAM processing
-from libc.stdint cimport int64_t
-from libc.stdlib cimport malloc, free
-from bam_filter.processor_types cimport ProcessingError, CompactAlignment, ProcessingBatch
 cdef int compare_pairs_desc(const void* a, const void* b) noexcept nogil:
     """Compare function for descending order sorting by read count."""
     cdef int64_t* pair_a = <int64_t*>a

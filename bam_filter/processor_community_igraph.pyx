@@ -165,7 +165,7 @@ cdef int process_single_community_global(
 ) nogil:
     """
     Compute Barrat clustering coefficients for a community (given as a member_list
-    of global vertex ids), apply broken-stick threshold, and set keep_flag for
+    of global vertex ids), apply Otsu threshold, and set keep_flag for
     kept vertices. Runs nogil and returns 0 on success.
 
     IMPORTANT: Extracts the induced subgraph for this community to calculate CC
@@ -282,19 +282,13 @@ cdef int process_single_community_global(
     igraph_destroy(&subgraph)
     igraph_vector_destroy(&sub_weights)
 
-    # Calculate statistical outlier threshold for CC values using simplified approach
-    # Supports MAD (default) and IQR methods - both univariate on CC only
+    # Calculate CC threshold using Otsu's method (bimodal separation)
     # INTERPRETATION: CC >= threshold -> KEEP (cohesive), CC < threshold -> REMOVE (hub/contamination)
-    # Note: Complex multi-metric methods removed - the three-tier filtering pipeline handles this better
+    # Note: outlier_method parameter kept for API compatibility but ignored (Otsu used for all)
 
     cdef uint32_t i_member
 
-    if outlier_method == 1:
-        # IQR method (univariate on CC only)
-        threshold = calculate_statistical_outlier_threshold_iqr(comm_clustering, n_members, (verbose and bf_should_log(BF_LOG_LEVEL_TRACE)) and n_members > 50)
-    else:
-        # MAD method (default, outlier_method == 0, univariate on CC only)
-        threshold = calculate_statistical_outlier_threshold_mad(comm_clustering, n_members, (verbose and bf_should_log(BF_LOG_LEVEL_TRACE)) and n_members > 50)
+    threshold = calculate_cc_threshold_otsu(comm_clustering, n_members, (verbose and bf_should_log(BF_LOG_LEVEL_TRACE)) and n_members > 50)
 
     # Store anomaly scores as CC values (for TSV export compatibility)
     if out_anomaly_scores != NULL:
@@ -447,7 +441,7 @@ cdef int extract_subgraph_with_weights(
 
 
 # ==============================================================================
-# BROKEN STICK MODEL
+# CLUSTERING COEFFICIENT THRESHOLD SELECTION
 # ==============================================================================
 
 cdef int _float_compare_ascending(const void* a, const void* b) noexcept nogil:
@@ -462,27 +456,16 @@ cdef int _float_compare_ascending(const void* a, const void* b) noexcept nogil:
         return 0
 
 
-cdef float calculate_statistical_outlier_threshold_mad(float* values, uint32_t n, bint verbose) nogil:
+cdef float calculate_cc_threshold_otsu(float* values, uint32_t n, bint verbose) nogil:
     """
-    Calculate threshold for identifying low-CC hubs using Modified Z-Score (MAD method).
+    Calculate CC threshold using Otsu's method (bimodal separation).
 
-    APPROACH:
-    Uses Median Absolute Deviation (MAD) for MAD-based outlier detection.
-    The modified z-score is: 0.6745 * (x - median) / MAD
-    Values with |modified_z_score| > 3.5 are considered outliers.
+    Finds the optimal threshold that maximizes inter-class variance between
+    low-CC (hub/contamination) and high-CC (cohesive/signal) references.
 
     FILTERING INTERPRETATION:
-    - CC >= threshold -> cohesive/well-connected -> informative reference -> KEEP
-    - CC < threshold -> hub/star pattern (statistical outlier) -> promiscuous/contamination -> REMOVE
-
-    High CC means the reference's neighbors are also connected to each other (clique/triangle).
-    Low CC means the reference connects otherwise unrelated references (hub/star, likely contaminant).
-
-    ADVANTAGES:
-    - Only removes TRUE statistical outliers (may remove 0 references if data is clean!)
-    - Resistant to extreme outliers (unlike standard deviation)
-    - Non-parametric (doesn't assume normal distribution)
-    - Well-established in statistics literature
+    - CC >= threshold -> cohesive/well-connected -> KEEP
+    - CC < threshold -> hub/star pattern -> REMOVE
 
     Args:
         values: Array of clustering coefficients (range [0,1])
@@ -494,177 +477,104 @@ cdef float calculate_statistical_outlier_threshold_mad(float* values, uint32_t n
     """
     cdef uint32_t i
     cdef float* sorted_values = <float*>malloc(n * sizeof(float))
-    cdef float* abs_deviations = NULL
-    cdef float threshold
-    cdef float median_cc, mad, modified_z_threshold
-    cdef uint32_t median_idx
+    cdef float threshold = 0.0
+    cdef float min_val, max_val, range_val
+    cdef uint32_t num_bins = 100
+    cdef uint64_t* histogram = NULL
+    cdef double total_sum = 0.0
+    cdef double sum_bg = 0.0
+    cdef uint64_t weight_bg = 0
+    cdef double mean_bg, mean_fg, between_var, max_var = 0.0
+    cdef uint32_t otsu_bin = 0
+    cdef uint32_t bin_idx
     cdef uint32_t num_outliers
+    cdef float q25, median_cc, q75
+    cdef uint32_t q25_idx, median_idx, q75_idx
 
-    if not sorted_values:
-        return 0.0  # No filtering if allocation fails
+    if not sorted_values or n < 2:
+        if sorted_values:
+            free(sorted_values)
+        return 0.0
 
     # Copy and sort values ascending
     for i in range(n):
         sorted_values[i] = values[i]
     qsort(sorted_values, n, sizeof(float), _float_compare_ascending)
 
-    # Calculate median
+    min_val = sorted_values[0]
+    max_val = sorted_values[n - 1]
+    range_val = max_val - min_val
+
+    # Calculate quartiles for diagnostics
+    q25_idx = n / 4
     median_idx = n / 2
-    if n % 2 == 0 and n > 1:
-        median_cc = (sorted_values[median_idx - 1] + sorted_values[median_idx]) / 2.0
-    else:
-        median_cc = sorted_values[median_idx]
-
-    # Calculate absolute deviations from median
-    abs_deviations = <float*>malloc(n * sizeof(float))
-    if not abs_deviations:
-        free(sorted_values)
-        return 0.0
-
-    for i in range(n):
-        abs_deviations[i] = sorted_values[i] - median_cc
-        if abs_deviations[i] < 0:
-            abs_deviations[i] = -abs_deviations[i]
-
-    # Sort absolute deviations to find MAD
-    qsort(abs_deviations, n, sizeof(float), _float_compare_ascending)
-
-    # MAD is the median of absolute deviations
-    if n % 2 == 0 and n > 1:
-        mad = (abs_deviations[median_idx - 1] + abs_deviations[median_idx]) / 2.0
-    else:
-        mad = abs_deviations[median_idx]
-
-    free(abs_deviations)
-
-    # Calculate key percentiles for diagnostics
-    cdef float q25, q75, iqr
-    cdef uint32_t q25_idx = n / 4
-    cdef uint32_t q75_idx = 3 * n / 4
+    q75_idx = 3 * n / 4
     q25 = sorted_values[q25_idx]
+    median_cc = sorted_values[median_idx]
     q75 = sorted_values[q75_idx]
-    iqr = q75 - q25
 
     if verbose:
         bf_nogil_logf_notime(
             b"COMMUNITY",
-            "    CC distribution: Q25=%.3f, Median=%.3f, Q75=%.3f, IQR=%.3f, MAD=%.3f\n",
-            q25,
-            median_cc,
-            q75,
-            iqr,
-            mad,
+            "    CC distribution: min=%.3f, Q25=%.3f, median=%.3f, Q75=%.3f, max=%.3f\n",
+            min_val, q25, median_cc, q75, max_val,
         )
         bf_nogil_logf_notime(b"COMMUNITY", "    Sample size: %u\n", n)
 
-    # Modified Z-score threshold: 3.5 is standard for outlier detection
-    # We want to find LOW outliers (hubs), so we look at the lower tail
-    # threshold = median - 3.5 * MAD / 0.6745
-    if mad > 0.0:
-        modified_z_threshold = 3.5
-        threshold = median_cc - (modified_z_threshold * mad / 0.6745)
-
-        # Ensure threshold is in valid range [0, 1]
-        if threshold < 0.0:
-            threshold = 0.0
-        if threshold > median_cc:
-            threshold = median_cc
-
-        # Count how many values fall below threshold (outliers)
-        num_outliers = 0
-        for i in range(n):
-            if sorted_values[i] < threshold:
-                num_outliers += 1
-
+    # If all values are identical or very close, no separation possible
+    if range_val < 0.001:
+        free(sorted_values)
         if verbose:
-            bf_nogil_logf_notime(
-                b"COMMUNITY",
-                "    [MAD] Outlier threshold: %.6f (MAD-based, modified_z > 3.5)\n",
-                threshold,
-            )
-            bf_nogil_logf_notime(
-                b"COMMUNITY",
-                "    [MAD] Will REMOVE %u outliers (%.1f%% of community)\n",
-                num_outliers,
-                100.0 * <float>num_outliers / <float>n,
-            )
-    else:
-        # MAD is 0 (all values identical) - no outliers to remove
-        threshold = median_cc
-        if verbose:
-            bf_nogil_logf_notime(
-                b"COMMUNITY",
-                "    [MAD] MAD=0 (all values identical), no outliers to remove\n",
-            )
+            bf_nogil_logf_notime(b"COMMUNITY", "    [OTSU] All CC values identical, no threshold needed\n")
+        return 0.0
 
-    free(sorted_values)
-    return threshold
+    # Build histogram (100 bins for [0,1] range of CC values)
+    histogram = <uint64_t*>calloc(num_bins, sizeof(uint64_t))
+    if not histogram:
+        free(sorted_values)
+        return 0.0
 
-
-cdef float calculate_statistical_outlier_threshold_iqr(float* values, uint32_t n, bint verbose) nogil:
-    """
-    Calculate threshold for identifying low-CC hubs using IQR method.
-
-    APPROACH:
-    Uses Interquartile Range (IQR) for outlier detection.
-    Lower bound = Q1 - 1.5 * IQR
-    Upper bound = Q3 + 1.5 * IQR (not used here, we only care about low outliers)
-
-    FILTERING INTERPRETATION:
-    - CC >= threshold -> cohesive/well-connected -> informative reference -> KEEP
-    - CC < threshold -> hub/star pattern (statistical outlier) -> promiscuous/contamination -> REMOVE
-
-    ADVANTAGES:
-    - Only removes TRUE statistical outliers (may remove 0 references if data is clean!)
-    - Standard boxplot outlier method
-    - Non-parametric (doesn't assume normal distribution)
-    - Simple and interpretable
-
-    Args:
-        values: Array of clustering coefficients (range [0,1])
-        n: Number of values
-        verbose: Print diagnostic info
-
-    Returns:
-        Threshold value (REMOVE if CC < threshold, KEEP if CC >= threshold)
-    """
-    cdef uint32_t i
-    cdef float* sorted_values = <float*>malloc(n * sizeof(float))
-    cdef float threshold
-    cdef float q25, q75, iqr, lower_bound
-    cdef uint32_t q25_idx, q75_idx, median_idx
-    cdef float median_cc
-    cdef uint32_t num_outliers
-
-    if not sorted_values:
-        return 0.0  # No filtering if allocation fails
-
-    # Copy and sort values ascending
     for i in range(n):
-        sorted_values[i] = values[i]
-    qsort(sorted_values, n, sizeof(float), _float_compare_ascending)
+        bin_idx = <uint32_t>((sorted_values[i] - min_val) / range_val * (num_bins - 1))
+        if bin_idx >= num_bins:
+            bin_idx = num_bins - 1
+        histogram[bin_idx] += 1
+        total_sum += sorted_values[i]
 
-    # Calculate quartiles
-    q25_idx = n / 4
-    q75_idx = 3 * n / 4
-    median_idx = n / 2
+    # Otsu's method: find threshold maximizing inter-class variance
+    sum_bg = 0.0
+    weight_bg = 0
 
-    q25 = sorted_values[q25_idx]
-    q75 = sorted_values[q75_idx]
-    median_cc = sorted_values[median_idx]
-    iqr = q75 - q25
+    for i in range(num_bins):
+        weight_bg += histogram[i]
+        if weight_bg == 0:
+            continue
+        if weight_bg == n:
+            break
 
-    # Lower outlier bound: Q1 - 1.5 * IQR
-    lower_bound = q25 - 1.5 * iqr
+        # Approximate value at this bin
+        sum_bg += (min_val + (i + 0.5) * range_val / num_bins) * histogram[i]
+        mean_bg = sum_bg / weight_bg
+        mean_fg = (total_sum - sum_bg) / (n - weight_bg)
 
-    # Ensure threshold is in valid range [0, 1]
-    threshold = lower_bound
+        between_var = weight_bg * (n - weight_bg) * (mean_bg - mean_fg) * (mean_bg - mean_fg)
+
+        if between_var > max_var:
+            max_var = between_var
+            otsu_bin = i
+
+    free(histogram)
+
+    # Convert bin index back to threshold value
+    threshold = min_val + (otsu_bin + 0.5) * range_val / num_bins
+
+    # Ensure threshold is in valid range
     if threshold < 0.0:
         threshold = 0.0
     if threshold > 1.0:
         threshold = 1.0
 
-    # Count how many values fall below threshold (outliers)
+    # Count outliers
     num_outliers = 0
     for i in range(n):
         if sorted_values[i] < threshold:
@@ -673,42 +583,19 @@ cdef float calculate_statistical_outlier_threshold_iqr(float* values, uint32_t n
     if verbose:
         bf_nogil_logf_notime(
             b"COMMUNITY",
-            "    CC distribution: Q25=%.3f, Median=%.3f, Q75=%.3f, IQR=%.3f\n",
-            q25,
-            median_cc,
-            q75,
-            iqr,
-        )
-        bf_nogil_logf_notime(b"COMMUNITY", "    Sample size: %u\n", n)
-        bf_nogil_logf_notime(
-            b"COMMUNITY",
-            "    [IQR] Outlier threshold: %.6f (Q1 - 1.5*IQR = %.3f - 1.5*%.3f)\n",
-            threshold,
-            q25,
-            iqr,
+            "    [OTSU] Threshold: %.4f (variance=%.2e)\n",
+            threshold, max_var,
         )
         bf_nogil_logf_notime(
             b"COMMUNITY",
-            "    [IQR] Will REMOVE %u outliers (%.1f%% of community)\n",
+            "    [OTSU] Will REMOVE %u refs (%.1f%%) with CC < %.4f\n",
             num_outliers,
             100.0 * <float>num_outliers / <float>n,
+            threshold,
         )
 
     free(sorted_values)
     return threshold
-
-
-cdef float calculate_broken_stick_threshold(float* values, uint32_t n, bint verbose) nogil:
-    """
-    Statistical outlier detection using MAD (Median Absolute Deviation).
-
-    Uses Modified Z-Score with MAD for MAD-based outlier detection.
-    Only removes TRUE statistical outliers (may remove 0 references if data is clean).
-
-    This function maintains the old name for backward compatibility but uses
-    the new MAD-based statistical approach instead of percentiles.
-    """
-    return calculate_statistical_outlier_threshold_mad(values, n, verbose)
 
 
 # ==============================================================================
@@ -737,7 +624,7 @@ cdef struct CommunityResults:
     uint32_t* community_membership  # community ID for each reference
     float* community_cc_values  # Average CC value for the community each reference belongs to
     float* individual_cc_values  # Individual CC value for each reference (Barrat's method)
-    float* cc_threshold_values  # Broken-stick threshold used for each reference's community
+    float* cc_threshold_values  # Otsu threshold used for each reference's community
     float* anomaly_scores  # Anomaly score for each reference (for multi-metric methods like Isolation Forest)
     uint32_t* node_degree  # Node degree (number of edges) - already in ReferencePattern, kept here for convenience
     uint32_t* num_neighbor_communities  # Number of distinct communities among neighbors (for Tier 1)

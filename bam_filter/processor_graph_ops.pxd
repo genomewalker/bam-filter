@@ -141,8 +141,8 @@ cdef int build_igraph_direct_from_read_index(
     igraph_integer_t* out_singletons
 ) except -1 nogil
 
-# Broken-stick threshold picker (exported so other modules can call it nogil)
-cdef uint32_t pick_min_edge_weight_broken_stick(MemoryPool* pool, ReadIndex* read_index, ReferenceStats* ref_stats, uint32_t num_refs, uint32_t min_read_count, double tol, int verbose, double tail_percentile, uint32_t min_tail_size) noexcept nogil
+# Edge weight threshold picker using elbow detection (exported so other modules can call it nogil)
+cdef uint32_t pick_min_edge_weight_elbow(MemoryPool* pool, ReadIndex* read_index, ReferenceStats* ref_stats, uint32_t num_refs, uint32_t min_read_count, double tol, int verbose, double tail_percentile, uint32_t min_tail_size) noexcept nogil
 
 # Extract neighbor lists from igraph (for taxonomy analysis when nodes array is NULL)
 cdef int extract_neighbors_from_igraph(WeightedGraph* graph, uint32_t num_refs,

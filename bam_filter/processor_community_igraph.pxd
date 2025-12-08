@@ -20,7 +20,7 @@ cdef struct CommunityResults:
     uint32_t* node_degree        # Node degree (number of edges) from igraph
     float* community_cc_values   # CC value for the community each reference belongs to
     float* individual_cc_values  # Individual CC value for each reference (Barrat's method)
-    float* cc_threshold_values   # Broken-stick threshold used for each reference's community
+    float* cc_threshold_values   # Otsu threshold used for each reference's community
     float* anomaly_scores        # Anomaly score for each reference (for multi-metric methods like Isolation Forest)
     float* betweenness_centrality  # Betweenness centrality for each reference (bridge-ness metric)
     uint32_t* num_neighbor_communities  # Number of distinct communities among neighbors (for Tier 1)

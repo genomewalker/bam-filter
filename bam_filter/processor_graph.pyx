@@ -1232,15 +1232,13 @@ cdef ReadIndex* build_read_index_parallel(MemoryPool* pool, uint32_t array_size,
     cdef uint32_t** thread_counts
     cdef uint64_t total_mappings = 0
     cdef uint32_t i
-    cdef int thread_id
+    cdef int thread_id, t
     cdef uint32_t* read_buffer
     cdef uint32_t** ref_to_reads
     cdef uint32_t* write_positions
-    cdef uint32_t buffer_pos = 0
     cdef uint32_t read_idx
     cdef uint32_t* final_counts
     cdef uint32_t** scratch_ptrs
-    cdef uint32_t* seq_scratch
 
     index = <ReadIndex*>malloc(sizeof(ReadIndex))
     if not index:
@@ -1255,7 +1253,6 @@ cdef ReadIndex* build_read_index_parallel(MemoryPool* pool, uint32_t array_size,
     for thread_id in range(num_threads):
         thread_counts[thread_id] = <uint32_t*>calloc(array_size, sizeof(uint32_t))
         if not thread_counts[thread_id]:
-
             for cleanup_id in range(thread_id):
                 free(thread_counts[cleanup_id])
             free(thread_counts)
@@ -1279,7 +1276,6 @@ cdef ReadIndex* build_read_index_parallel(MemoryPool* pool, uint32_t array_size,
         if max_ref_count > 0:
             scratch_ptrs[thread_id] = <uint32_t*>malloc(max_ref_count * sizeof(uint32_t))
             if not scratch_ptrs[thread_id]:
-
                 for cleanup_id in range(thread_id):
                     if scratch_ptrs[cleanup_id]: free(scratch_ptrs[cleanup_id])
                 free(scratch_ptrs)
@@ -1304,14 +1300,40 @@ cdef ReadIndex* build_read_index_parallel(MemoryPool* pool, uint32_t array_size,
         free(index)
         return NULL
 
+    # Cache-aligned parallel merge: each thread processes a contiguous chunk
+    # 64-byte cache line = 16 uint32_t values, use 1024 elements per chunk for good locality
+    cdef uint32_t CHUNK_SIZE = 4096
+    cdef uint32_t n_chunks = (array_size + CHUNK_SIZE - 1) // CHUNK_SIZE
+    cdef uint32_t chunk_idx, chunk_start, chunk_end, local_i
+    cdef uint64_t* chunk_sums = <uint64_t*>calloc(n_chunks, sizeof(uint64_t))
+    if not chunk_sums:
+        for thread_id in range(num_threads):
+            free(thread_counts[thread_id])
+        free(thread_counts)
+        free(final_counts)
+        free(index)
+        return NULL
+
+    for chunk_idx in prange(n_chunks, nogil=True, schedule='static', num_threads=num_threads):
+        chunk_start = chunk_idx * CHUNK_SIZE
+        chunk_end = chunk_start + CHUNK_SIZE
+        if chunk_end > array_size:
+            chunk_end = array_size
+        # Process entire chunk - good cache locality for final_counts writes
+        # and sequential reads within each thread_counts array
+        for local_i in range(chunk_start, chunk_end):
+            for t in range(num_threads):
+                final_counts[local_i] += thread_counts[t][local_i]
+            chunk_sums[chunk_idx] += final_counts[local_i]
+
     for thread_id in range(num_threads):
-        for i in range(array_size):
-            final_counts[i] += thread_counts[thread_id][i]
         free(thread_counts[thread_id])
     free(thread_counts)
 
-    for i in range(array_size):
-        total_mappings += final_counts[i]
+    # Sum chunk totals (small serial loop over n_chunks)
+    for chunk_idx in range(n_chunks):
+        total_mappings += chunk_sums[chunk_idx]
+    free(chunk_sums)
 
     if total_mappings == 0:
         free(final_counts)
@@ -1330,15 +1352,13 @@ cdef ReadIndex* build_read_index_parallel(MemoryPool* pool, uint32_t array_size,
         free(index)
         return NULL
 
+    # Pointer setup must remain serial due to running prefix sum dependency
+    cdef uint64_t buffer_pos = 0
     for i in range(array_size):
         ref_to_reads[i] = read_buffer + buffer_pos
         buffer_pos += final_counts[i]
 
-    if max_ref_count == 0:
-
-        pass
-    else:
-
+    if max_ref_count > 0:
         for read_idx in prange(pool.unique_read_count, nogil=True, schedule='dynamic', num_threads=num_threads):
             thread_id = threadid()
             if thread_id >= num_threads:
@@ -1829,7 +1849,8 @@ cdef WeightedGraph* analyze_reference_graph(MemoryPool* pool, ReferencePattern* 
                                            int32_t min_read_count, EMAlgorithmConfig* config,
                                            sam_hdr_t* bam_header, ReferenceMapping* mapping,
                                            bint verbose, bint build_igraph, const char* tsv_export_path,
-                                           uint32_t graph_min_edge_weight, TaxonomyDB* taxonomy_db) noexcept nogil:
+                                           uint32_t graph_min_edge_weight, TaxonomyDB* taxonomy_db,
+                                           ReadIndex* existing_read_index) noexcept nogil:
     """High-level reference graph analysis pipeline.
 
     Performs a multi-phase analysis that converts alignment data in ``pool`` into
@@ -2085,7 +2106,15 @@ cdef WeightedGraph* analyze_reference_graph(MemoryPool* pool, ReferencePattern* 
         bf_nogil_logf_notime(NULL, "PHASE 5: Building read index and computing neighbor quality...\n")
     clock_gettime(CLOCK_MONOTONIC, &ts_phase_start)
 
-    read_index = build_read_index_parallel(pool, array_size, num_threads)
+    # Use existing read_index if provided, otherwise build a new one
+    cdef bint owns_read_index = 0
+    if existing_read_index:
+        read_index = existing_read_index
+        if verbose:
+            bf_nogil_logf_notime(NULL, "  Reusing existing ReadIndex (skipping rebuild)\n")
+    else:
+        read_index = build_read_index_parallel(pool, array_size, num_threads)
+        owns_read_index = 1
     # NOTE: we avoid building ReadRefsIndex here to reduce peak memory.
     # read_refs_idx = build_read_refs_index(pool, array_size, num_threads)
     if not read_index:
@@ -2132,7 +2161,8 @@ cdef WeightedGraph* analyze_reference_graph(MemoryPool* pool, ReferencePattern* 
     exact_connection_counts = <uint32_t*>calloc(array_size, sizeof(uint32_t))
     if not exact_connection_counts:
         bf_nogil_logf_notime(NULL, "ERROR: Failed to allocate connection counts array\n")
-        destroy_read_index(read_index)
+        if owns_read_index:
+            destroy_read_index(read_index)
         return NULL
 
     dataset_multimap_fractions = <float*>malloc(array_size * sizeof(float))
@@ -2457,7 +2487,9 @@ cdef WeightedGraph* analyze_reference_graph(MemoryPool* pool, ReferencePattern* 
     if ref_stats:
         free(ref_stats)
 
-    destroy_read_index(read_index)
+    # Only destroy read_index if we built it ourselves
+    if owns_read_index:
+        destroy_read_index(read_index)
     if read_refs_idx:
         destroy_read_refs_index(read_refs_idx)
 
