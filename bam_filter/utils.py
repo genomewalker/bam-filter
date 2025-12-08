@@ -1217,19 +1217,6 @@ def get_arguments(argv=None):
         help=help_msg["graph_min_edge_weight"],
     )
 
-    reassign_graph_args.add_argument(
-        "--graph-auto-tol",
-        dest="graph_auto_tol",
-        type=lambda x: float(
-            check_values(
-                x, minval=0.0, maxval=1.0, parser=parser, var="--graph-auto-tol"
-            )
-        ),
-        default=0.10,
-        metavar="FLOAT",
-        help="Tolerance fraction for broken-stick auto threshold (0.0-1.0). Default: 0.10",
-    )
-
     # Clustering flags
     reassign_clustering_args.add_argument(
         "--clustering",
@@ -1343,17 +1330,18 @@ def get_arguments(argv=None):
         dest="taxonomy_strict_filter",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Enable strict taxonomy filtering (automatically remove high-confidence contamination). "
+        help="Enable strict taxonomy filtering for --remove-cross-domain-references mode. "
+        "Automatically removes references with cross-domain flags AND high connectivity. "
         "Default: enabled when --taxonomy-filter is set.",
     )
 
     reassign_taxonomy_args.add_argument(
-        "--taxonomy-strict-min-connections",
+        "--taxonomy-min-connections",
         dest="taxonomy_strict_min_connections",
         type=int,
         default=5,
         metavar="N",
-        help="Minimum number of graph connections required for strict taxonomy filtering. "
+        help="Minimum graph connections required for reference removal in --remove-cross-domain-references mode. "
         "Default: 5 (only remove cross-domain refs with >= 5 neighbors).",
     )
 
@@ -1396,24 +1384,52 @@ def get_arguments(argv=None):
     )
 
     reassign_taxonomy_args.add_argument(
-        "--remove-cross-domain-edges",
-        dest="remove_cross_domain_edges",
+        "--no-cross-domain-removal",
+        dest="no_cross_domain_removal",
         action="store_true",
-        help="Remove individual alignments between cross-domain references instead of removing entire references. "
-        "This preserves legitimate same-domain connections while eliminating contamination. "
-        "Requires --taxonomy-filter and --clustering. "
-        "Default: disabled (removes entire references with cross-domain contamination).",
+        help="Disable automatic cross-domain removal when using --taxonomy-filter. "
+        "By default, combined cross-domain removal (references + alignments) is enabled automatically "
+        "when --taxonomy-filter and --taxonomy-db are used. Use this flag to disable that behavior.",
     )
 
     reassign_taxonomy_args.add_argument(
-        "--flag-misannotations",
-        dest="flag_misannotations",
+        "--remove-cross-domain-alignments",
+        dest="remove_cross_domain_alignments",
         action="store_true",
-        help="Detect and flag potential database misannotations by analyzing cross-domain edge patterns. "
+        default=None,
+        help="Remove alignments that connect references from different domains (Bacteria/Archaea/Eukaryota). "
+        "This preserves references but removes the spurious cross-domain read mappings. "
+        "NOTE: This is now enabled by default with --taxonomy-filter. Use --no-cross-domain-removal to disable.",
+    )
+
+    reassign_taxonomy_args.add_argument(
+        "--remove-cross-domain-references",
+        dest="remove_cross_domain_references",
+        action="store_true",
+        default=None,
+        help="Remove entire references that are flagged as cross-domain contamination. "
+        "References with high connectivity to other domains are removed along with all their alignments. "
+        "NOTE: This is now enabled by default with --taxonomy-filter. Use --no-cross-domain-removal to disable.",
+    )
+
+    reassign_taxonomy_args.add_argument(
+        "--remove-cross-domain-all",
+        dest="remove_cross_domain_all",
+        action="store_true",
+        help="Apply both alignment-level AND reference-level cross-domain removal (most aggressive). "
+        "First removes cross-domain references, then removes remaining cross-domain alignments. "
+        "NOTE: This is now the default when using --taxonomy-filter with --taxonomy-db.",
+    )
+
+    reassign_taxonomy_args.add_argument(
+        "--detect-misannotations",
+        dest="detect_misannotations",
+        action="store_true",
+        default=None,
+        help="Detect and flag potential database misannotations by analyzing cross-domain patterns. "
         "References that lose ALL edges after cross-domain removal are flagged with high confidence. "
         "Results exported to TSV with misannotation_flag and confidence_score columns for database curation. "
-        "Requires --remove-cross-domain-edges. "
-        "Default: disabled.",
+        "NOTE: This is now enabled by default with --taxonomy-filter. Use --no-cross-domain-removal to disable.",
     )
 
     misc_filter_args.add_argument(

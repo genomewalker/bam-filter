@@ -220,18 +220,14 @@ def filter_references(args):
             raise RuntimeError(
                 f"Filtering failed: {result.get('error_message', 'unknown')}"
             )
-        return result
-
-    # Handle non-dict return (legacy compatibility)
-    if isinstance(result, int) and result != 0:
-        raise RuntimeError(f"Filtering returned non-zero status: {result}")
-
-    if isinstance(result, dict):
         _info(
             "Filtering completed: %d references processed",
             result.get("n_total_references", 0),
         )
-    else:
-        _info("Filtering completed")
+        return result
 
+    if isinstance(result, int) and result != 0:
+        raise RuntimeError(f"Filtering returned non-zero status: {result}")
+
+    _info("Filtering completed")
     return result

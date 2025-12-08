@@ -73,7 +73,6 @@ def reassign_reads(
     information_threshold: float = -999.0,
     # Graph construction parameters
     graph_min_edge_weight: int = 0,
-    graph_auto_tol: float = 0.10,
     # Clustering parameters
     clustering: bool = False,
     community_resolution: float = 1.0,
@@ -95,21 +94,50 @@ def reassign_reads(
     taxonomy_anomaly_weight: float = 2.0,
     taxonomy_second_chance: bool = True,
     taxonomy_second_chance_cc: float = 0.3,
-    # Edge removal and misannotation detection
-    remove_cross_domain_edges: bool = False,
-    flag_misannotations: bool = False,
+    # Cross-domain removal options (None = auto, True = enabled, False = disabled)
+    remove_cross_domain_alignments: bool = None,
+    remove_cross_domain_references: bool = None,
+    remove_cross_domain_all: bool = None,
+    no_cross_domain_removal: bool = False,
+    detect_misannotations: bool = None,
 ) -> Dict[str, Any]:
-    if (remove_cross_domain_edges or flag_misannotations):
+    # Handle --remove-cross-domain-all as shorthand for both
+    if remove_cross_domain_all:
+        remove_cross_domain_alignments = True
+        remove_cross_domain_references = True
+
+    # Auto-enable combined mode when taxonomy filtering is active with a database
+    # Unless explicitly disabled with --no-cross-domain-removal
+    if taxonomy_filter and taxonomy_db and not no_cross_domain_removal:
+        # If no explicit cross-domain flags set, enable combined mode by default
+        if remove_cross_domain_alignments is None and remove_cross_domain_references is None:
+            remove_cross_domain_alignments = True
+            remove_cross_domain_references = True
+            detect_misannotations = True if detect_misannotations is None else detect_misannotations
+            _info(
+                "Cross-domain removal automatically enabled (combined mode). "
+                "Use --no-cross-domain-removal to disable."
+            )
+
+    # Convert None to False for downstream code
+    if remove_cross_domain_alignments is None:
+        remove_cross_domain_alignments = False
+    if remove_cross_domain_references is None:
+        remove_cross_domain_references = False
+    if detect_misannotations is None:
+        detect_misannotations = False
+
+    # Validate dependencies
+    if (remove_cross_domain_alignments or remove_cross_domain_references or detect_misannotations):
         if not taxonomy_db:
             raise ValueError(
-                "The flags --remove-cross-domain-edges and --flag-misannotations "
-                "require a taxonomy database (--taxonomy-db)."
+                "Cross-domain removal flags require a taxonomy database (--taxonomy-db)."
             )
         if not taxonomy_filter:
             taxonomy_filter = True
             _info(
                 "Taxonomy filtering automatically enabled because "
-                "--remove-cross-domain-edges/--flag-misannotations was requested."
+                "cross-domain removal was requested."
             )
 
     """Reassign multi-mapping reads using EM algorithm with SQUAREM acceleration.
@@ -166,9 +194,7 @@ def reassign_reads(
     reference_stats_tsv : str, optional
         Output path for reference statistics TSV
     graph_min_edge_weight : int, default=0
-        Minimum edge weight for graph (0=auto, -1=none, >0=explicit)
-    graph_auto_tol : float, default=0.10
-        Tolerance for automatic threshold selection
+        Minimum edge weight for graph (0=auto via elbow detection, -1=none, >0=explicit)
     clustering : bool, default=False
         Enable Community clustering
     community_resolution : float, default=1.0
@@ -233,39 +259,20 @@ def reassign_reads(
 
         _info("Pipeline: %s", " → ".join(pipeline_steps))
 
-        # Prepare taxonomy database paths (will be loaded in Phase 5b)
         taxdb_path = None
         accmap_path = None
         if taxonomy_db:
-            if verbose:
-                print(f"[DEBUG] Taxonomy database path provided: {taxonomy_db}", file=sys.stderr)
-
-            # Verify taxonomy database exists
             if not os.path.exists(taxonomy_db):
                 _warn("Taxonomy database path does not exist: %s", taxonomy_db)
                 _warn("Continuing without taxonomy-aware graph analysis")
             else:
-                # Check for accession map in taxonomy directory
                 accession_map_path = os.path.join(taxonomy_db, "accession_map.parquet")
                 if os.path.exists(accession_map_path):
-                    if verbose:
-                        print(f"[DEBUG] Taxonomy database and accession map found", file=sys.stderr)
-                        print(f"[DEBUG] Will load in Phase 5b: Taxonomy Enrichment", file=sys.stderr)
-                    # Pass paths to processor - will be loaded together in Phase 5b
                     taxdb_path = taxonomy_db
                     accmap_path = accession_map_path
                 else:
-                    if verbose:
-                        print(f"[DEBUG] Accession map not found at: {accession_map_path}", file=sys.stderr)
                     _warn("No accession_map.parquet found in %s", taxonomy_db)
-                    _warn("Taxonomy-aware graph analysis requires accession_map.parquet in the taxonomy directory")
                     _warn("Continuing without taxonomy-aware graph analysis")
-
-        # Debug logging: show what we're passing to processor
-        if verbose:
-            print(f"[DEBUG] About to call process_bam_with_em with:", file=sys.stderr)
-            print(f"[DEBUG]   taxdb_path = {taxdb_path}", file=sys.stderr)
-            print(f"[DEBUG]   accmap_path = {accmap_path}", file=sys.stderr)
 
         result = process_bam_with_em(
             bam_file=bam_file,
@@ -294,7 +301,6 @@ def reassign_reads(
             init_prior_strength=0.1,
             information_threshold=information_threshold,
             graph_min_edge_weight=graph_min_edge_weight,
-            graph_auto_tol=graph_auto_tol,
             clustering=clustering,
             community_resolution=community_resolution,
             community_max_iterations=community_max_iterations,
@@ -313,8 +319,9 @@ def reassign_reads(
             taxonomy_anomaly_weight=taxonomy_anomaly_weight,
             taxonomy_second_chance=taxonomy_second_chance,
             taxonomy_second_chance_cc=taxonomy_second_chance_cc,
-            remove_cross_domain_edges=remove_cross_domain_edges,
-            flag_misannotations=flag_misannotations,
+            remove_cross_domain_alignments=remove_cross_domain_alignments,
+            remove_cross_domain_references=remove_cross_domain_references,
+            detect_misannotations=detect_misannotations,
         )
         processing_duration = perf_counter() - processing_start
         _info("Core processing completed in %.2f seconds", processing_duration)
@@ -472,7 +479,6 @@ def reassign(args):
         "reference_lengths_tsv": getattr(args, "reference_lengths_tsv", None),
         "reference_stats_tsv": getattr(args, "reference_stats_tsv", None),
         "graph_min_edge_weight": getattr(args, "graph_min_edge_weight", 0),
-        "graph_auto_tol": getattr(args, "graph_auto_tol", 0.10),
         "clustering": getattr(args, "clustering", False),
         "community_resolution": getattr(args, "community_resolution", 1.0),
         "community_max_iterations": getattr(args, "community_max_iterations", 10),
@@ -492,9 +498,11 @@ def reassign(args):
         "taxonomy_anomaly_weight": getattr(args, "taxonomy_anomaly_weight", 2.0),
         "taxonomy_second_chance": taxonomy_second_chance,
         "taxonomy_second_chance_cc": getattr(args, "taxonomy_second_chance_cc", 0.3),
-        # Edge removal and misannotation detection
-        "remove_cross_domain_edges": getattr(args, "remove_cross_domain_edges", False),
-        "flag_misannotations": getattr(args, "flag_misannotations", False),
+        # Cross-domain removal options
+        "remove_cross_domain_alignments": getattr(args, "remove_cross_domain_alignments", False),
+        "remove_cross_domain_references": getattr(args, "remove_cross_domain_references", False),
+        "remove_cross_domain_all": getattr(args, "remove_cross_domain_all", False),
+        "detect_misannotations": getattr(args, "detect_misannotations", False),
     }
 
     try:

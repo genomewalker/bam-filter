@@ -56,7 +56,7 @@ _TAG_LEVEL_DEFAULTS: Dict[str, LogLevel] = {
     "BAM-WRITER": LogLevel.SUMMARY,
     "NETWORK-AWARE ANALYSIS": LogLevel.INFO,
     "BATCH": LogLevel.DEBUG,
-    "BROKEN-STICK": LogLevel.DEBUG,
+    "EDGE-THRESHOLD": LogLevel.DEBUG,
     "IGRAPH OPS": LogLevel.DEBUG,
     "LEIDEN": LogLevel.DEBUG,
     "COMMUNITY": LogLevel.TRACE,
