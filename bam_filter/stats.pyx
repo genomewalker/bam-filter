@@ -313,7 +313,14 @@ cdef struct RefStats:
     # Interval merging results
     int64_t max_covered_bases
     double mean_covered_bases
-    
+    int64_t n_intervals  # Number of coverage intervals
+    double sum_interval_length_sq  # Sum of interval_length^2 for WCB (computed inline)
+
+    # Contamination detection metrics (computed post-hoc from existing stats)
+    double weighted_contiguity_breadth  # WCB = sum(interval_len^2) / ref_length^2
+    double complexity_penalized_coverage  # CPC = breadth * (1 - dust_mean)
+    double overlap_redundancy_index  # ORI = total_aligned_bases / bases_covered
+
     # Reference lengths
     int64_t ref_length
     int64_t bam_ref_length
@@ -865,7 +872,14 @@ cdef int calculate_reference_stats(
     )
     cdef double abund_end = bf_monotonic_seconds()
     bf_nogil_logf_verbose(2, STATS_TAG, "per-ref: abundance took %.6f s\n", abund_end - abund_start)
-    
+
+    # Calculate contamination detection metrics (CPC and ORI)
+    # CPC = breadth * (1 - dust_mean) - penalizes low-complexity sequences
+    stats.complexity_penalized_coverage = stats.breadth * (1.0 - stats.dust_mean)
+    # ORI = total_aligned_bases / bases_covered - measures read stacking
+    cdef double total_aligned_bases = <double>n_alns * stats.aligned_length_mean
+    stats.overlap_redundancy_index = total_aligned_bases / stats.bases_covered if stats.bases_covered > 0 else 0.0
+
     # Cleanup
     free(read_lengths)
     free(ani_values)

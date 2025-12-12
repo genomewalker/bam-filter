@@ -89,6 +89,11 @@ cdef int write_stats_header(TSVWriter* writer) except -1 nogil:
     tsv_append_string(writer, "tax_abund_aln")
     tsv_append_string(writer, "tax_abund_tad")
     tsv_append_string(writer, "n_reads_tad")
+    # Contamination detection metrics
+    tsv_append_string(writer, "n_intervals")
+    tsv_append_string(writer, "weighted_contiguity_breadth")
+    tsv_append_string(writer, "complexity_penalized_coverage")
+    tsv_append_string(writer, "overlap_redundancy_index")
     tsv_row_end(writer)
     return 0
 
@@ -145,6 +150,11 @@ cdef int write_stats_row(TSVWriter* writer, RefStats* stats, const char* ref_nam
     tsv_append_int(writer, stats.tax_abund_aln)
     tsv_append_int(writer, stats.tax_abund_tad)
     tsv_append_int(writer, stats.n_reads_tad)
+    # Contamination detection metrics
+    tsv_append_int(writer, stats.n_intervals)
+    tsv_append_float(writer, stats.weighted_contiguity_breadth, 8)
+    tsv_append_float(writer, stats.complexity_penalized_coverage, 8)
+    tsv_append_float(writer, stats.overlap_redundancy_index, 4)
     tsv_row_end(writer)
     return 0
 

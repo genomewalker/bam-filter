@@ -995,6 +995,11 @@ cdef dict _create_taxid_entry(int32_t taxid):
         'c_v': 0.0,
         'd_i': 0.0,
         'cov_evenness': 0.0,
+        # Contamination detection metrics
+        'n_intervals': 0,
+        'weighted_contiguity_breadth': 0.0,
+        'complexity_penalized_coverage': 0.0,
+        'overlap_redundancy_index': 0.0,
         'tax_abund_read': 0,
         'tax_abund_aln': 0,
         'tax_abund_tad': 0,
@@ -1057,6 +1062,12 @@ cdef dict _create_taxid_entry(int32_t taxid):
             'sum_cv': 0.0,
             'sum_di': 0.0,
             'sum_cov_evenness': 0.0,
+            # Contamination detection metrics accumulators
+            'sum_n_intervals': 0,
+            'sum_wcb': 0.0,
+            'sum_cpc': 0.0,
+            'sum_ori': 0.0,
+            'sum_ori_weight': 0.0,
             'best_ref_alns': -1,
             'best_ref_name': None,
             'best_stats': None,
@@ -1152,6 +1163,15 @@ cdef void _accumulate_taxid_metrics(dict entry, RefStats* stats, str ref_name):
     accum['sum_cv'] += stats.c_v * stats.ref_length
     accum['sum_di'] += stats.d_i * stats.ref_length
     accum['sum_cov_evenness'] += stats.cov_evenness * stats.ref_length
+
+    # Contamination detection metrics
+    accum['sum_n_intervals'] += stats.n_intervals
+    accum['sum_wcb'] += stats.weighted_contiguity_breadth * stats.ref_length
+    accum['sum_cpc'] += stats.complexity_penalized_coverage * stats.ref_length
+    # ORI weighted by bases_covered (only meaningful where coverage exists)
+    if stats.bases_covered > 0:
+        accum['sum_ori'] += stats.overlap_redundancy_index * stats.bases_covered
+        accum['sum_ori_weight'] += stats.bases_covered
 
     if stats.n_alns > accum['best_ref_alns']:
         accum['best_ref_alns'] = stats.n_alns
@@ -1352,6 +1372,9 @@ cdef void finalize_taxid_entries(dict results_dict):
             entry['c_v'] = accum['sum_cv'] / coverage_weight
             entry['d_i'] = accum['sum_di'] / coverage_weight
             entry['cov_evenness'] = accum['sum_cov_evenness'] / coverage_weight
+            # Contamination detection metrics (weighted by ref_length)
+            entry['weighted_contiguity_breadth'] = accum['sum_wcb'] / coverage_weight
+            entry['complexity_penalized_coverage'] = accum['sum_cpc'] / coverage_weight
         else:
             entry['spatial_entropy'] = 0.0
             entry['norm_spatial_entropy'] = 0.0
@@ -1360,6 +1383,16 @@ cdef void finalize_taxid_entries(dict results_dict):
             entry['c_v'] = 0.0
             entry['d_i'] = 0.0
             entry['cov_evenness'] = 0.0
+            entry['weighted_contiguity_breadth'] = 0.0
+            entry['complexity_penalized_coverage'] = 0.0
+
+        # n_intervals is a sum (total count across all refs)
+        entry['n_intervals'] = accum['sum_n_intervals']
+        # ORI weighted by bases_covered
+        if accum['sum_ori_weight'] > 0:
+            entry['overlap_redundancy_index'] = accum['sum_ori'] / accum['sum_ori_weight']
+        else:
+            entry['overlap_redundancy_index'] = 0.0
 
         best_stats = accum['best_stats']
         if best_stats is not None:
@@ -2268,6 +2301,7 @@ cdef int write_taxid_stats(str output_path, dict results_dict, TaxonomyDatabase 
             "coverage_covered_mean_per_ref", "coverage_covered_mean_per_ref_std",
             "n_bins", "site_density",
             "spatial_entropy", "norm_spatial_entropy", "gini", "norm_gini", "c_v", "d_i", "cov_evenness",
+            "n_intervals", "weighted_contiguity_breadth", "complexity_penalized_coverage", "overlap_redundancy_index",
             "tax_abund_read", "tax_abund_aln", "tax_abund_tad", "n_reads_tad",
             "tax_path"
         ]
@@ -2351,6 +2385,10 @@ cdef int write_taxid_stats(str output_path, dict results_dict, TaxonomyDatabase 
                     f"{stats.get('c_v', 0.0):.4f}",
                     f"{stats.get('d_i', 0.0):.4f}",
                     f"{stats.get('cov_evenness', 0.0):.4f}",
+                    str(stats.get('n_intervals', 0)),
+                    f"{stats.get('weighted_contiguity_breadth', 0.0):.8f}",
+                    f"{stats.get('complexity_penalized_coverage', 0.0):.8f}",
+                    f"{stats.get('overlap_redundancy_index', 0.0):.4f}",
                     str(stats.get('tax_abund_read', 0)),
                     str(stats.get('tax_abund_aln', 0)),
                     str(stats.get('tax_abund_tad', 0)),

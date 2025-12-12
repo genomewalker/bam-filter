@@ -670,6 +670,7 @@ cdef void calculate_rle_coverage_stats(RLECoverage* rle, RefStats* stats, int tr
     cdef int64_t* even_counts = NULL
     cdef RLEInterval* iv
     cdef double mean_interval = 0.0, m2_interval = 0.0, delta = 0.0
+    cdef double sum_interval_len_sq = 0.0  # For WCB calculation
     cdef double coverage_variance = 0.0, coverage_sd = 0.0, mean_cov = 0.0
     cdef double sum_squared_deviations = 0.0, depth_val = 0.0, deviation = 0.0, squared_dev = 0.0
     cdef double zero_deviation = 0.0, zero_squared_dev = 0.0
@@ -719,6 +720,10 @@ cdef void calculate_rle_coverage_stats(RLECoverage* rle, RefStats* stats, int tr
     # Histogram per-phase timing removed; keep histogram summary fields only
         stats.mean_coverage_covered = 0.0
         stats.site_density = 0.0
+        # New contamination detection metrics
+        stats.n_intervals = 0
+        stats.sum_interval_length_sq = 0.0
+        stats.weighted_contiguity_breadth = 0.0
         return
 
     clock_gettime(CLOCK_MONOTONIC, &ts_covstat_start)
@@ -785,6 +790,7 @@ cdef void calculate_rle_coverage_stats(RLECoverage* rle, RefStats* stats, int tr
                     delta = (<double>interval_len) - mean_interval
                     mean_interval += delta / n_intervals
                     m2_interval += delta * ((<double>interval_len) - mean_interval)
+                    sum_interval_len_sq += <double>interval_len * <double>interval_len  # WCB
                     if interval_len > max_covered_len:
                         max_covered_len = interval_len
                     current_interval_start = -1
@@ -796,6 +802,7 @@ cdef void calculate_rle_coverage_stats(RLECoverage* rle, RefStats* stats, int tr
         delta = (<double>interval_len) - mean_interval
         mean_interval += delta / n_intervals
         m2_interval += delta * ((<double>interval_len) - mean_interval)
+        sum_interval_len_sq += <double>interval_len * <double>interval_len  # WCB
         if interval_len > max_covered_len:
             max_covered_len = interval_len
 
@@ -810,6 +817,13 @@ cdef void calculate_rle_coverage_stats(RLECoverage* rle, RefStats* stats, int tr
     stats.breadth_exp_ratio = (
         min(stats.breadth / stats.exp_breadth, 1.0) if stats.exp_breadth > 0 else 0.0
     )
+
+    # Store interval stats and calculate WCB
+    stats.n_intervals = n_intervals
+    stats.sum_interval_length_sq = sum_interval_len_sq
+    # WCB = sum(interval_len^2) / ref_length^2 - rewards long intervals over scattered tiny hits
+    cdef double ref_len_sq = <double>rle.ref_length * <double>rle.ref_length
+    stats.weighted_contiguity_breadth = sum_interval_len_sq / ref_len_sq if ref_len_sq > 0.0 else 0.0
 
     # Calculate coverage standard deviation and variance for c_v and d_i (only covered positions)
     cdef double sum_cov = 0.0

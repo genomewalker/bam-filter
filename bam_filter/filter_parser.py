@@ -118,6 +118,12 @@ COLUMN_SPECS = {
     'tax_abund_read': ColumnSpec('tax_abund_read', 'abundance_read_based', ColumnType.FLOAT, 0, 1),
     'tax_abund_aln': ColumnSpec('tax_abund_aln', 'abundance_alignment_based', ColumnType.FLOAT, 0, 1),
     'tax_abund_tad': ColumnSpec('tax_abund_tad', 'abundance_tad', ColumnType.FLOAT, 0, 1),
+
+    # Contamination Detection Metrics
+    'n_intervals': ColumnSpec('n_intervals', 'interval_count', ColumnType.INT, 0, None),
+    'weighted_contiguity_breadth': ColumnSpec('weighted_contiguity_breadth', 'weighted_contiguity_breadth', ColumnType.FLOAT, 0, None),
+    'complexity_penalized_coverage': ColumnSpec('complexity_penalized_coverage', 'complexity_penalized_coverage', ColumnType.FLOAT, 0, 1),
+    'overlap_redundancy_index': ColumnSpec('overlap_redundancy_index', 'overlap_redundancy_index', ColumnType.FLOAT, 0, None),
 }
 
 # Build reverse mapping: new_name -> old_name
@@ -184,7 +190,9 @@ def get_column_index(column_name: str) -> int:
         'breadth', 'exp_breadth', 'breadth_exp_ratio',
         'n_bins', 'site_density', 'spatial_entropy', 'norm_spatial_entropy', 'gini', 'norm_gini',
         'c_v', 'd_i', 'cov_evenness',
-        'tax_abund_read', 'tax_abund_aln', 'tax_abund_tad', 'n_reads_tad'
+        'tax_abund_read', 'tax_abund_aln', 'tax_abund_tad', 'n_reads_tad',
+        # Contamination detection metrics (indices 46-49)
+        'n_intervals', 'weighted_contiguity_breadth', 'complexity_penalized_coverage', 'overlap_redundancy_index'
     ]
 
     if old_name not in STRUCT_COLUMN_ORDER:

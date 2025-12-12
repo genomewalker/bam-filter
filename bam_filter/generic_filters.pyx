@@ -214,6 +214,14 @@ cdef double get_column_value(RefStats* stats, int column_index) noexcept nogil:
         return stats.tax_abund_tad
     elif column_index == 45:  # read_count_tad
         return <double>stats.n_reads_tad
+    elif column_index == 46:  # n_intervals
+        return <double>stats.n_intervals
+    elif column_index == 47:  # weighted_contiguity_breadth
+        return stats.weighted_contiguity_breadth
+    elif column_index == 48:  # complexity_penalized_coverage
+        return stats.complexity_penalized_coverage
+    elif column_index == 49:  # overlap_redundancy_index
+        return stats.overlap_redundancy_index
     else:
         return 0.0
 

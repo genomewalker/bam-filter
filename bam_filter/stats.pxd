@@ -108,6 +108,13 @@ cdef struct RefStats:
     # Interval merging results
     int64_t max_covered_bases
     double mean_covered_bases
+    int64_t n_intervals  # Number of coverage intervals
+    double sum_interval_length_sq  # Sum of interval_length^2 for WCB (computed inline)
+
+    # Contamination detection metrics (computed post-hoc from existing stats)
+    double weighted_contiguity_breadth  # WCB = sum(interval_len^2) / ref_length^2
+    double complexity_penalized_coverage  # CPC = breadth * (1 - dust_mean)
+    double overlap_redundancy_index  # ORI = total_aligned_bases / bases_covered
 
     # Reference lengths
     int64_t ref_length

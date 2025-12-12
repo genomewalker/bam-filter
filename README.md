@@ -298,6 +298,86 @@ The program will produce two main outputs:
     - **tax_abund_aln**: Counts estimated using the number of alignments and normalized by the reference length.
     - **tax_abund_tad**: Counts estimated using the estimated number of reads in the TAD region and normalized by the length of the TAD region
     - **n_reads_tad**: Number of reads estimated in the TAD region using the equation *C = LN / G*, where C stands for the TAD coverage, N for the length of the TAD region and L for the average read length mapped to the reference.
+    - **n_intervals**: Number of distinct coverage intervals (contiguous regions with coverage > 0)
+    - **weighted_contiguity_breadth**: Weighted Contiguity Breadth (WCB) metric for detecting scattered false positives
+    - **complexity_penalized_coverage**: Complexity-Penalized Coverage (CPC) for filtering low-complexity false positives
+    - **overlap_redundancy_index**: Overlap Redundancy Index (ORI) measuring read stacking density
+
+
+## Statistics Equations and Descriptions
+
+This section provides detailed mathematical definitions for all statistics calculated by filterBAM.
+
+### Read-Level Statistics
+
+| Statistic | Equation | Description |
+|-----------|---------|-------------|
+| **read_length_mean** | $\bar{L} = \frac{1}{n}\sum_{i=1}^{n} L_i$ | Mean length of reads mapped to the reference |
+| **read_length_std** | $\sigma_L = \sqrt{\frac{1}{n-1}\sum_{i=1}^{n}(L_i - \bar{L})^2}$ | Standard deviation of read lengths |
+| **read_gc_content_mean** | $\bar{GC} = \frac{1}{n}\sum_{i=1}^{n} \frac{G_i + C_i}{L_i}$ | Mean GC content (proportion of G+C bases) |
+| **dust_mean** | $\bar{D} = \frac{1}{n}\sum_{i=1}^{n} D_i$ | Mean DUST score (low-complexity indicator; higher = more repetitive) |
+| **read_ani_mean** | $\bar{ANI} = \frac{1}{n}\sum_{i=1}^{n} \left(1 - \frac{edit\_dist_i}{aligned\_len_i}\right)$ | Mean Average Nucleotide Identity of reads |
+| **aligned_length_mean** | $\bar{A} = \frac{1}{n}\sum_{i=1}^{n} A_i$ | Mean aligned length (excluding soft-clipped bases) |
+
+### Coverage Statistics
+
+| Statistic | Equation | Description |
+|-----------|---------|-------------|
+| **coverage_mean** | $\bar{C} = \frac{\sum_{p=1}^{L} c_p}{L}$ | Mean depth across reference length $L$ |
+| **coverage_mean_trunc** | TAD = mean of coverage values between $P_{10}$ and $P_{90}$ | Truncated Average Depth (robust to outliers) |
+| **coverage_covered_mean** | $\bar{C}_{cov} = \frac{\sum_{p: c_p > 0} c_p}{\|{p: c_p > 0}\|}$ | Mean depth only over covered positions |
+| **bases_covered** | $B = \|{p : c_p > 0}\|$ | Number of positions with coverage > 0 |
+| **breadth** | $b = \frac{B}{L}$ | Fraction of reference covered |
+| **exp_breadth** | $b_{exp} = 1 - e^{-\bar{C}}$ | Expected breadth given mean coverage (Lander-Waterman) |
+| **breadth_exp_ratio** | $R = \min\left(\frac{b}{b_{exp}}, 1\right)$ | Ratio of observed to expected breadth |
+
+### Coverage Distribution Metrics
+
+| Statistic | Equation | Description |
+|-----------|---------|-------------|
+| **spatial_entropy** | $H = -\sum_{i=1}^{k} p_i \log_2(p_i)$ where $p_i = \frac{c_i}{\sum c}$ | Shannon entropy of binned coverage histogram |
+| **norm_spatial_entropy** | $H_{norm} = \frac{H}{\log_2(k)}$ | Normalized entropy (0-1 scale); 1 = perfectly uniform |
+| **gini** | $G = \frac{\sum_{i=1}^{k}\sum_{j=1}^{k}\|x_i - x_j\|}{2k^2\bar{x}}$ | Gini coefficient of coverage inequality |
+| **norm_gini** | $G_{norm} = 1 - G$ | Normalized Gini (1 = perfectly uniform) |
+| **c_v** | $CV = \frac{\sigma}{\mu}$ | Coefficient of variation of coverage |
+| **d_i** | $D = \frac{\sigma^2}{\mu}$ | Dispersion index (variance-to-mean ratio) |
+| **cov_evenness** | $E = 1 - G$ | Coverage evenness (Pielou's J adapted) |
+
+### Contamination Detection Metrics
+
+These metrics help identify false positive taxonomic assignments caused by low-complexity sequences mapping to scattered genomic positions.
+
+| Statistic | Equation | Description |
+|-----------|---------|-------------|
+| **n_intervals** | $N_{int} = $ count of contiguous coverage regions | Number of distinct coverage intervals |
+| **weighted_contiguity_breadth** | $WCB = \frac{\sum_{i=1}^{N_{int}} \ell_i^2}{L^2}$ | Rewards long contiguous intervals; penalizes scattered tiny hits |
+| **complexity_penalized_coverage** | $CPC = b \times (1 - \bar{D})$ | Breadth penalized by sequence complexity |
+| **overlap_redundancy_index** | $ORI = \frac{\sum_{i=1}^{n} A_i}{B}$ | Total aligned bases divided by bases covered |
+
+#### Interpretation Guide for Contamination Detection
+
+| Metric | False Positives (contamination) | True Positives (real signal) |
+|--------|--------------------------------|------------------------------|
+| **WCB** | ≈ 0 (scattered tiny hits) | > 0.001 (contiguous coverage) |
+| **CPC** | < 0.01 (low complexity) | > 0.1 (high complexity reads) |
+| **dust_mean** | > 0.05 (repetitive) | < 0.03 (complex sequences) |
+| **breadth** | ≈ 0 | > 0.1 |
+
+**Example filter to remove false positives:**
+```bash
+filterBAM filter --bam input.bam --stats stats.tsv.gz \
+    --filter complexity_penalized_coverage:0.01:,weighted_contiguity_breadth:0.0001:
+```
+
+### Abundance Metrics
+
+| Statistic | Equation | Description |
+|-----------|---------|-------------|
+| **tax_abund_read** | $A_r = \frac{n \times S}{L}$ | Read-count abundance (reads per million bp) |
+| **tax_abund_aln** | $A_a = \frac{n_{aln} \times S}{L}$ | Alignment-count abundance |
+| **tax_abund_tad** | $A_{tad} = \frac{n_{tad} \times S}{L_{tad}}$ | TAD-normalized abundance (robust to coverage bias) |
+
+Where $S$ is the scale factor (default: 1,000,000 for RPM normalization).
 
 ## LCA
 
