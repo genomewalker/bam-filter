@@ -54,6 +54,17 @@ cdef struct Alignment:
     uint32_t alignment_position
     float    alignment_score
     float    pmd_score
+    # ANI snapshot fields (for on-the-fly AN/DA tag computation)
+    uint16_t aligned_length       # Total aligned bases
+    uint16_t match_count          # Exact matches
+    uint8_t  ct_5p_count          # C→T mismatches in first 8bp from 5' end
+    uint8_t  ga_3p_count          # G→A mismatches in last 8bp from 3' end
+    # Damage opportunity counts (for hierarchical EM)
+    uint8_t  c_at_5p_count        # C bases in reference at first 8bp (5' damage zone)
+    uint8_t  g_at_3p_count        # G bases in reference at last 8bp (3' damage zone)
+    # Damage-corrected ANI (computed after PMD curve fitting)
+    float    corrected_ani        # Damage-corrected ANI percentage (0-100)
+    uint8_t  passes_ani_filter    # 1 if passes corrected ANI threshold, 0 otherwise
 
 
 cdef struct MemoryPool:
@@ -111,8 +122,23 @@ cdef struct MemoryPool:
     float* precomputed_zp_values
     bint zp_values_computed
 
-    # PMD control flag (for BAM writing)
-    bint pmd_enabled_for_output     # Whether to write PM tags to BAM
+    # PMD control flag and model for BAM writing
+    bint pmd_enabled_for_output     # Whether to write PM/AN/DA tags to BAM
+    void* pmd_curve_ptr             # Pointer to PMDCurve for damage-corrected ANI
+
+    # Hierarchical EM: Ancient/Modern Reference Classification
+    bint hierarchical_em_enabled    # Whether hierarchical EM is active
+    double* gamma_values            # γ_k: P(ancient | ref k) per reference [0,1]
+    double* eta_values              # η_k = logit(γ_k) for SQUAREM extrapolation
+    double* S_anc_accum             # Accumulated weighted ancient posterior per ref
+    double* S_mod_accum             # Accumulated weighted modern posterior per ref
+    double rho_ancient              # ρ: Global fraction of ancient references [0,1]
+    double zeta_ancient             # ζ = logit(ρ) for SQUAREM extrapolation
+    double rho_prior_alpha          # Beta prior α for ρ (default 1.0)
+    double rho_prior_beta           # Beta prior β for ρ (default 1.0)
+    float D_avg_5p                   # Average D(z) for 5' positions 1-8 (precomputed)
+    float D_avg_3p                   # Average D(z) for 3' positions 1-8 (precomputed)
+    float epsilon_error              # Sequencing error rate (default 0.01)
 
     # Pooled scratch arrays for filtering (pooled & reused)
     float* scratch_read_max_probs

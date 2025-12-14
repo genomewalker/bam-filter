@@ -31,7 +31,7 @@ from libc.time cimport clock, clock_t, CLOCKS_PER_SEC
 
 # Project module imports
 from .batch_utils cimport create_balanced_batches_greedy
-from .processor_memory cimport create_memory_pool, destroy_memory_pool, shrink_memory_pool, cleanup_presorted_memory
+from .processor_memory cimport create_memory_pool, destroy_memory_pool, shrink_memory_pool, cleanup_presorted_memory, cleanup_em_intermediate_memory
 from .processor_fast_math cimport stable_log_sum_exp, safe_normalize_weights
 from .processor_types cimport PrecomputedWeights, EMAlgorithmConfig
 from .processor_graph_ops cimport WeightedGraph, destroy_weighted_graph, pick_min_edge_weight_elbow
@@ -43,6 +43,7 @@ from .processor_batch cimport (
     create_processing_batch,
     destroy_processing_batch,
     process_batch_alignments,
+    process_batch_alignments_with_pmd,
     assign_global_sequential_ids_fast,
     count_actual_alignments,
     count_unique_refs_from_batches,
@@ -51,9 +52,20 @@ from .processor_batch cimport (
     count_unique_reads_from_thread_maps,
 )
 
-from .processor_em cimport (
-    execute_em_algorithm,
+from .processor_pmd cimport (
+    PMDGlobalContext,
+    PMDCurveParams,
+    PMDCurve,
+    create_pmd_context,
+    destroy_pmd_context,
+    merge_pmd_stats,
+    fit_pmd_curve,
+    finalize_pmd_model,
 )
+# Python wrapper for applying PMD corrections to alignments
+from .processor_pmd import apply_pmd_corrections_py, init_hierarchical_em_py
+# Python wrapper for EM algorithm
+from .processor_em import execute_em_py
 
 from .processor_filters cimport (
     apply_probability_filtering,
@@ -134,6 +146,10 @@ from .processor_graph_taxonomy cimport (
 
 from .processor_taxonomy_filters cimport (
     TaxonomyFilterConfig
+)
+
+from .processor_network_qc cimport (
+    NetworkQCConfig
 )
 
 from .taxonomy_db cimport (
@@ -290,6 +306,7 @@ cdef score_alignments(
     verbose=False,
     calculate_pmd=True,
     library_type="ds",
+    hierarchical_pmd=False,
     reference_lengths_tsv=None,
     reference_stats_tsv=None,
     min_read_count=1,
@@ -324,6 +341,18 @@ cdef score_alignments(
     emergency_min_dominant_refs=0,
     init_prior_strength=0.1,
     information_threshold=-999.0,
+    em_beta=1.0,
+    em_length_correction=False,
+    em_unknown_component=False,
+    em_unknown_prior=0.05,
+    em_unknown_score=-50.0,
+    em_length_init=False,
+    # === UNIFIED φ-SPACE EM PARAMETERS ===
+    em_power_rho=1.0,              # ρ: 1.0 = standard, <1 reduces dominance
+    em_unknown_adaptive=False,     # Enable adaptive unknown score (vs fixed s_unknown)
+    em_unknown_margin=2.0,         # Δ: margin below best score for unknown
+    em_length_output_exp=1.0,      # γ_len: 0=none, 1=per-base abundance
+    em_length_prior_exp=1.0,       # η_prior: 0=flat, 1=length-proportional
     graph_min_edge_weight=2,
     clustering=False,
     community_resolution=1.0,
@@ -349,6 +378,12 @@ cdef score_alignments(
     remove_cross_domain_alignments=False,
     remove_cross_domain_references=False,
     detect_misannotations=False,
+    # Network QC & Taxonomic ambiguity detection parameters
+    network_qc_filter=False,
+    entropy_biased_threshold=1.0,
+    entropy_mixed_threshold=2.0,
+    entropy_highly_mixed_threshold=3.0,
+    tax_ambiguity_removal_level=2,
 ):
     """Core BAM alignment scoring and filtering engine.
 
@@ -444,7 +479,28 @@ cdef score_alignments(
     em_config.emergency_min_dominant_refs = 0  # Will be auto-calculated
     em_config.init_prior_strength = init_prior_strength
     em_config.information_threshold = information_threshold
-    
+
+    # Tempered EM: beta < 1 reduces rich-gets-richer bias
+    em_config.em_beta = em_beta
+
+    # Effective length correction: reduces length bias in EM
+    em_config.em_length_correction = em_length_correction
+
+    # Unknown component: absorbs reads not belonging to any reference
+    em_config.em_unknown_component = em_unknown_component
+    em_config.em_unknown_prior = em_unknown_prior
+    em_config.em_unknown_score = em_unknown_score
+
+    # Length-aware initialization
+    em_config.em_length_init = em_length_init
+
+    # === UNIFIED φ-SPACE EM PARAMETERS ===
+    em_config.em_power_rho = em_power_rho
+    em_config.em_unknown_adaptive = em_unknown_adaptive
+    em_config.em_unknown_margin = em_unknown_margin
+    em_config.em_length_output_exp = em_length_output_exp
+    em_config.em_length_prior_exp = em_length_prior_exp
+
     # Disable regular dominance regularization by default
     em_config.enable_dominance_regularization = False
 
@@ -474,6 +530,11 @@ cdef score_alignments(
     cdef MemoryPool* memory_pool = NULL
     cdef samFile** thread_handles = NULL
     cdef ThreadLocalHashMap** thread_maps = NULL
+
+    # PMD context for stats collection
+    cdef PMDGlobalContext* pmd_context = NULL
+    cdef PMDCurveParams pmd_params
+    cdef bint collect_pmd_stats = False
 
     # TSV integration variables
     cdef TSVReferenceMap* tsv_map = NULL
@@ -542,6 +603,10 @@ cdef score_alignments(
 
     # Taxonomy-informed filtering variables
     cdef TaxonomyFilterConfig taxonomy_filter_config
+
+    # Network QC filtering variables
+    cdef NetworkQCConfig network_qc_config
+    cdef uint8_t tax_ambiguity_removal_level_c
 
     # Cluster filtering variables
     cdef ReferenceStats* ref_stats = NULL
@@ -613,6 +678,16 @@ cdef score_alignments(
         taxonomy_filter_config.enable_second_chance = taxonomy_second_chance and taxonomy_filter_config.enable_strict_filtering
         taxonomy_filter_config.second_chance_cc_threshold = <float>taxonomy_second_chance_cc
 
+        # Configure network QC filtering (taxonomic ambiguity detection)
+        network_qc_config.high_entropy_threshold = 2.0  # Default
+        network_qc_config.entropy_biased_threshold = entropy_biased_threshold
+        network_qc_config.entropy_mixed_threshold = entropy_mixed_threshold
+        network_qc_config.entropy_highly_mixed_threshold = entropy_highly_mixed_threshold
+        network_qc_config.taxonomy_rank_for_analysis = 6  # genus level
+        network_qc_config.use_taxonomy_as_community = False
+        network_qc_config.community_resolution = community_resolution
+        tax_ambiguity_removal_level_c = <uint8_t>tax_ambiguity_removal_level
+
         # We'll set taxonomy_enabled on stats once the memory pool exists
 
         if verbose:
@@ -622,6 +697,9 @@ cdef score_alignments(
                 _info("Cross-domain alignment removal: ENABLED")
             if remove_cross_domain_references:
                 _info("Cross-domain reference removal: ENABLED")
+            if network_qc_filter:
+                _info("Network QC filtering: ENABLED (entropy_thresholds=%.1f/%.1f/%.1f, removal_level=%d)",
+                      entropy_biased_threshold, entropy_mixed_threshold, entropy_highly_mixed_threshold, tax_ambiguity_removal_level)
 
         if output_bam:
             output_bam_bytes = output_bam.encode('utf-8')
@@ -861,6 +939,17 @@ cdef score_alignments(
             if not thread_maps[thread_idx]:
                 raise MemoryError(f"Failed to create thread hash map {thread_idx}")
 
+        # Create PMD context for stats collection (if PMD scoring is enabled)
+        collect_pmd_stats = scoring_config.calculate_pmd
+
+        if collect_pmd_stats:
+            with nogil:
+                pmd_context = create_pmd_context(num_threads_c, scoring_config.is_single_stranded, False)
+            if not pmd_context:
+                raise MemoryError("Failed to create PMD context")
+            if verbose:
+                _info("PMD statistics collection enabled")
+
         # Process batches in parallel
         _announce_stage("Alignment Processing", "Loading alignments, applying quality filters, and computing alignment scores")
         stage_timer = bf_monotonic_seconds()
@@ -870,10 +959,10 @@ cdef score_alignments(
         with nogil:
             for batch_idx in prange(batch_count, num_threads=num_threads_c, schedule='static'):
                 thread_idx = threadid()
-                process_batch_alignments(
+                process_batch_alignments_with_pmd(
                     thread_handles[thread_idx], bam_header, bam_index,
                     reference_ids, processing_batches[batch_idx], &scoring_config,
-                    thread_maps[thread_idx], thread_idx 
+                    thread_maps[thread_idx], thread_idx, pmd_context
                 )
 
         _log_stage("Batch processing", stage_timer)
@@ -934,6 +1023,31 @@ cdef score_alignments(
             std_score = libc_sqrt(variance_score) if variance_score > 0.0 else 0.0
             _info(f"  Score stats: min={min_score:.4f}, max={max_score:.4f}, mean={mean_score:.4f}, std={std_score:.4f}")
 
+        # Finalize PMD model if stats were collected
+        if pmd_context != NULL:
+            if verbose:
+                _info("Finalizing PMD damage model from collected statistics")
+            with nogil:
+                # Merge thread-local stats into global
+                merge_pmd_stats(pmd_context)
+                # Fit D(z) curve with regularization (use default params)
+                pmd_params.P_prior_mean = 0.3
+                pmd_params.P_prior_sd = 0.15
+                pmd_params.lambda_prior_mean = 0.35
+                pmd_params.lambda_prior_sd = 0.2
+                pmd_params.C_prior_mean = 0.01
+                pmd_params.C_prior_sd = 0.005
+                pmd_params.omega_alpha = 0.5
+                pmd_params.omega_beta = 5.0
+                pmd_params.epsilon = 0.01
+                fit_pmd_curve(pmd_context, &pmd_params)
+                # Freeze model for BAM writing
+                finalize_pmd_model(pmd_context)
+            if verbose:
+                _info(f"  PMD omega (damage presence): {pmd_context.model.curve.omega:.4f}")
+                _info(f"  PMD decay parameter: {pmd_context.model.curve.lambda_decay:.4f}")
+                _info(f"  Alignments analyzed: {pmd_context.model.stats.total_alignments:,}")
+
         # Apply EM algorithm
         if use_em:
             if verbose:
@@ -944,6 +1058,12 @@ cdef score_alignments(
                                            unique_read_count, filtered_reference_lengths, calculate_pmd, num_threads_c)
             if not memory_pool:
                 raise MemoryError("Failed to create memory pool")
+
+            # Store PMD curve pointer for BAM writing
+            if pmd_context != NULL and pmd_context.model.finalized:
+                memory_pool.pmd_curve_ptr = <void*>&pmd_context.model.curve
+            else:
+                memory_pool.pmd_curve_ptr = NULL
 
             if memory_pool.stats != NULL:
                 memory_pool.stats.taxonomy_enabled = 1 if taxonomy_filter_config.enabled else 0
@@ -962,7 +1082,43 @@ cdef score_alignments(
             with nogil:
                 update_initial_stats(memory_pool.stats, memory_pool.alignment_count,
                                    unique_read_count, total_references)
-                # All alignments pass quality filtering (ANI/length already filtered during reading)
+
+            # Apply PMD corrections to compute damage-corrected ANI for all alignments
+            # This must happen AFTER PMD curve fitting and BEFORE EM/filtering
+            if pmd_context != NULL and pmd_context.model.finalized:
+                if verbose:
+                    _info("Applying PMD damage corrections to alignments")
+                _announce_stage("PMD Correction", "Computing damage-corrected ANI for all alignments")
+                stage_timer = bf_monotonic_seconds()
+
+                # Get minimum ANI threshold from scoring config
+                min_ani_threshold = scoring_config.minimum_read_identity if scoring_config.minimum_read_identity > 0 else 90.0
+
+                # Apply corrections using the fitted PMD curve
+                passed_count = apply_pmd_corrections_py(
+                    <uintptr_t>memory_pool,
+                    <uintptr_t>&pmd_context.model.curve,
+                    min_ani_threshold,
+                    0.01,  # epsilon (sequencing error rate)
+                    num_threads_c
+                )
+                _log_stage("PMD correction", stage_timer)
+
+                if verbose:
+                    _info(f"  Alignments passing corrected ANI >= {min_ani_threshold:.1f}%: {passed_count:,} / {memory_pool.alignment_count:,}")
+
+                # Initialize hierarchical EM for ancient/modern classification if enabled
+                if hierarchical_pmd:
+                    if verbose:
+                        _info("Initializing hierarchical EM for ancient/modern classification")
+                    init_hierarchical_em_py(
+                        <uintptr_t>memory_pool,
+                        <uintptr_t>&pmd_context.model.curve,
+                        0.01  # epsilon (sequencing error rate)
+                    )
+
+            # Update quality filter stats (now using corrected ANI filtering)
+            with nogil:
                 update_quality_filter_stats(memory_pool.stats, memory_pool.alignment_count,
                                           unique_read_count, unique_reference_count)
 
@@ -975,10 +1131,28 @@ cdef score_alignments(
             if verbose:
                 _info("Running EM algorithm")
 
+            # EM algorithm: phi-space optimization with SQUAREM acceleration
             _announce_stage("EM Optimization", "Running Expectation-Maximization algorithm with SQUAREM acceleration")
             stage_timer = bf_monotonic_seconds()
-            # Execute EM algorithm WITHOUT graph penalties
-            if execute_em_algorithm(memory_pool, &em_config) != 0:
+            if execute_em_py(
+                <uintptr_t>memory_pool,
+                max_em_iterations,
+                em_tolerance,
+                prior_weight,
+                em_power_rho,
+                em_unknown_component,
+                em_unknown_margin,
+                hierarchical_pmd,
+                0.02,  # D_avg_5p (default)
+                0.02,  # D_avg_3p (default)
+                0.01,  # epsilon_error
+                use_squarem_acceleration,
+                squarem_start_iter,
+                enable_globalization,
+                backtrack_factor,
+                max_backtrack_steps,
+                num_threads,
+            ) != 0:
                 raise RuntimeError("EM algorithm execution failed")
             _log_stage("EM algorithm", stage_timer)
 
@@ -1001,6 +1175,10 @@ cdef score_alignments(
             with nogil:
                 update_probability_filter_stats(memory_pool.stats, memory_pool.alignment_count,
                                               memory_pool.final_unique_reads, unique_reference_count)
+
+            # Free EM intermediate memory before graph analysis to reduce peak memory
+            with nogil:
+                cleanup_em_intermediate_memory(memory_pool)
 
             if verbose:
                 _info(f"Analyzing reference graph...")
@@ -1258,7 +1436,10 @@ cdef score_alignments(
                     5,     # hub_degree_threshold: minimum degree for hub/core
                     False,  # strict_mode: non-strict by default
                     remove_cross_domain_alignments_c,  # Alignment removal toggle
-                    detect_misannotations_c  # Misannotation detection toggle
+                    detect_misannotations_c,  # Misannotation detection toggle
+                    # Network QC filtering parameters
+                    &network_qc_config if network_qc_filter else NULL,  # Network QC config (NULL = disabled)
+                    tax_ambiguity_removal_level_c  # Tax ambiguity flag level for removal
                 )
 
                 with nogil:
@@ -1443,6 +1624,10 @@ cdef score_alignments(
             sam_hdr_destroy(bam_header)
         if bam_handle:
             hts_close(bam_handle)
+        # Clean up PMD context (must be after BAM writing completes)
+        if pmd_context:
+            with nogil:
+                destroy_pmd_context(pmd_context)
         # Memory cleanup handled by caller
 # ===============================================================================
 # UPDATED PUBLIC INTERFACE FUNCTIONS
@@ -1458,6 +1643,7 @@ def process_bam_with_em(
     # PMD parameters
     calculate_pmd=False,
     library_type="ds",
+    hierarchical_pmd=False,
 
     # TSV
     reference_lengths_tsv=None,
@@ -1502,6 +1688,27 @@ def process_bam_with_em(
     init_prior_strength=0.1,
     information_threshold=-999.0,  # Information-theoretic filtering (-999.0 = disabled)
 
+    # Tempered EM parameter (bias reduction)
+    em_beta=1.0,  # Temperature: 1.0 = standard EM, 0.3-0.7 recommended for bias reduction
+
+    # Effective length correction (reduces length bias)
+    em_length_correction=False,  # Normalize by reference length: π_j ∝ counts_j / length_j
+
+    # Unknown component (absorbs reads not belonging to any reference)
+    em_unknown_component=False,  # Enable unknown/background component
+    em_unknown_prior=0.05,       # Prior probability for unknown (5%)
+    em_unknown_score=-50.0,      # Fixed log-likelihood score for unknown
+
+    # Length-aware initialization
+    em_length_init=False,  # Use length-weighted prior: π_j^(0) ∝ length_j
+
+    # === UNIFIED φ-SPACE EM PARAMETERS (clean formulation) ===
+    em_power_rho=1.0,              # ρ: 1.0 = standard, <1 reduces dominance (replaces dominance penalty)
+    em_unknown_adaptive=False,     # Enable adaptive unknown score (vs fixed s_unknown)
+    em_unknown_margin=2.0,         # Δ: margin below best score for unknown
+    em_length_output_exp=1.0,      # γ_len: 0=none, 1=per-base abundance (π_j ∝ φ_j / L_j^γ_len)
+    em_length_prior_exp=1.0,       # η_prior: 0=flat, 1=length-proportional (α_j = α0 × (L_j / mean_L)^η_prior)
+
     # Graph construction parameters (cluster-aware filtering always enabled)
     graph_min_edge_weight=0,  # Minimum edge weight to keep in graph (0=auto via elbow, -1=no filtering)
 
@@ -1533,6 +1740,12 @@ def process_bam_with_em(
     remove_cross_domain_alignments=False,
     remove_cross_domain_references=False,
     detect_misannotations=False,
+    # Network QC & Taxonomic ambiguity detection parameters
+    network_qc_filter=False,
+    entropy_biased_threshold=1.0,
+    entropy_mixed_threshold=2.0,
+    entropy_highly_mixed_threshold=3.0,
+    tax_ambiguity_removal_level=2,
 ):
     """
     High-level entry point to process a BAM file with the EM-based pipeline.
@@ -1610,6 +1823,7 @@ def process_bam_with_em(
             verbose=verbose,
             calculate_pmd=calculate_pmd,
             library_type=library_type,
+            hierarchical_pmd=hierarchical_pmd,
             reference_lengths_tsv=reference_lengths_tsv,
             reference_stats_tsv=reference_stats_tsv,
             min_read_count=min_read_count,
@@ -1645,6 +1859,18 @@ def process_bam_with_em(
             emergency_min_dominant_refs=emergency_min_dominant_refs,
             init_prior_strength=init_prior_strength,
             information_threshold=information_threshold,
+            em_beta=em_beta,
+            em_length_correction=em_length_correction,
+            em_unknown_component=em_unknown_component,
+            em_unknown_prior=em_unknown_prior,
+            em_unknown_score=em_unknown_score,
+            em_length_init=em_length_init,
+            # === UNIFIED φ-SPACE EM PARAMETERS ===
+            em_power_rho=em_power_rho,
+            em_unknown_adaptive=em_unknown_adaptive,
+            em_unknown_margin=em_unknown_margin,
+            em_length_output_exp=em_length_output_exp,
+            em_length_prior_exp=em_length_prior_exp,
             graph_min_edge_weight=graph_min_edge_weight,
             clustering=clustering,
             community_resolution=community_resolution,
@@ -1667,6 +1893,12 @@ def process_bam_with_em(
             remove_cross_domain_alignments=remove_cross_domain_alignments,
             remove_cross_domain_references=remove_cross_domain_references,
             detect_misannotations=detect_misannotations,
+            # Network QC & Taxonomic ambiguity detection
+            network_qc_filter=network_qc_filter,
+            entropy_biased_threshold=entropy_biased_threshold,
+            entropy_mixed_threshold=entropy_mixed_threshold,
+            entropy_highly_mixed_threshold=entropy_highly_mixed_threshold,
+            tax_ambiguity_removal_level=tax_ambiguity_removal_level,
         )
 
         processing_time = bf_monotonic_seconds() - clock_start

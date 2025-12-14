@@ -89,6 +89,34 @@ cdef struct EMAlgorithmConfig:
     int32_t thread_count
     int32_t minimum_read_coverage
 
+    # Tempered EM parameter (beta < 1 reduces rich-gets-richer bias)
+    double em_beta  # Temperature: 1.0 = standard EM, 0.3-0.7 recommended for bias reduction
+
+    # Effective length correction (reduces length bias in EM)
+    bint em_length_correction  # Normalize weights by reference length: π_j ∝ counts_j / length_j
+
+    # Unknown component (absorbs reads not belonging to any reference)
+    bint em_unknown_component  # Enable unknown/background component
+    double em_unknown_prior    # Prior probability for unknown (default 0.05)
+    double em_unknown_score    # Fixed log-likelihood score for unknown (default -50.0)
+
+    # Length-aware initialization (initializes weights proportional to reference length)
+    bint em_length_init  # Use length-weighted prior: π_j^(0) ∝ length_j
+
+    # === UNIFIED φ-SPACE EM PARAMETERS (clean formulation) ===
+    # Power reweighting: φ_j = (c_j + α_j)^ρ (replaces dominance penalty)
+    double em_power_rho           # ρ: 1.0 = standard, <1 reduces dominance (default 1.0)
+
+    # Adaptive unknown: s_ru = max_j(s_rj) - Δ
+    bint em_unknown_adaptive      # Enable adaptive unknown score (vs fixed s_unknown)
+    double em_unknown_margin      # Δ: margin below best score for unknown (default 2.0)
+
+    # Output length correction: π_j ∝ φ_j / L_j^γ_len
+    double em_length_output_exp   # γ_len: 0=none, 1=per-base abundance (default 1.0)
+
+    # Prior length weighting: α_j = α0 × (L_j / mean_L)^η_prior
+    double em_length_prior_exp    # η_prior: 0=flat, 1=length-proportional (default 1.0)
+
     # Squarem control
     int32_t squarem_start_iter
 

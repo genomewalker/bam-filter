@@ -21,6 +21,89 @@ from typing import Optional
 
 LOG_TAG = "UTILS"
 
+# ===========================================================================
+# TWO-TIER HELP SYSTEM
+# Basic --help shows simplified options for most users
+# --advanced-help shows all options including expert settings
+# ===========================================================================
+_ADVANCED_OPTIONS_HELP = {}  # {option_name: (help_text, category)}
+
+
+def _register_advanced_option(name: str, help_text: str, category: str = "Other") -> None:
+    """Register an advanced option's help text for --advanced-help display."""
+    _ADVANCED_OPTIONS_HELP[name] = (help_text, category)
+
+
+class AdvancedHelpAction(argparse.Action):
+    """Custom action to display full help including advanced options."""
+
+    def __init__(self, option_strings, dest=argparse.SUPPRESS, default=argparse.SUPPRESS, help=None):
+        super().__init__(
+            option_strings=option_strings,
+            dest=dest,
+            default=default,
+            nargs=0,
+            help=help,
+        )
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        import textwrap
+
+        # Print header
+        print("=" * 70)
+        print("ADVANCED HELP - All options including expert settings")
+        print("=" * 70)
+        print()
+
+        # Print the regular help first
+        parser.print_help()
+
+        # Print advanced options section
+        if _ADVANCED_OPTIONS_HELP:
+            print()
+            print("=" * 70)
+            print("ADVANCED OPTIONS (hidden from basic --help)")
+            print("=" * 70)
+            print()
+            print("These options provide fine-grained control for expert users.")
+            print("Most users should use the simplified options shown above.")
+            print()
+
+            # Group options by category
+            categories = {}
+            for name, (help_text, category) in sorted(_ADVANCED_OPTIONS_HELP.items()):
+                if category not in categories:
+                    categories[category] = []
+                categories[category].append((name, help_text))
+
+            # Print in logical order
+            category_order = ["EM Algorithm", "SQUAREM Acceleration", "Filtering", "Other"]
+            for category in category_order:
+                if category in categories:
+                    print(f"{category}:")
+                    print("-" * 50)
+                    for name, help_text in sorted(categories[category]):
+                        print(f"  {name}")
+                        wrapped = textwrap.wrap(help_text, width=60)
+                        for line in wrapped:
+                            print(f"      {line}")
+                        print()
+
+            # Print any remaining categories
+            for category, options in sorted(categories.items()):
+                if category not in category_order:
+                    print(f"{category}:")
+                    print("-" * 50)
+                    for name, help_text in sorted(options):
+                        print(f"  {name}")
+                        wrapped = textwrap.wrap(help_text, width=60)
+                        for line in wrapped:
+                            print(f"      {line}")
+                        print()
+
+        parser.exit()
+
+
 _VERBOSITY_NAME_TO_LEVEL = {
     "quiet": bf_logging.LogLevel.QUIET,
     "summary": bf_logging.LogLevel.SUMMARY,
@@ -591,6 +674,20 @@ defaults = {
     "tmp_dir": None,
     "max_em_iterations": 50,
     "em_tolerance": 1e-6,
+    "em_beta": 1.0,
+    "em_length_correction": False,
+    "em_unknown_component": True,  # Default ON for ancient DNA (absorbs unmapped reads)
+    "em_unknown_prior": 0.05,
+    "em_unknown_score": -50.0,
+    "em_length_init": False,
+    "hierarchical_pmd": True,  # Default ON for ancient DNA (ancient/modern classification)
+    # === UNIFIED φ-SPACE EM PARAMETERS ===
+    "em_mode": "phi",  # "standard" (rho=1.0) or "phi" (rho=0.7, recommended for metagenomics)
+    "em_power_rho": 0.7,  # φ-space EM, reduces rich-get-richer bias
+    "em_unknown_adaptive": False,
+    "em_unknown_margin": 2.0,
+    "em_length_output_exp": 1.0,
+    "em_length_prior_exp": 1.0,
     "min_probability": 1e-6,
     "prob_fraction": 0,
     "prior_weight": 0.01,
@@ -614,6 +711,12 @@ defaults = {
     "community_max_iterations": 10,  # Maximum iterations for convergence
     "community_parallel": False,  # Enable parallel move phase
     "outlier_method": "mad",  # "mad" | "iqr" - Statistical outlier detection method (simplified)
+    # Network QC & Taxonomic ambiguity detection parameters
+    "network_qc_filter": False,  # Enable network QC-based taxonomic ambiguity filtering
+    "entropy_biased_threshold": 1.0,  # Entropy above which ref is flagged as "biased" (bits)
+    "entropy_mixed_threshold": 2.0,  # Entropy above which ref is flagged as "mixed" (bits)
+    "entropy_highly_mixed_threshold": 3.0,  # Entropy above which ref is flagged as "highly_mixed" (bits)
+    "tax_ambiguity_removal_level": 2,  # Minimum tax_ambiguity_flag level for removal (0=none, 1=biased, 2=mixed, 3=highly_mixed)
 }
 
 help_msg = {
@@ -670,6 +773,19 @@ help_msg = {
     # ✓ SYNCED: Updated EM algorithm help messages
     "max_em_iterations": "Maximum number of EM iterations",
     "em_tolerance": "EM convergence tolerance (||F(θ)-θ|| <= ε)",
+    "em_beta": "Tempered EM parameter (0.3-0.7 reduces rich-gets-richer bias, 1.0=standard EM). Auto-coordinates with dominance regularization",
+    "em_length_correction": "Enable coherent length model: E-step uses π_j×length_j prior, M-step normalizes by length",
+    "em_unknown_component": "Enable unknown/background component to absorb reads not matching any reference",
+    "em_unknown_prior": "Prior probability for unknown component (default: 0.05 = 5%%)",
+    "em_unknown_score": "Fixed log-likelihood score for unknown component (default: -50.0)",
+    "em_length_init": "Enable length-weighted Dirichlet prior α_j ∝ length_j (used in init and M-step)",
+    # === UNIFIED φ-SPACE EM HELP MESSAGES ===
+    "em_mode": "EM algorithm mode: 'phi' (default, diversity-preserving, rho=0.7) or 'standard' (strict ML, rho=1.0)",
+    "em_power_rho": "Power reweighting exponent ρ: 1.0=standard EM, <1 reduces dominance. Override with --em-mode",
+    "em_unknown_adaptive": "Use adaptive unknown score (s_ru = max_j(s_rj) - Δ) instead of fixed score",
+    "em_unknown_margin": "Margin Δ below best score for adaptive unknown (default: 2.0)",
+    "em_length_output_exp": "Output length correction γ_len: 0=read-level, 1=per-base abundance (π_j ∝ φ_j/L_j^γ)",
+    "em_length_prior_exp": "Prior length exponent η: 0=flat prior, 1=length-proportional (α_j ∝ L_j^η)",
     "min_probability": "Minimum probability threshold for keeping alignments",
     "prob_fraction": "Relative probability threshold for post-EM filtering",
     "prior_weight": "Prior weight (regularization) for EM algorithm",
@@ -693,6 +809,17 @@ help_msg = {
     "community_max_iterations": "Maximum iterations for the community detection refinement loop (default: 10).",
     "community_parallel": "Enable parallel processing in the community move phase for speed (experimental, Leiden-only).",
     "outlier_method": "Outlier test for clustering coefficients: 'mad' (Median Absolute Deviation, default) or 'iqr' (Interquartile Range). These rules flag structural outliers; multi-metric checks live in the tiered filtering pipeline.",
+    # Network QC & Taxonomic ambiguity detection
+    "network_qc_filter": "Enable network QC-based taxonomic ambiguity filtering using neighbor taxonomy entropy. "
+                         "Identifies references with taxonomically diverse neighbors. HUB references are expected to have high entropy and are not flagged.",
+    "entropy_biased_threshold": "Entropy threshold (bits) above which a non-HUB reference is flagged as 'biased' (level 1). "
+                                "Default: 1.0 bits. References with entropy >= threshold have moderately diverse neighbor taxonomy.",
+    "entropy_mixed_threshold": "Entropy threshold (bits) above which a non-HUB reference is flagged as 'mixed' (level 2). "
+                               "Default: 2.0 bits. References with entropy >= threshold have diverse neighbor taxonomy.",
+    "entropy_highly_mixed_threshold": "Entropy threshold (bits) above which a non-HUB reference is flagged as 'highly_mixed' (level 3). "
+                                      "Default: 3.0 bits. References with entropy >= threshold have highly diverse neighbor taxonomy.",
+    "tax_ambiguity_removal_level": "Minimum tax_ambiguity_flag level for automatic removal: 0=none (report only), 1=biased, 2=mixed (default), 3=highly_mixed only. "
+                                   "Higher levels are more conservative (remove fewer references).",
 }
 
 from difflib import get_close_matches, SequenceMatcher
@@ -897,6 +1024,13 @@ def get_arguments(argv=None):
         allow_abbrev=False,
     )
 
+    # Add advanced help option
+    parser_reassign.add_argument(
+        "--advanced-help",
+        action=AdvancedHelpAction,
+        help="Show all options including expert settings hidden from basic --help.",
+    )
+
     # Create the parser for the lca command with all parent parsers
     parser_lca = sub_parsers.add_parser(
         "lca",
@@ -928,6 +1062,78 @@ def get_arguments(argv=None):
     reassign_taxonomy_args = parser_reassign.add_argument_group("Taxonomy Integration")
     reassign_export_args = parser_reassign.add_argument_group("Reporting & Export")
 
+    # Simplified filtering argument group (user-friendly consolidated options)
+    reassign_simple_filter_args = parser_reassign.add_argument_group(
+        "Simplified Filtering (recommended)",
+        description="Easy-to-use options that consolidate multiple advanced settings. "
+                    "Use these instead of the granular taxonomy options below."
+    )
+
+    # --filter-mode: Consolidates taxonomy-filter, taxonomy-strict-filter, network-qc-filter
+    reassign_simple_filter_args.add_argument(
+        "--filter-mode",
+        dest="filter_mode",
+        type=str,
+        choices=["none", "structural", "taxonomy", "strict"],
+        default="none",
+        metavar="MODE",
+        help="Filtering mode: 'none' (EM only, no graph filtering), "
+             "'structural' (graph topology only, no taxonomy), "
+             "'taxonomy' (graph + taxonomy-informed filtering), "
+             "'strict' (aggressive taxonomy filtering with cross-domain removal). "
+             "Default: none. Requires --clustering for structural/taxonomy/strict modes.",
+    )
+
+    # --cross-domain-mode: Consolidates remove-cross-domain-* options
+    reassign_simple_filter_args.add_argument(
+        "--cross-domain-mode",
+        dest="cross_domain_mode",
+        type=str,
+        choices=["none", "alignments", "references", "all"],
+        default=None,
+        metavar="MODE",
+        help="Cross-domain removal mode: 'none' (keep all), "
+             "'alignments' (remove cross-domain alignments only), "
+             "'references' (remove cross-domain references), "
+             "'all' (remove both alignments and references). "
+             "Default: 'all' when --filter-mode is 'taxonomy' or 'strict', 'none' otherwise.",
+    )
+
+    # --sensitivity: Consolidates threshold parameters
+    reassign_simple_filter_args.add_argument(
+        "--sensitivity",
+        dest="filter_sensitivity",
+        type=str,
+        choices=["low", "medium", "high"],
+        default="medium",
+        metavar="LEVEL",
+        help="Filtering sensitivity: 'low' (conservative, fewer false positives), "
+             "'medium' (balanced, default), "
+             "'high' (aggressive, catches more contamination but may have false positives). "
+             "Affects taxonomy thresholds and outlier detection parameters.",
+    )
+
+    # Simplified EM argument group (user-friendly consolidated options)
+    reassign_simple_em_args = parser_reassign.add_argument_group(
+        "Simplified EM (recommended)",
+        description="Easy-to-use EM algorithm options. Most users should use these "
+                    "instead of the detailed parameters shown with --advanced-help."
+    )
+
+    # --em-preset: Consolidates EM parameters
+    reassign_simple_em_args.add_argument(
+        "--em-preset",
+        dest="em_preset",
+        type=str,
+        choices=["fast", "balanced", "thorough"],
+        default="balanced",
+        metavar="PRESET",
+        help="EM algorithm preset: 'fast' (25 iterations, less stringent convergence), "
+             "'balanced' (default, 50 iterations), "
+             "'thorough' (100 iterations, stricter convergence for complex samples). "
+             "Default: balanced.",
+    )
+
     filter_required_args = parser_filter.add_argument_group("Filter required arguments")
     # filter_optional_args = parser_filter.add_argument_group("Filter optional arguments")
 
@@ -956,18 +1162,40 @@ def get_arguments(argv=None):
     misc_filter_args = parser_filter.add_argument_group("miscellaneous arguments")
     out_filter_args = parser_filter.add_argument_group("output arguments")
 
+    # Register advanced EM options for --advanced-help
+    _register_advanced_option(
+        "--max-em-iterations / -i",
+        help_msg["max_em_iterations"],
+        category="EM Algorithm"
+    )
+    _register_advanced_option(
+        "--em-tolerance",
+        help_msg["em_tolerance"],
+        category="EM Algorithm"
+    )
+    _register_advanced_option(
+        "--em-beta",
+        help_msg["em_beta"],
+        category="EM Algorithm"
+    )
+    _register_advanced_option(
+        "--em-length-correction",
+        help_msg["em_length_correction"],
+        category="EM Algorithm"
+    )
+
     reassign_em_args.add_argument(
         "-i",
-        "--max-em-iterations",  # ✓ SYNCED: was "--iters"
+        "--max-em-iterations",
         type=lambda x: int(
             check_values(
                 x, minval=1, maxval=1000, parser=parser, var="--max-em-iterations"
             )
         ),
         metavar="INT",
-        default=defaults["max_em_iterations"],  # ✓ SYNCED: new parameter name
-        dest="max_em_iterations",  # ✓ SYNCED: new dest name
-        help=help_msg["max_em_iterations"],
+        default=defaults["max_em_iterations"],
+        dest="max_em_iterations",
+        help=argparse.SUPPRESS,  # Hidden, use --em-preset instead
     )
 
     reassign_em_args.add_argument(
@@ -980,20 +1208,209 @@ def get_arguments(argv=None):
         metavar="FLOAT",
         default=defaults["em_tolerance"],
         dest="em_tolerance",
-        help=help_msg["em_tolerance"],
+        help=argparse.SUPPRESS,  # Hidden, use --em-preset instead
     )
 
     reassign_em_args.add_argument(
-        "--min-probability",  # ✓ SYNCED: was "--min-prob"
+        "--em-beta",
+        type=lambda x: float(
+            check_values(
+                x, minval=0.01, maxval=1.0, parser=parser, var="--em-beta"
+            )
+        ),
+        metavar="FLOAT",
+        default=defaults["em_beta"],
+        dest="em_beta",
+        help=argparse.SUPPRESS,  # Hidden, advanced option
+    )
+
+    reassign_em_args.add_argument(
+        "--em-length-correction",
+        action="store_true",
+        default=defaults["em_length_correction"],
+        dest="em_length_correction",
+        help=argparse.SUPPRESS,  # Hidden, advanced option
+    )
+
+    reassign_em_args.add_argument(
+        "--em-unknown-component",
+        action=argparse.BooleanOptionalAction,
+        default=defaults["em_unknown_component"],
+        dest="em_unknown_component",
+        help="Include unknown/unassigned component in EM model. "
+             "Absorbs reads that don't match well to any reference. "
+             "Enabled by default. Use --no-em-unknown-component to disable.",
+    )
+
+    # Register additional advanced EM options
+    _register_advanced_option(
+        "--em-unknown-prior",
+        help_msg["em_unknown_prior"],
+        category="EM Algorithm"
+    )
+    _register_advanced_option(
+        "--em-unknown-score",
+        help_msg["em_unknown_score"],
+        category="EM Algorithm"
+    )
+    _register_advanced_option(
+        "--em-length-init",
+        help_msg["em_length_init"],
+        category="EM Algorithm"
+    )
+    _register_advanced_option(
+        "--em-mode",
+        help_msg["em_mode"],
+        category="EM Algorithm"
+    )
+    _register_advanced_option(
+        "--em-power-rho",
+        help_msg["em_power_rho"],
+        category="EM Algorithm"
+    )
+    _register_advanced_option(
+        "--em-unknown-adaptive",
+        help_msg["em_unknown_adaptive"],
+        category="EM Algorithm"
+    )
+    _register_advanced_option(
+        "--em-unknown-margin",
+        help_msg["em_unknown_margin"],
+        category="EM Algorithm"
+    )
+    _register_advanced_option(
+        "--em-length-output-exp",
+        help_msg["em_length_output_exp"],
+        category="EM Algorithm"
+    )
+    _register_advanced_option(
+        "--em-length-prior-exp",
+        help_msg["em_length_prior_exp"],
+        category="EM Algorithm"
+    )
+    _register_advanced_option(
+        "--min-probability",
+        help_msg["min_probability"],
+        category="EM Algorithm"
+    )
+    _register_advanced_option(
+        "--prob-fraction",
+        help_msg["prob_fraction"],
+        category="EM Algorithm"
+    )
+    _register_advanced_option(
+        "--prior-weight",
+        help_msg["prior_weight"],
+        category="EM Algorithm"
+    )
+
+    reassign_em_args.add_argument(
+        "--em-unknown-prior",
+        type=lambda x: float(
+            check_values(
+                x, minval=0.001, maxval=0.5, parser=parser, var="--em-unknown-prior"
+            )
+        ),
+        metavar="FLOAT",
+        default=defaults["em_unknown_prior"],
+        dest="em_unknown_prior",
+        help=argparse.SUPPRESS,  # Hidden, advanced option
+    )
+
+    reassign_em_args.add_argument(
+        "--em-unknown-score",
+        type=lambda x: float(
+            check_values(
+                x, minval=-200.0, maxval=0.0, parser=parser, var="--em-unknown-score"
+            )
+        ),
+        metavar="FLOAT",
+        default=defaults["em_unknown_score"],
+        dest="em_unknown_score",
+        help=argparse.SUPPRESS,  # Hidden, advanced option
+    )
+
+    reassign_em_args.add_argument(
+        "--em-length-init",
+        action="store_true",
+        default=defaults["em_length_init"],
+        dest="em_length_init",
+        help=argparse.SUPPRESS,  # Hidden, advanced option
+    )
+
+    # === UNIFIED φ-SPACE EM ARGUMENTS (all hidden, advanced) ===
+    reassign_em_args.add_argument(
+        "--em-mode",
+        type=str,
+        choices=["phi", "standard"],
+        default=defaults["em_mode"],
+        dest="em_mode",
+        help=argparse.SUPPRESS,  # Hidden, advanced option
+    )
+
+    reassign_em_args.add_argument(
+        "--em-power-rho",
+        type=lambda x: float(
+            check_values(x, minval=0.1, maxval=2.0, parser=parser, var="--em-power-rho")
+        ),
+        metavar="FLOAT",
+        default=None,  # None means "use em_mode default"
+        dest="em_power_rho",
+        help=argparse.SUPPRESS,  # Hidden, advanced option
+    )
+
+    reassign_em_args.add_argument(
+        "--em-unknown-adaptive",
+        action="store_true",
+        default=defaults["em_unknown_adaptive"],
+        dest="em_unknown_adaptive",
+        help=argparse.SUPPRESS,  # Hidden, advanced option
+    )
+
+    reassign_em_args.add_argument(
+        "--em-unknown-margin",
+        type=lambda x: float(
+            check_values(x, minval=0.0, maxval=20.0, parser=parser, var="--em-unknown-margin")
+        ),
+        metavar="FLOAT",
+        default=defaults["em_unknown_margin"],
+        dest="em_unknown_margin",
+        help=argparse.SUPPRESS,  # Hidden, advanced option
+    )
+
+    reassign_em_args.add_argument(
+        "--em-length-output-exp",
+        type=lambda x: float(
+            check_values(x, minval=0.0, maxval=2.0, parser=parser, var="--em-length-output-exp")
+        ),
+        metavar="FLOAT",
+        default=defaults["em_length_output_exp"],
+        dest="em_length_output_exp",
+        help=argparse.SUPPRESS,  # Hidden, advanced option
+    )
+
+    reassign_em_args.add_argument(
+        "--em-length-prior-exp",
+        type=lambda x: float(
+            check_values(x, minval=0.0, maxval=2.0, parser=parser, var="--em-length-prior-exp")
+        ),
+        metavar="FLOAT",
+        default=defaults["em_length_prior_exp"],
+        dest="em_length_prior_exp",
+        help=argparse.SUPPRESS,  # Hidden, advanced option
+    )
+
+    reassign_em_args.add_argument(
+        "--min-probability",
         type=lambda x: float(
             check_values(
                 x, minval=1e-12, maxval=1.0, parser=parser, var="--min-probability"
             )
         ),
-        default=defaults["min_probability"],  # ✓ SYNCED: new parameter name
+        default=defaults["min_probability"],
         metavar="FLOAT",
-        dest="min_probability",  # ✓ SYNCED: new dest name
-        help=help_msg["min_probability"],
+        dest="min_probability",
+        help=argparse.SUPPRESS,  # Hidden, advanced option
     )
 
     reassign_em_args.add_argument(
@@ -1004,7 +1421,7 @@ def get_arguments(argv=None):
         default=defaults["prob_fraction"],
         metavar="FLOAT",
         dest="prob_fraction",
-        help=help_msg["prob_fraction"],
+        help=argparse.SUPPRESS,  # Hidden, advanced option
     )
 
     reassign_em_args.add_argument(
@@ -1017,7 +1434,7 @@ def get_arguments(argv=None):
         metavar="FLOAT",
         default=defaults["prior_weight"],
         dest="prior_weight",
-        help=help_msg["prior_weight"],
+        help=argparse.SUPPRESS,  # Hidden, advanced option
     )
 
     # ✓ SYNCED: Read Filtering Parameters
@@ -1079,24 +1496,56 @@ def get_arguments(argv=None):
         help=help_msg["min_read_count"],
     )
 
+    # Register SQUAREM options for --advanced-help
+    _register_advanced_option(
+        "--disable-squarem",
+        "Disable SQUAREM acceleration (use standard EM instead)",
+        category="SQUAREM Acceleration"
+    )
+    _register_advanced_option(
+        "--disable-globalization",
+        "Disable gSQUAREM globalization (use non-monotone SQUAREM)",
+        category="SQUAREM Acceleration"
+    )
+    _register_advanced_option(
+        "--squarem-start-iter",
+        help_msg["squarem_start_iter"],
+        category="SQUAREM Acceleration"
+    )
+    _register_advanced_option(
+        "--backtrack-factor",
+        help_msg["backtrack_factor"],
+        category="SQUAREM Acceleration"
+    )
+    _register_advanced_option(
+        "--max-backtrack-steps",
+        help_msg["max_backtrack_steps"],
+        category="SQUAREM Acceleration"
+    )
+    _register_advanced_option(
+        "--steplength-scheme",
+        help_msg["steplength_scheme"],
+        category="SQUAREM Acceleration"
+    )
+
     reassign_squarem_args.add_argument(
         "--disable-squarem",
         dest="use_squarem_acceleration",
         action="store_false",
-        default=True,  # Enabled by default
-        help="Disable SQUAREM acceleration (use standard EM instead)",
+        default=True,
+        help=argparse.SUPPRESS,  # Hidden, advanced option
     )
 
     reassign_squarem_args.add_argument(
         "--disable-globalization",
         dest="enable_globalization",
         action="store_false",
-        default=True,  # Enabled by default
-        help="Disable gSQUAREM globalization (use non-monotone SQUAREM)",
+        default=True,
+        help=argparse.SUPPRESS,  # Hidden, advanced option
     )
 
     reassign_squarem_args.add_argument(
-        "--squarem-start-iter",  # ✓ NEW: when to start SQUAREM
+        "--squarem-start-iter",
         type=lambda x: int(
             check_values(
                 x, minval=1, maxval=50, parser=parser, var="--squarem-start-iter"
@@ -1105,11 +1554,11 @@ def get_arguments(argv=None):
         default=defaults["squarem_start_iter"],
         metavar="INT",
         dest="squarem_start_iter",
-        help=help_msg["squarem_start_iter"],
+        help=argparse.SUPPRESS,  # Hidden, advanced option
     )
 
     reassign_squarem_args.add_argument(
-        "--backtrack-factor",  # ✓ NEW: backtracking control
+        "--backtrack-factor",
         type=lambda x: float(
             check_values(
                 x, minval=0.1, maxval=0.9, parser=parser, var="--backtrack-factor"
@@ -1118,11 +1567,11 @@ def get_arguments(argv=None):
         default=defaults["backtrack_factor"],
         metavar="FLOAT",
         dest="backtrack_factor",
-        help=help_msg["backtrack_factor"],
+        help=argparse.SUPPRESS,  # Hidden, advanced option
     )
 
     reassign_squarem_args.add_argument(
-        "--max-backtrack-steps",  # ✓ NEW: backtracking limit
+        "--max-backtrack-steps",
         type=lambda x: int(
             check_values(
                 x, minval=1, maxval=20, parser=parser, var="--max-backtrack-steps"
@@ -1131,11 +1580,11 @@ def get_arguments(argv=None):
         default=defaults["max_backtrack_steps"],
         metavar="INT",
         dest="max_backtrack_steps",
-        help=help_msg["max_backtrack_steps"],
+        help=argparse.SUPPRESS,  # Hidden, advanced option
     )
 
     reassign_squarem_args.add_argument(
-        "--steplength-scheme",  # ✓ NEW: S1/S2/S3 selection
+        "--steplength-scheme",
         type=lambda x: int(
             check_values(
                 x, minval=1, maxval=3, parser=parser, var="--steplength-scheme"
@@ -1144,7 +1593,7 @@ def get_arguments(argv=None):
         default=defaults["steplength_scheme"],
         metavar="INT",
         dest="steplength_scheme",
-        help=help_msg["steplength_scheme"],
+        help=argparse.SUPPRESS,  # Hidden, advanced option
     )
 
     # ✓ SYNCED: Output Parameters
@@ -1189,6 +1638,16 @@ def get_arguments(argv=None):
         action="store_true",
         default=False,  # PMD enabled by default
         help=help_msg["disable_pmd"],
+    )
+    reassign_pmd_args.add_argument(
+        "--hierarchical-pmd",
+        dest="hierarchical_pmd",
+        action=argparse.BooleanOptionalAction,
+        default=defaults["hierarchical_pmd"],
+        help="Hierarchical EM for ancient/modern reference classification. "
+             "Uses PMD damage patterns to estimate γ_k = P(ancient | reference k) "
+             "for each reference, helping distinguish truly ancient sequences from "
+             "modern contaminants based on characteristic damage signatures.",
     )
     reassign_export_args.add_argument(
         "-S",
@@ -1286,151 +1745,8 @@ def get_arguments(argv=None):
         "Default: 6 (genus level).",
     )
 
-    reassign_taxonomy_args.add_argument(
-        "--taxonomy-cross-domain-threshold",
-        dest="taxonomy_cross_domain_threshold",
-        type=float,
-        default=0.10,
-        metavar="FRAC",
-        help="Fraction of cross-domain neighbors to flag reference as contamination. "
-        "Default: 0.10 (flag if >10%% of neighbors cross domains).",
-    )
-
-    reassign_taxonomy_args.add_argument(
-        "--taxonomy-kingdom-threshold",
-        dest="taxonomy_kingdom_threshold",
-        type=float,
-        default=0.25,
-        metavar="FRAC",
-        help="Fraction of kingdom-mismatch neighbors to flag reference. "
-        "Default: 0.25 (flag if >25%% of neighbors cross kingdoms).",
-    )
-
-    reassign_taxonomy_args.add_argument(
-        "--taxonomy-genus-threshold",
-        dest="taxonomy_genus_threshold",
-        type=float,
-        default=0.50,
-        metavar="FRAC",
-        help="Fraction of genus-level mismatch neighbors to flag reference. "
-        "Default: 0.50 (flag if >50%% of neighbors differ at genus level).",
-    )
-
-    # Taxonomy-informed filtering options (combine graph + taxonomy for automated filtering)
-    reassign_taxonomy_args.add_argument(
-        "--taxonomy-filter",
-        dest="taxonomy_filter_enabled",
-        action="store_true",
-        help="Enable taxonomy-informed filtering (combines graph topology + taxonomy for better filtering decisions). "
-        "Requires --taxonomy-db and --clustering.",
-    )
-
-    reassign_taxonomy_args.add_argument(
-        "--taxonomy-strict-filter",
-        dest="taxonomy_strict_filter",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Enable strict taxonomy filtering for --remove-cross-domain-references mode. "
-        "Automatically removes references with cross-domain flags AND high connectivity. "
-        "Default: enabled when --taxonomy-filter is set.",
-    )
-
-    reassign_taxonomy_args.add_argument(
-        "--taxonomy-min-connections",
-        dest="taxonomy_strict_min_connections",
-        type=int,
-        default=5,
-        metavar="N",
-        help="Minimum graph connections required for reference removal in --remove-cross-domain-references mode. "
-        "Default: 5 (only remove cross-domain refs with >= 5 neighbors).",
-    )
-
-    reassign_taxonomy_args.add_argument(
-        "--taxonomy-weighted-outlier",
-        dest="taxonomy_weighted_outlier",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Weight anomaly scores by taxonomy flags (increases sensitivity to taxonomic incongruence). "
-        "Default: enabled when --taxonomy-filter is set.",
-    )
-
-    reassign_taxonomy_args.add_argument(
-        "--taxonomy-anomaly-weight",
-        dest="taxonomy_anomaly_weight",
-        type=float,
-        default=2.0,
-        metavar="WEIGHT",
-        help="Weight multiplier for taxonomy-flagged references in outlier detection. "
-        "Default: 2.0 (2x more suspicious if taxonomy flag is set).",
-    )
-
-    reassign_taxonomy_args.add_argument(
-        "--taxonomy-second-chance",
-        dest="taxonomy_second_chance",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Give graph-flagged references with normal taxonomy a second chance (reduces false positives). "
-        "Default: enabled when --taxonomy-filter is set.",
-    )
-
-    reassign_taxonomy_args.add_argument(
-        "--taxonomy-second-chance-cc",
-        dest="taxonomy_second_chance_cc",
-        type=float,
-        default=0.3,
-        metavar="CC",
-        help="Minimum clustering coefficient for second-chance validation. "
-        "Default: 0.3 (restore removed refs with CC >= 0.3 and normal taxonomy).",
-    )
-
-    reassign_taxonomy_args.add_argument(
-        "--no-cross-domain-removal",
-        dest="no_cross_domain_removal",
-        action="store_true",
-        help="Disable automatic cross-domain removal when using --taxonomy-filter. "
-        "By default, combined cross-domain removal (references + alignments) is enabled automatically "
-        "when --taxonomy-filter and --taxonomy-db are used. Use this flag to disable that behavior.",
-    )
-
-    reassign_taxonomy_args.add_argument(
-        "--remove-cross-domain-alignments",
-        dest="remove_cross_domain_alignments",
-        action="store_true",
-        default=None,
-        help="Remove alignments that connect references from different domains (Bacteria/Archaea/Eukaryota). "
-        "This preserves references but removes the spurious cross-domain read mappings. "
-        "NOTE: This is now enabled by default with --taxonomy-filter. Use --no-cross-domain-removal to disable.",
-    )
-
-    reassign_taxonomy_args.add_argument(
-        "--remove-cross-domain-references",
-        dest="remove_cross_domain_references",
-        action="store_true",
-        default=None,
-        help="Remove entire references that are flagged as cross-domain contamination. "
-        "References with high connectivity to other domains are removed along with all their alignments. "
-        "NOTE: This is now enabled by default with --taxonomy-filter. Use --no-cross-domain-removal to disable.",
-    )
-
-    reassign_taxonomy_args.add_argument(
-        "--remove-cross-domain-all",
-        dest="remove_cross_domain_all",
-        action="store_true",
-        help="Apply both alignment-level AND reference-level cross-domain removal (most aggressive). "
-        "First removes cross-domain references, then removes remaining cross-domain alignments. "
-        "NOTE: This is now the default when using --taxonomy-filter with --taxonomy-db.",
-    )
-
-    reassign_taxonomy_args.add_argument(
-        "--detect-misannotations",
-        dest="detect_misannotations",
-        action="store_true",
-        default=None,
-        help="Detect and flag potential database misannotations by analyzing cross-domain patterns. "
-        "References that lose ALL edges after cross-domain removal are flagged with high confidence. "
-        "Results exported to TSV with misannotation_flag and confidence_score columns for database curation. "
-        "NOTE: This is now enabled by default with --taxonomy-filter. Use --no-cross-domain-removal to disable.",
-    )
+    # Note: All legacy filtering options have been removed.
+    # Use --filter-mode, --cross-domain-mode, and --sensitivity instead.
 
     misc_filter_args.add_argument(
         "--reference-trim-length",

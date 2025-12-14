@@ -304,6 +304,17 @@ ext_modules = [
         library_dirs=common_library_dirs,
         libraries=common_libraries,
     ),
+    # PMD (Post-Mortem Damage) learning and damage-corrected ANI computation
+    # Needs libm and libmvec for vectorized math functions (exp, log) with -ffast-math
+    Extension(
+        "bam_filter.processor_pmd",
+        ["bam_filter/processor_pmd.pyx"],
+        extra_compile_args=common_compile_args,
+        extra_link_args=common_link_args + ["-lm", "-lmvec"],
+        include_dirs=common_include_dirs,
+        library_dirs=common_library_dirs,
+        libraries=common_libraries + ["m"],
+    ),
     Extension(
         "bam_filter.processor_lca",
         ["bam_filter/processor_lca.pyx"],
@@ -442,6 +453,16 @@ ext_modules = [
             ("NPY_NO_DEPRECATED_API", "NPY_1_7_API_VERSION"),
             ("_GNU_SOURCE", None),
         ],
+    ),
+    # Network QC metrics for evaluating EM quality based on graph structure
+    Extension(
+        "bam_filter.processor_network_qc",
+        ["bam_filter/processor_network_qc.pyx"],
+        extra_compile_args=common_compile_args,
+        extra_link_args=common_link_args,
+        include_dirs=common_include_dirs,
+        library_dirs=common_library_dirs,
+        libraries=common_libraries,
     ),
     # Ultra-fast taxonomy database for LCA queries and reference taxonomic assignment
     # Now with Arrow C++ support for ultra-fast Parquet loading (50-100x speedup)
