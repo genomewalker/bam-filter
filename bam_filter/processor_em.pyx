@@ -10,505 +10,556 @@
 # distutils: language = c++
 # -*- coding: utf-8 -*-
 
-"""Expectation-Maximization algorithm for read reassignment.
-
-Implements the EM algorithm with SQUAREM acceleration (Varadhan & Roland 2008)
-for reassigning multi-mapping reads to references based on alignment quality.
-"""
+"""EM algorithm for read reassignment with SQUAREM acceleration."""
 
 from cython.parallel import prange, threadid
 
 from libc.math cimport exp, fabs, fmax, fmin, log, log2, sqrt as libc_sqrt, pow as libc_pow, INFINITY
 from libc.stdint cimport int32_t, int64_t, uint16_t, uint32_t, uint64_t, uint8_t, uintptr_t
-from libc.stdio cimport sprintf
-from libc.stdlib cimport calloc, free, malloc, realloc
-from libc.string cimport memcpy, memmove, memset, strlen
-from libc.time cimport clock, clock_t, CLOCKS_PER_SEC
+from libc.stdlib cimport calloc, free, malloc
+from libc.string cimport memcpy, memset
 from libc.float cimport DBL_EPSILON
 
-from bam_filter.processor cimport (
-    MemoryPool, Alignment, AlignmentScoringConfig,
-    min_int32, max_int32, min_int64, max_int64, min_double, max_double
-)
-from bam_filter.processor_types cimport EMAlgorithmConfig
-from bam_filter.processor_precomputed cimport (
-    PrecomputedWeights, create_precomputed_weights, 
-    free_precomputed_weights, update_precomputed_weights
-)
+from bam_filter.processor cimport MemoryPool, Alignment
 from bam_filter.processor_fast_math cimport stable_log_sum_exp, safe_normalize_weights
-from bam_filter.processor_convergence_helpers cimport _median5, _count_filled, _mad_statistics
+from cpython.pycapsule cimport PyCapsule_GetPointer
 
 cdef extern from "bam_filter/c_logging.h":
     void bf_nogil_logf_notime(const char* tag, const char* fmt, ...) nogil
-    void bf_nogil_logf_verbose(int level, const char* tag, const char* fmt, ...) nogil
+
+
+# =============================================================================
+# Constants
+# =============================================================================
+
+cdef double NEG_INF = -1e20
+cdef double LOG_ZERO = -1e10
+
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
 
 cdef inline double* get_reference_weights(MemoryPool* pool) noexcept nogil:
     """Get pointer to reference weights array in unified buffer."""
     return pool.unified_buffer + pool.reference_weights_offset
 
-cdef inline double* get_temp_buffer_A(MemoryPool* pool) noexcept nogil:
-    """Get pointer to temporary buffer A in unified buffer."""
-    return pool.unified_buffer + pool.temp_buffer_A_offset
 
-cdef inline double* get_temp_buffer_B(MemoryPool* pool) noexcept nogil:
-    """Get pointer to temporary buffer B in unified buffer."""
-    return pool.unified_buffer + pool.temp_buffer_B_offset
+cdef extern from *:
+    """
+    #ifdef __GNUC__
+    #define PREFETCH_R(addr) __builtin_prefetch((addr), 0, 3)
+    #define PREFETCH_W(addr) __builtin_prefetch((addr), 1, 3)
+    #else
+    #define PREFETCH_R(addr) ((void)0)
+    #define PREFETCH_W(addr) ((void)0)
+    #endif
+    """
+    void PREFETCH_R(void* addr) nogil
+    void PREFETCH_W(void* addr) nogil
+
 
 cdef inline void PREFETCH_READ(void* ptr) noexcept nogil:
-    """Prefetch hint for read access (no-op, reserved for future optimization)."""
-    pass
+    PREFETCH_R(ptr)
+
 
 cdef inline void PREFETCH_WRITE(void* ptr) noexcept nogil:
-    """Prefetch hint for write access (no-op, reserved for future optimization)."""
-    pass
-
-cdef double _dominance_last_base_strength = -1.0
-cdef double _dominance_last_final_strength = -1.0
-cdef double _dominance_last_concentration = -1.0
-cdef double _dominance_last_entropy_threshold = -1.0
-cdef double _dominance_last_auto_entropy = -1.0
-cdef double _dominance_last_auto_density = -1.0
-cdef double _dominance_last_auto_ref_factor = -1.0
-cdef double _dominance_last_auto_clamped = -1.0
-cdef bint _dominance_logged_mode = False
-cdef bint _dominance_logged_adaptive = False
-cdef bint _dominance_logged_skip = False
-cdef bint _dominance_last_mode_manual = False
-cdef int _dominance_last_iteration = -1
-cdef int _dominance_iteration_context = -1
-
-cdef double _dominance_iter_min_base = INFINITY
-cdef double _dominance_iter_max_base = -INFINITY
-cdef double _dominance_iter_last_base = -1.0
-cdef double _dominance_iter_last_concentration = -1.0
-cdef double _dominance_iter_last_confidence = -1.0
-cdef double _dominance_iter_min_strength = INFINITY
-cdef double _dominance_iter_max_strength = -INFINITY
-cdef double _dominance_iter_last_strength = -1.0
-cdef int _dominance_iter_update_count = 0
-cdef bint _dominance_iter_adaptive = False
+    PREFETCH_W(ptr)
 
 
-cdef inline void _dominance_reset_iteration_metrics() noexcept nogil:
-    global _dominance_iter_min_base, _dominance_iter_max_base, _dominance_iter_last_base
-    global _dominance_iter_last_concentration, _dominance_iter_last_confidence
-    global _dominance_iter_min_strength, _dominance_iter_max_strength, _dominance_iter_last_strength
-    global _dominance_iter_update_count, _dominance_iter_adaptive
+# =============================================================================
+# State Management
+# =============================================================================
 
-    _dominance_iter_min_base = INFINITY
-    _dominance_iter_max_base = -INFINITY
-    _dominance_iter_last_base = -1.0
-    _dominance_iter_last_concentration = -1.0
-    _dominance_iter_last_confidence = -1.0
-    _dominance_iter_min_strength = INFINITY
-    _dominance_iter_max_strength = -INFINITY
-    _dominance_iter_last_strength = -1.0
-    _dominance_iter_update_count = 0
-    _dominance_iter_adaptive = False
+cdef EMState* create_em_state(uint32_t n_refs, uint32_t n_reads,
+                               EMConfig* config) noexcept nogil:
+    """Allocate and initialize EMState structure."""
+    cdef EMState* state = <EMState*>malloc(sizeof(EMState))
+    if state == NULL:
+        return NULL
+
+    state.n_refs = n_refs
+    state.n_reads = n_reads
+
+    # Allocate phi weights and counts
+    state.phi_weights = <double*>calloc(n_refs, sizeof(double))
+    state.phi_counts = <double*>calloc(n_refs, sizeof(double))
+
+    if state.phi_weights == NULL or state.phi_counts == NULL:
+        free_em_state(state)
+        return NULL
+
+    # Initialize phi to uniform
+    cdef double init_weight = 1.0 / <double>n_refs
+    cdef uint32_t j
+    for j in range(n_refs):
+        state.phi_weights[j] = init_weight
+
+    # Hierarchical arrays (if enabled)
+    state.hierarchical_enabled = config.hierarchical_enabled
+    state.gamma_values = NULL
+    state.S_anc = NULL
+    state.S_mod = NULL
+
+    if config.hierarchical_enabled:
+        state.gamma_values = <double*>calloc(n_refs, sizeof(double))
+        state.S_anc = <double*>calloc(n_refs, sizeof(double))
+        state.S_mod = <double*>calloc(n_refs, sizeof(double))
+
+        if state.gamma_values == NULL or state.S_anc == NULL or state.S_mod == NULL:
+            free_em_state(state)
+            return NULL
+
+        # Initialize gamma to 0.5 (uninformative)
+        for j in range(n_refs):
+            state.gamma_values[j] = 0.5
+
+    # Unknown component
+    state.unknown_enabled = config.unknown_enabled
+    state.phi_unknown = 0.05 if config.unknown_enabled else 0.0
+    state.S_unknown = 0.0
+
+    # PMD priors (allocated but not initialized here - caller must set)
+    state.omega_ancient = NULL
+    if config.hierarchical_enabled:
+        state.omega_ancient = <double*>calloc(n_reads, sizeof(double))
+        if state.omega_ancient == NULL:
+            free_em_state(state)
+            return NULL
+        # Default: uninformative prior (0.5)
+        for j in range(n_reads):
+            state.omega_ancient[j] = 0.5
+
+    # Copy config values
+    state.dirichlet_prior = config.dirichlet_prior
+    state.gamma_prior = config.gamma_prior
+    state.power_rho = config.power_rho
+    state.unknown_margin = config.unknown_margin
+    state.em_beta = 1.0  # Default temperature
+
+    return state
 
 
-cdef inline void _dominance_record_iteration_metrics(double base_strength,
-                                                     double concentration,
-                                                     double confidence_factor,
-                                                     double final_strength,
-                                                     bint adaptive) noexcept nogil:
-    global _dominance_iter_min_base, _dominance_iter_max_base, _dominance_iter_last_base
-    global _dominance_iter_last_concentration, _dominance_iter_last_confidence
-    global _dominance_iter_min_strength, _dominance_iter_max_strength, _dominance_iter_last_strength
-    global _dominance_iter_update_count, _dominance_iter_adaptive
-
-    _dominance_iter_adaptive = adaptive
-    _dominance_iter_last_base = base_strength
-    if base_strength < _dominance_iter_min_base:
-        _dominance_iter_min_base = base_strength
-    if base_strength > _dominance_iter_max_base:
-        _dominance_iter_max_base = base_strength
-
-    _dominance_iter_last_concentration = concentration
-    _dominance_iter_last_confidence = confidence_factor
-
-    if final_strength < _dominance_iter_min_strength:
-        _dominance_iter_min_strength = final_strength
-    if final_strength > _dominance_iter_max_strength:
-        _dominance_iter_max_strength = final_strength
-    _dominance_iter_last_strength = final_strength
-    _dominance_iter_update_count += 1
-
-
-cdef inline void _dominance_flush_iteration_metrics(int iteration) noexcept nogil:
-    global _dominance_iter_min_base, _dominance_iter_max_base, _dominance_iter_last_base
-    global _dominance_iter_last_concentration, _dominance_iter_last_confidence
-    global _dominance_iter_min_strength, _dominance_iter_max_strength, _dominance_iter_last_strength
-    global _dominance_iter_update_count, _dominance_iter_adaptive
-
-    if iteration < 0 or _dominance_iter_update_count == 0:
+cdef void free_em_state(EMState* state) noexcept nogil:
+    """Free EMState and all its arrays."""
+    if state == NULL:
         return
 
-    cdef double base_span = fabs(_dominance_iter_max_base - _dominance_iter_min_base)
-    cdef double strength_span = fabs(_dominance_iter_max_strength - _dominance_iter_min_strength)
+    if state.phi_weights != NULL:
+        free(state.phi_weights)
+    if state.phi_counts != NULL:
+        free(state.phi_counts)
+    if state.gamma_values != NULL:
+        free(state.gamma_values)
+    if state.S_anc != NULL:
+        free(state.S_anc)
+    if state.S_mod != NULL:
+        free(state.S_mod)
+    if state.omega_ancient != NULL:
+        free(state.omega_ancient)
 
-    if _dominance_iter_adaptive:
-        if strength_span < 5e-3 and base_span < 5e-3:
-            bf_nogil_logf_notime(
-                b"EM",
-                "dominance_regularization: iteration=%d base=%.3f concentration=%.3f final_strength=%.3f updates=%d",
-                iteration,
-                _dominance_iter_last_base,
-                _dominance_iter_last_concentration,
-                _dominance_iter_last_strength,
-                _dominance_iter_update_count,
-            )
-        else:
-            bf_nogil_logf_notime(
-                b"EM",
-                "dominance_regularization: iteration=%d base_range=[%.3f, %.3f] concentration=%.3f final_strength_range=[%.3f, %.3f] updates=%d",
-                iteration,
-                _dominance_iter_min_base if _dominance_iter_min_base != INFINITY else _dominance_iter_last_base,
-                _dominance_iter_max_base if _dominance_iter_max_base != -INFINITY else _dominance_iter_last_base,
-                _dominance_iter_last_concentration,
-                _dominance_iter_min_strength,
-                _dominance_iter_max_strength,
-                _dominance_iter_update_count,
-            )
-    else:
-        if strength_span < 5e-3:
-            bf_nogil_logf_notime(
-                b"EM",
-                "dominance_regularization: iteration=%d adaptive=false base=%.3f final_strength=%.3f updates=%d",
-                iteration,
-                _dominance_iter_last_base,
-                _dominance_iter_last_strength,
-                _dominance_iter_update_count,
-            )
-        else:
-            bf_nogil_logf_notime(
-                b"EM",
-                "dominance_regularization: iteration=%d adaptive=false base_range=[%.3f, %.3f] final_strength_range=[%.3f, %.3f] updates=%d",
-                iteration,
-                _dominance_iter_min_base if _dominance_iter_min_base != INFINITY else _dominance_iter_last_base,
-                _dominance_iter_max_base if _dominance_iter_max_base != -INFINITY else _dominance_iter_last_base,
-                _dominance_iter_min_strength,
-                _dominance_iter_max_strength,
-                _dominance_iter_update_count,
-            )
+    free(state)
 
-    _dominance_reset_iteration_metrics()
 
-cdef double calculate_dataset_entropy(MemoryPool* pool) except -1.0 nogil:
-    """Calculate normalized Shannon entropy of reference weight distribution.
-
-    Parameters
-    ----------
-    pool : MemoryPool*
-        Memory pool containing reference weights
-
-    Returns
-    -------
-    double
-        Normalized entropy [0, 1] where 0 is completely concentrated, 1 is uniform
-    """
-    cdef double entropy = 0.0
-    cdef double* weights = get_reference_weights(pool)
-    cdef uint32_t i
-    
-    for i in range(pool.reference_count):
-        if weights[i] > 1e-15:
-            entropy -= weights[i] * log(weights[i])
-    
-    cdef double max_entropy = log(<double>pool.reference_count)
-    return entropy / max_entropy if max_entropy > 0.0 else 0.0
-
-cdef double auto_tune_dominance_strength(MemoryPool* pool) except -1.0 nogil:
-    """Automatically determine dominance regularization strength from dataset properties.
-
-    Parameters
-    ----------
-    pool : MemoryPool*
-        Memory pool containing reference weights and alignments
-
-    Returns
-    -------
-    double
-        Recommended dominance strength clamped to [0.1, 2.5]
-    """
-    global _dominance_last_auto_entropy, _dominance_last_auto_density
-    global _dominance_last_auto_ref_factor, _dominance_last_auto_clamped
-    cdef double entropy = calculate_dataset_entropy(pool)
-    cdef double concentration = 1.0 - entropy
-    
-    cdef double avg_alignments_per_read = <double>pool.alignment_count / <double>pool.final_unique_reads
-    cdef double alignment_density = fmin(avg_alignments_per_read / 20.0, 1.0)
-    
-    cdef double ref_count_factor = fmax(0.1, fmin(1.0, 50000.0 / <double>pool.reference_count))
-    
-    cdef double auto_strength = 0.2 + 1.0 * concentration + 0.3 * alignment_density
-    auto_strength *= ref_count_factor
-    
-    cdef double final_strength = fmax(0.1, fmin(auto_strength, 2.5))
-    
-    cdef double tolerance = 1e-9
-    if (not _dominance_logged_mode or
-        fabs(entropy - _dominance_last_auto_entropy) > tolerance or
-        fabs(alignment_density - _dominance_last_auto_density) > tolerance or
-        fabs(ref_count_factor - _dominance_last_auto_ref_factor) > tolerance or
-        fabs(final_strength - _dominance_last_auto_clamped) > tolerance):
-        bf_nogil_logf_notime(
-            b"EM",
-            "dominance_regularization: auto_summary entropy=%.3f concentration=%.3f align_density=%.3f ref_factor=%.3f base=%.3f clamped=%.3f",
-            entropy,
-            concentration,
-            alignment_density,
-            ref_count_factor,
-            auto_strength,
-            final_strength,
-        )
-        _dominance_last_auto_entropy = entropy
-        _dominance_last_auto_density = alignment_density
-        _dominance_last_auto_ref_factor = ref_count_factor
-        _dominance_last_auto_clamped = final_strength
-    
-    return final_strength
-
-cdef double learn_entropy_threshold_from_data(MemoryPool* pool, EMAlgorithmConfig* config) except -1.0 nogil:
-    """Learn appropriate entropy threshold from dataset characteristics.
-
-    Parameters
-    ----------
-    pool : MemoryPool*
-        Memory pool with alignment data
-    config : EMAlgorithmConfig*
-        Configuration (returns manual threshold if set)
-
-    Returns
-    -------
-    double
-        Learned or configured entropy threshold
-    """
-    if config.entropy_confidence_threshold > 0.0:
-        return config.entropy_confidence_threshold
-    
-    cdef double n_refs = <double>pool.reference_count
-    cdef double alignment_density = <double>pool.alignment_count / <double>pool.final_unique_reads
-    
-    cdef double base_threshold = 0.1
-    cdef double density_adjustment = fmin(0.15, alignment_density / 30.0) 
-    bf_nogil_logf_notime(
-        b"EM",
-        "dominance_regularization: learned_entropy_threshold=%.3f",
-        base_threshold + density_adjustment,
-    )
-    return base_threshold + density_adjustment
-
-cdef double calculate_adaptive_dominance_strength(MemoryPool* pool, EMAlgorithmConfig* config) except -1.0 nogil:
-    global _dominance_iteration_context, _dominance_last_iteration
-    global _dominance_logged_mode, _dominance_logged_adaptive, _dominance_logged_skip
-    global _dominance_last_concentration, _dominance_last_entropy_threshold
-    global _dominance_last_base_strength, _dominance_last_mode_manual
-    global _dominance_last_final_strength
-    cdef double base_strength
-    cdef double dataset_entropy = calculate_dataset_entropy(pool)
-    cdef double final_strength_simple
-    # `calculate_dataset_entropy` already returns entropy normalized to [0,1]
-    # (entropy / log(n_refs)). Use 1 - dataset_entropy as the concentration
-    # measure to avoid double-scaling by log(n_refs).
-    cdef double concentration = 1.0 - dataset_entropy
-    cdef bint mode_manual
-    cdef double adaptive_strength
-    cdef double confidence_factor
-    cdef double final_strength
-    cdef double tolerance = 1e-9
-
-    if _dominance_iteration_context != _dominance_last_iteration:
-        _dominance_flush_iteration_metrics(_dominance_last_iteration)
-        _dominance_logged_skip = False
-        _dominance_last_iteration = _dominance_iteration_context
-
-    if concentration < config.entropy_confidence_threshold:
-        if (not _dominance_logged_skip or
-            fabs(concentration - _dominance_last_concentration) > tolerance or
-            fabs(config.entropy_confidence_threshold - _dominance_last_entropy_threshold) > tolerance):
-            bf_nogil_logf_notime(
-                b"EM",
-                "dominance_regularization: skipped concentration=%.3f threshold=%.3f",
-                concentration,
-                config.entropy_confidence_threshold,
-            )
-            _dominance_logged_skip = True
-            _dominance_last_concentration = concentration
-            _dominance_last_entropy_threshold = config.entropy_confidence_threshold
-        return 0.0
-    
-    _dominance_logged_skip = False
-    
-    if config.dominance_strength <= 0.0:
-        base_strength = auto_tune_dominance_strength(pool)
-        mode_manual = False
-    else:
-        base_strength = config.dominance_strength
-        mode_manual = True
-
-    if (not _dominance_logged_mode or
-        fabs(base_strength - _dominance_last_base_strength) > tolerance or
-        mode_manual != _dominance_last_mode_manual):
-        bf_nogil_logf_notime(
-            b"EM",
-            "dominance_regularization: mode=%s base_strength=%.3f",
-            b"manual" if mode_manual else b"auto",
-            base_strength,
-        )
-        _dominance_logged_mode = True
-        _dominance_last_base_strength = base_strength
-        _dominance_last_mode_manual = mode_manual
-    
-    if not config.use_adaptive_dominance:
-        final_strength_simple = fmax(config.min_penalty_strength,
-                                     fmin(base_strength, config.max_penalty_strength))
-        _dominance_record_iteration_metrics(
-            base_strength,
-            concentration,
-            concentration,
-            final_strength_simple,
-            False,
-        )
-        return final_strength_simple
-    
-    adaptive_strength = base_strength * (1.0 + config.entropy_scaling_factor * concentration)
-    confidence_factor = concentration
-    final_strength = adaptive_strength * confidence_factor
-    final_strength = fmax(config.min_penalty_strength, fmin(final_strength, config.max_penalty_strength))
-    
-    _dominance_record_iteration_metrics(
-        base_strength,
-        concentration,
-        confidence_factor,
-        final_strength,
-        True,
-    )
-    
-    return final_strength
-
-cdef inline double compute_dominance_penalty(double pi_j, double penalty_strength) except -1.0 nogil:
-    return exp(-penalty_strength * pi_j)
-
-cdef void execute_em_expectation_step_vectorized(MemoryPool* pool,
-                                                int32_t thread_count,
-                                                PrecomputedWeights* precomp,
-                                                EMAlgorithmConfig* config=NULL,
-                                                int32_t current_iteration=0) noexcept nogil:
-    """Execute E-step: calculate posterior probabilities and accumulate expected counts.
-
-    Computes posterior probabilities for each alignment and accumulates expected
-    reference counts. Uses parallel processing with thread-local accumulators.
-
-    Parameters
-    ----------
-    pool : MemoryPool*
-        Memory pool containing alignments
-    thread_count : int32_t
-        Number of threads for parallel processing
-    precomp : PrecomputedWeights*
-        Precomputed log weights for efficiency
-    config : EMAlgorithmConfig*
-        Optional configuration (unused, retained for API compatibility)
-    current_iteration : int32_t
-        Current iteration number (unused, retained for API compatibility)
-    """
-    cdef int32_t read_idx
-    cdef uint32_t ref_idx
-    cdef uint64_t start_pos, end_pos, alignment_idx
-    cdef uint32_t alignment_count
-    cdef float alignment_score
-    cdef double log_likelihood
-    cdef double log_weighted_score, log_normalizer, posterior
-    cdef double NEG_INF = -INFINITY
-    cdef double uniform_weight
-    cdef int thread_id, t, r
-    cdef uint32_t i
-    cdef int32_t ti
-    cdef int max_threads = thread_count
-    cdef double** thread_local_weights = NULL
-    cdef int* thread_used = NULL
-    cdef int32_t read_idx_c
-    cdef int32_t unique_read_count_i = <int32_t>pool.unique_read_count
-
-    cdef double* reference_weights = get_reference_weights(pool)
-    cdef double* new_weights = get_temp_buffer_A(pool)
-
-    update_precomputed_weights(precomp, reference_weights)
-
-    memset(new_weights, 0, pool.reference_count * sizeof(double))
-
-    thread_local_weights = <double**>calloc(max_threads, sizeof(double*))
-    thread_used = <int*>calloc(max_threads, sizeof(int))
-
-    if not thread_local_weights or not thread_used:
-        for read_idx in range(unique_read_count_i):
-            alignment_count = pool.read_alignment_counts[read_idx]
-            if alignment_count == 0:
-                continue
-
-            start_pos = pool.read_alignment_starts[read_idx]
-            end_pos = start_pos + alignment_count
-
-            if alignment_count == 1:
-                ref_idx = pool.alignments[start_pos].reference_index
-                if ref_idx < pool.reference_count:
-                    new_weights[ref_idx] += 1.0
-                continue
-
-            log_normalizer = NEG_INF
-
-            for alignment_idx in range(start_pos, end_pos):
-                ref_idx = pool.alignments[alignment_idx].reference_index
-                if ref_idx < pool.reference_count:
-                    alignment_score = pool.alignments[alignment_idx].alignment_score
-                    log_likelihood = <double>alignment_score
-                    log_weighted_score = precomp.log_weights[ref_idx] + log_likelihood
-                    log_normalizer = stable_log_sum_exp(log_normalizer, log_weighted_score)
-
-            if log_normalizer > NEG_INF + 1e10:
-                for alignment_idx in range(start_pos, end_pos):
-                    ref_idx = pool.alignments[alignment_idx].reference_index
-                    if ref_idx < pool.reference_count:
-                        alignment_score = pool.alignments[alignment_idx].alignment_score
-                        log_likelihood = <double>alignment_score
-                        log_weighted_score = precomp.log_weights[ref_idx] + log_likelihood
-                        posterior = exp(log_weighted_score - log_normalizer)
-                        posterior = fmax(fmin(posterior, 0.999), 1e-12)
-                        new_weights[ref_idx] += posterior
-            else:
-                uniform_weight = 1.0 / alignment_count if alignment_count > 0 else 0.0
-                for alignment_idx in range(start_pos, end_pos):
-                    ref_idx = pool.alignments[alignment_idx].reference_index
-                    if ref_idx < pool.reference_count:
-                        new_weights[ref_idx] += uniform_weight
+cdef void copy_em_state(EMState* dest, EMState* src) noexcept nogil:
+    """Deep copy EMState (assumes dest is already allocated with same dimensions)."""
+    if dest == NULL or src == NULL:
         return
 
-    for thread_id in range(max_threads):
-        thread_local_weights[thread_id] = <double*>calloc(pool.reference_count, sizeof(double))
-        if not thread_local_weights[thread_id]:
-            for t in range(thread_id):
-                if thread_local_weights[t]:
-                    free(thread_local_weights[t])
-            free(thread_local_weights)
-            free(thread_used)
-            execute_em_expectation_step_vectorized(pool, 1, precomp, config, current_iteration)
+    memcpy(dest.phi_weights, src.phi_weights, src.n_refs * sizeof(double))
+    memcpy(dest.phi_counts, src.phi_counts, src.n_refs * sizeof(double))
+
+    if src.hierarchical_enabled and dest.gamma_values != NULL:
+        memcpy(dest.gamma_values, src.gamma_values, src.n_refs * sizeof(double))
+        memcpy(dest.S_anc, src.S_anc, src.n_refs * sizeof(double))
+        memcpy(dest.S_mod, src.S_mod, src.n_refs * sizeof(double))
+
+    dest.phi_unknown = src.phi_unknown
+    dest.S_unknown = src.S_unknown
+
+    # omega_ancient is FIXED, no need to copy
+
+
+cdef void reset_accumulators(EMState* state) noexcept nogil:
+    """Reset E-step accumulators to zero."""
+    if state == NULL:
+        return
+
+    memset(state.phi_counts, 0, state.n_refs * sizeof(double))
+
+    if state.hierarchical_enabled:
+        memset(state.S_anc, 0, state.n_refs * sizeof(double))
+        memset(state.S_mod, 0, state.n_refs * sizeof(double))
+
+    state.S_unknown = 0.0
+
+
+cdef void normalize_phi(EMState* state) noexcept nogil:
+    """Normalize phi weights to sum to 1 (including unknown if enabled)."""
+    if state == NULL:
+        return
+
+    cdef double total = 0.0
+    cdef uint32_t j
+
+    for j in range(state.n_refs):
+        state.phi_weights[j] = fmax(state.phi_weights[j], 1e-15)
+        total += state.phi_weights[j]
+
+    if state.unknown_enabled:
+        state.phi_unknown = fmax(state.phi_unknown, 1e-15)
+        total += state.phi_unknown
+
+    if total > 0:
+        for j in range(state.n_refs):
+            state.phi_weights[j] /= total
+        if state.unknown_enabled:
+            state.phi_unknown /= total
+
+
+# =============================================================================
+# Likelihood Computation Helpers
+# =============================================================================
+
+cdef inline double compute_log_L_ancient(Alignment* aln,
+                                          float D_avg_5p, float D_avg_3p,
+                                          float epsilon) noexcept nogil:
+    """
+    Log-likelihood under ancient DNA model.
+
+    For ancient DNA: expect damage at terminal positions (C->T at 5', G->A at 3').
+    """
+    cdef double log_L = 0.0
+    cdef uint16_t aligned = aln.aligned_length
+    cdef uint16_t matches = aln.match_count
+    cdef uint8_t ct_5p = aln.ct_5p_count
+    cdef uint8_t ga_3p = aln.ga_3p_count
+    cdef uint8_t c_at_5p = aln.c_at_5p_count
+    cdef uint8_t g_at_3p = aln.g_at_3p_count
+    cdef int other_mm
+    cdef double D_avg, actual_opp, survived, observed_damage
+
+    if aligned == 0:
+        return LOG_ZERO
+
+    other_mm = aligned - matches - ct_5p - ga_3p
+    if other_mm < 0:
+        other_mm = 0
+
+    D_avg = (D_avg_5p + D_avg_3p) / 2.0
+    actual_opp = <double>(c_at_5p + g_at_3p)
+    observed_damage = <double>(ct_5p + ga_3p)
+    survived = fmax(0.0, actual_opp - observed_damage)
+
+    cdef double p_damage_ancient = D_avg + (1.0 - D_avg) * epsilon / 3.0
+    cdef double p_survive_ancient = (1.0 - D_avg) * (1.0 - epsilon / 3.0)
+    cdef double log_p_damage = log(fmax(p_damage_ancient, 1e-10))
+    cdef double log_p_survive = log(fmax(p_survive_ancient, 1e-10))
+    cdef double log_p_match = log(fmax(1.0 - epsilon, 1e-10))
+    cdef double log_p_error = log(fmax(epsilon / 3.0, 1e-10))
+
+    log_L += observed_damage * log_p_damage
+    log_L += survived * log_p_survive
+    log_L += matches * log_p_match
+    log_L += other_mm * log_p_error
+
+    return log_L
+
+
+cdef inline double compute_log_L_modern(Alignment* aln, float epsilon) noexcept nogil:
+    """
+    Log-likelihood under modern DNA model.
+
+    For modern DNA: C->T and G->A are just sequencing errors.
+    """
+    cdef double log_L = 0.0
+    cdef uint16_t aligned = aln.aligned_length
+    cdef uint16_t matches = aln.match_count
+    cdef uint8_t ct_5p = aln.ct_5p_count
+    cdef uint8_t ga_3p = aln.ga_3p_count
+    cdef uint8_t c_at_5p = aln.c_at_5p_count
+    cdef uint8_t g_at_3p = aln.g_at_3p_count
+    cdef int other_mm
+    cdef double actual_opp, survived, observed_damage
+
+    if aligned == 0:
+        return LOG_ZERO
+
+    other_mm = aligned - matches - ct_5p - ga_3p
+    if other_mm < 0:
+        other_mm = 0
+
+    actual_opp = <double>(c_at_5p + g_at_3p)
+    observed_damage = <double>(ct_5p + ga_3p)
+    survived = fmax(0.0, actual_opp - observed_damage)
+
+    cdef double log_p_error = log(fmax(epsilon / 3.0, 1e-10))
+    cdef double log_p_survive = log(fmax(1.0 - epsilon / 3.0, 1e-10))
+    cdef double log_p_match = log(fmax(1.0 - epsilon, 1e-10))
+
+    log_L += observed_damage * log_p_error
+    log_L += survived * log_p_survive
+    log_L += matches * log_p_match
+    log_L += other_mm * log_p_error
+
+    return log_L
+
+
+# =============================================================================
+# E-Step with optimizations
+# =============================================================================
+
+# Maximum alignments per read for scratch buffer (stack allocation)
+DEF MAX_SCRATCH_SIZE = 64
+
+
+cdef inline void process_read_single(
+    EMState* state, MemoryPool* pool, double* log_phi,
+    uint32_t read_idx, uint64_t start_pos,
+    double* accum_phi, double* accum_S_anc, double* accum_S_mod,
+    float D_5p, float D_3p, float epsilon,
+    bint use_hierarchical
+) noexcept nogil:
+    """Fast path for reads with single alignment."""
+    cdef Alignment* aln = &pool.alignments[start_pos]
+    cdef uint32_t ref_idx = aln.reference_index
+    cdef double gamma_j, omega_anc, log_omega_anc, log_omega_mod
+    cdef double log_gamma, log_1m_gamma, log_L_anc, log_L_mod, log_L_mix, p_anc
+
+    if ref_idx >= state.n_refs:
+        return
+
+    accum_phi[ref_idx] += 1.0
+
+    if use_hierarchical:
+        gamma_j = state.gamma_values[ref_idx]
+        omega_anc = 0.5
+        if state.omega_ancient != NULL:
+            omega_anc = state.omega_ancient[read_idx]
+        log_omega_anc = log(fmax(omega_anc, 1e-10))
+        log_omega_mod = log(fmax(1.0 - omega_anc, 1e-10))
+        log_gamma = log(fmax(gamma_j, 1e-10))
+        log_1m_gamma = log(fmax(1.0 - gamma_j, 1e-10))
+        log_L_anc = compute_log_L_ancient(aln, D_5p, D_3p, epsilon)
+        log_L_mod = compute_log_L_modern(aln, epsilon)
+        log_L_mix = stable_log_sum_exp(
+            log_gamma + log_omega_anc + log_L_anc,
+            log_1m_gamma + log_omega_mod + log_L_mod
+        )
+        p_anc = exp(log_gamma + log_omega_anc + log_L_anc - log_L_mix)
+        p_anc = fmax(fmin(p_anc, 0.999), 0.001)
+        accum_S_anc[ref_idx] += p_anc
+        accum_S_mod[ref_idx] += 1.0 - p_anc
+
+
+cdef inline void process_read_multi(
+    EMState* state, MemoryPool* pool, double* log_phi, double log_phi_u,
+    uint32_t read_idx, uint64_t start_pos, uint64_t end_pos, uint32_t alignment_count,
+    double* accum_phi, double* accum_S_anc, double* accum_S_mod, double* accum_S_unknown,
+    float D_5p, float D_3p, float epsilon, double unknown_margin,
+    bint use_hierarchical, bint use_unknown
+) noexcept nogil:
+    """Process read with multiple alignments using scratch buffer."""
+    cdef uint32_t n_refs = state.n_refs
+    cdef uint32_t ref_idx, i, alignment_idx
+    cdef double log_normalizer, log_weighted, posterior, log_max, s_max, s_unknown
+    cdef double alignment_score, omega_anc, omega_mod, log_omega_anc, log_omega_mod
+    cdef double gamma_j, log_gamma, log_1m_gamma, log_L_anc, log_L_mod, log_L_mix
+    cdef double log_anc_term, p_anc, unknown_posterior
+    cdef Alignment* aln
+
+    # Scratch buffers (stack for small, heap for large)
+    cdef double scratch_log_w[MAX_SCRATCH_SIZE]
+    cdef double scratch_p_anc[MAX_SCRATCH_SIZE]
+    cdef uint32_t scratch_refs[MAX_SCRATCH_SIZE]
+    cdef double* heap_log_w = NULL
+    cdef double* heap_p_anc = NULL
+    cdef uint32_t* heap_refs = NULL
+    cdef double* log_w_buf
+    cdef double* p_anc_buf
+    cdef uint32_t* ref_buf
+
+    # Select buffer
+    if alignment_count <= MAX_SCRATCH_SIZE:
+        log_w_buf = scratch_log_w
+        p_anc_buf = scratch_p_anc
+        ref_buf = scratch_refs
+    else:
+        heap_log_w = <double*>malloc(alignment_count * sizeof(double))
+        heap_refs = <uint32_t*>malloc(alignment_count * sizeof(uint32_t))
+        if use_hierarchical:
+            heap_p_anc = <double*>malloc(alignment_count * sizeof(double))
+        if heap_log_w == NULL or heap_refs == NULL:
+            if heap_log_w != NULL: free(heap_log_w)
+            if heap_refs != NULL: free(heap_refs)
+            if heap_p_anc != NULL: free(heap_p_anc)
             return
+        log_w_buf = heap_log_w
+        p_anc_buf = heap_p_anc
+        ref_buf = heap_refs
 
-    cdef uint32_t ref_count = pool.reference_count
-    cdef double* log_weights_ptr = precomp.log_weights  # Standard log weights
+    # Get PMD prior
+    omega_anc = 0.5
+    omega_mod = 0.5
+    if use_hierarchical and state.omega_ancient != NULL:
+        omega_anc = state.omega_ancient[read_idx]
+        omega_mod = 1.0 - omega_anc
+    log_omega_anc = log(fmax(omega_anc, 1e-10))
+    log_omega_mod = log(fmax(omega_mod, 1e-10))
 
-    for read_idx_c in prange(unique_read_count_i, nogil=True, schedule='static', num_threads=thread_count):
-        if read_idx_c + 1 < unique_read_count_i:
-            PREFETCH_READ(&pool.read_alignment_starts[read_idx_c + 1])
-            PREFETCH_READ(&pool.read_alignment_counts[read_idx_c + 1])
-        thread_id = threadid()
-        if thread_id >= max_threads:
+    # First pass: compute log weights and find max
+    log_max = NEG_INF
+    s_max = NEG_INF
+    i = 0
+
+    for alignment_idx in range(start_pos, end_pos):
+        aln = &pool.alignments[alignment_idx]
+        ref_idx = aln.reference_index
+
+        # Prefetch next alignment
+        if alignment_idx + 1 < end_pos:
+            PREFETCH_READ(&pool.alignments[alignment_idx + 1])
+
+        if ref_idx >= n_refs:
             continue
 
-        thread_used[thread_id] = 1
-        read_idx = read_idx_c
+        ref_buf[i] = ref_idx
+        alignment_score = <double>aln.alignment_score
 
+        if alignment_score > s_max:
+            s_max = alignment_score
+
+        if use_hierarchical:
+            gamma_j = state.gamma_values[ref_idx]
+            log_gamma = log(fmax(gamma_j, 1e-10))
+            log_1m_gamma = log(fmax(1.0 - gamma_j, 1e-10))
+            log_L_anc = compute_log_L_ancient(aln, D_5p, D_3p, epsilon)
+            log_L_mod = compute_log_L_modern(aln, epsilon)
+            log_anc_term = log_gamma + log_omega_anc + log_L_anc
+            log_L_mix = stable_log_sum_exp(
+                log_anc_term,
+                log_1m_gamma + log_omega_mod + log_L_mod
+            )
+            log_weighted = log_phi[ref_idx] + log_L_mix
+            p_anc_buf[i] = exp(log_anc_term - log_L_mix)
+            p_anc_buf[i] = fmax(fmin(p_anc_buf[i], 0.999), 0.001)
+        else:
+            log_weighted = log_phi[ref_idx] + alignment_score
+
+        log_w_buf[i] = log_weighted
+        if log_weighted > log_max:
+            log_max = log_weighted
+        i += 1
+
+    if i == 0:
+        if heap_log_w != NULL: free(heap_log_w)
+        if heap_refs != NULL: free(heap_refs)
+        if heap_p_anc != NULL: free(heap_p_anc)
+        return
+
+    # Compute normalizer with max-subtraction
+    log_normalizer = 0.0
+    for alignment_idx in range(i):
+        log_normalizer += exp(log_w_buf[alignment_idx] - log_max)
+
+    if use_unknown:
+        s_unknown = s_max - unknown_margin
+        log_weighted = log_phi_u + s_unknown
+        log_normalizer += exp(log_weighted - log_max)
+
+    log_normalizer = log_max + log(log_normalizer)
+
+    if log_normalizer <= NEG_INF + 1e10:
+        if heap_log_w != NULL: free(heap_log_w)
+        if heap_refs != NULL: free(heap_refs)
+        if heap_p_anc != NULL: free(heap_p_anc)
+        return
+
+    # Second pass: compute posteriors from cached values
+    for alignment_idx in range(i):
+        ref_idx = ref_buf[alignment_idx]
+        posterior = exp(log_w_buf[alignment_idx] - log_normalizer)
+        posterior = fmax(fmin(posterior, 0.999), 1e-12)
+
+        PREFETCH_WRITE(&accum_phi[ref_idx])
+        accum_phi[ref_idx] += posterior
+
+        if use_hierarchical:
+            p_anc = p_anc_buf[alignment_idx]
+            accum_S_anc[ref_idx] += posterior * p_anc
+            accum_S_mod[ref_idx] += posterior * (1.0 - p_anc)
+
+    if use_unknown:
+        unknown_posterior = exp(log_phi_u + s_unknown - log_normalizer)
+        unknown_posterior = fmax(fmin(unknown_posterior, 0.999), 1e-12)
+        accum_S_unknown[0] += unknown_posterior
+
+    if heap_log_w != NULL: free(heap_log_w)
+    if heap_refs != NULL: free(heap_refs)
+    if heap_p_anc != NULL: free(heap_p_anc)
+
+
+cdef void e_step(EMState* state, void* pool_ptr,
+                 EMConfig* config) noexcept nogil:
+    """E-step computing responsibilities with optimizations for speed."""
+    cdef MemoryPool* pool = <MemoryPool*>pool_ptr
+    cdef uint32_t read_idx, ref_idx
+    cdef uint64_t start_pos, end_pos
+    cdef uint32_t alignment_count, n_refs = state.n_refs
+    cdef uint32_t n_reads = pool.unique_read_count
+
+    cdef float D_5p = config.D_avg_5p
+    cdef float D_3p = config.D_avg_3p
+    cdef float epsilon = config.epsilon_error
+    cdef double unknown_margin = config.unknown_margin
+    cdef bint use_unknown = state.unknown_enabled
+    cdef bint use_hierarchical = state.hierarchical_enabled
+
+    cdef double* log_phi = <double*>malloc(n_refs * sizeof(double))
+    cdef double log_phi_u
+
+    # Thread-local accumulators
+    cdef int n_threads = config.thread_count if config.thread_count > 0 else 1
+    cdef int tid
+    cdef double* thread_phi_counts = NULL
+    cdef double* thread_S_anc = NULL
+    cdef double* thread_S_mod = NULL
+    cdef double* thread_S_unknown = NULL
+    cdef size_t thread_buf_size
+    cdef double* my_phi
+    cdef double* my_S_anc
+    cdef double* my_S_mod
+    cdef double* my_S_unknown
+
+    if log_phi == NULL:
+        return
+
+    # Reset accumulators
+    reset_accumulators(state)
+
+    # Precompute log(phi_j)
+    for ref_idx in range(n_refs):
+        log_phi[ref_idx] = log(fmax(state.phi_weights[ref_idx], 1e-15))
+
+    log_phi_u = log(fmax(state.phi_unknown, 1e-15)) if use_unknown else NEG_INF
+
+    # Allocate thread-local accumulators
+    if n_threads > 1:
+        thread_buf_size = <size_t>n_threads * n_refs
+        thread_phi_counts = <double*>calloc(thread_buf_size, sizeof(double))
+        if use_hierarchical:
+            thread_S_anc = <double*>calloc(thread_buf_size, sizeof(double))
+            thread_S_mod = <double*>calloc(thread_buf_size, sizeof(double))
+        if use_unknown:
+            thread_S_unknown = <double*>calloc(n_threads, sizeof(double))
+
+        if thread_phi_counts == NULL:
+            n_threads = 1
+
+    # Process reads in parallel
+    for read_idx in prange(n_reads, nogil=True, num_threads=n_threads,
+                           schedule='dynamic', chunksize=256):
+        tid = threadid() if n_threads > 1 else 0
         alignment_count = pool.read_alignment_counts[read_idx]
         if alignment_count == 0:
             continue
@@ -516,1328 +567,844 @@ cdef void execute_em_expectation_step_vectorized(MemoryPool* pool,
         start_pos = pool.read_alignment_starts[read_idx]
         end_pos = start_pos + alignment_count
 
-        if alignment_count == 1:
-            ref_idx = pool.alignments[start_pos].reference_index
-            if ref_idx < ref_count:
-                thread_local_weights[thread_id][ref_idx] += 1.0
+        # Select accumulator buffers
+        if n_threads > 1:
+            my_phi = &thread_phi_counts[tid * n_refs]
+            my_S_anc = &thread_S_anc[tid * n_refs] if use_hierarchical else NULL
+            my_S_mod = &thread_S_mod[tid * n_refs] if use_hierarchical else NULL
+            my_S_unknown = &thread_S_unknown[tid] if use_unknown else NULL
+        else:
+            my_phi = state.phi_counts
+            my_S_anc = state.S_anc
+            my_S_mod = state.S_mod
+            my_S_unknown = &state.S_unknown
+
+        # Fast path for single alignment
+        if alignment_count == 1 and not use_unknown:
+            process_read_single(
+                state, pool, log_phi, read_idx, start_pos,
+                my_phi, my_S_anc, my_S_mod,
+                D_5p, D_3p, epsilon, use_hierarchical
+            )
+        else:
+            process_read_multi(
+                state, pool, log_phi, log_phi_u,
+                read_idx, start_pos, end_pos, alignment_count,
+                my_phi, my_S_anc, my_S_mod, my_S_unknown,
+                D_5p, D_3p, epsilon, unknown_margin,
+                use_hierarchical, use_unknown
+            )
+
+    # Reduce thread-local accumulators
+    if n_threads > 1 and thread_phi_counts != NULL:
+        for tid in range(n_threads):
+            for ref_idx in range(n_refs):
+                state.phi_counts[ref_idx] += thread_phi_counts[tid * n_refs + ref_idx]
+                if use_hierarchical and thread_S_anc != NULL:
+                    state.S_anc[ref_idx] += thread_S_anc[tid * n_refs + ref_idx]
+                    state.S_mod[ref_idx] += thread_S_mod[tid * n_refs + ref_idx]
+            if use_unknown and thread_S_unknown != NULL:
+                state.S_unknown += thread_S_unknown[tid]
+
+        free(thread_phi_counts)
+        if thread_S_anc != NULL: free(thread_S_anc)
+        if thread_S_mod != NULL: free(thread_S_mod)
+        if thread_S_unknown != NULL: free(thread_S_unknown)
+
+    free(log_phi)
+
+
+# =============================================================================
+# Unified M-Step (Standard EM in phi-space, NO power transform)
+# =============================================================================
+
+cdef void m_step(EMState* state, EMConfig* config) noexcept nogil:
+    """
+    Unified M-step updating all parameters using expected counts.
+
+    CRITICAL: NO power transform here. We optimize in phi-space.
+
+    phi_j^new = (E[c_j] + alpha) / (sum E[c_j'] + J*alpha + unknown terms)
+    gamma_j^new = (S_anc_j + alpha_gamma) / (S_anc_j + S_mod_j + 2*alpha_gamma)
+    """
+    cdef double total_count = 0.0
+    cdef double alpha = config.dirichlet_prior
+    cdef double alpha_gamma = config.gamma_prior
+    cdef uint32_t j
+    cdef double denom
+
+    # Compute total for normalization
+    for j in range(state.n_refs):
+        total_count += state.phi_counts[j] + alpha
+
+    if state.unknown_enabled:
+        total_count += state.S_unknown + alpha
+
+    if total_count <= 0:
+        total_count = 1.0
+
+    # Update phi weights (MAP with Dirichlet prior)
+    for j in range(state.n_refs):
+        state.phi_weights[j] = (state.phi_counts[j] + alpha) / total_count
+
+    # Update unknown weight
+    if state.unknown_enabled:
+        state.phi_unknown = (state.S_unknown + alpha) / total_count
+
+    # Update gamma values (hierarchical)
+    # Clamp to [eps, 1-eps] for numerical stability when taking logs
+    cdef double gamma_eps = 1e-6
+    if state.hierarchical_enabled:
+        for j in range(state.n_refs):
+            denom = state.S_anc[j] + state.S_mod[j] + 2.0 * alpha_gamma
+            if denom > 0:
+                state.gamma_values[j] = (state.S_anc[j] + alpha_gamma) / denom
+                # Clamp for numerical safety
+                state.gamma_values[j] = fmax(gamma_eps, fmin(1.0 - gamma_eps, state.gamma_values[j]))
+            else:
+                state.gamma_values[j] = 0.5  # Uninformative default
+
+    # Ensure proper normalization
+    normalize_phi(state)
+
+
+# =============================================================================
+# Log-Likelihood Computation
+# =============================================================================
+
+cdef double compute_log_likelihood(EMState* state, void* pool_ptr,
+                                   EMConfig* config) noexcept nogil:
+    """
+    Compute total log-likelihood of current parameter values.
+
+    log P(X | phi, gamma) = sum_i log sum_j phi_j × f(x_i | j, gamma_j)
+    """
+    cdef MemoryPool* pool = <MemoryPool*>pool_ptr
+    cdef uint32_t read_idx, ref_idx, alignment_idx
+    cdef uint64_t start_pos, end_pos
+    cdef uint32_t alignment_count
+    cdef double total_ll = 0.0
+    cdef double log_normalizer, log_weighted
+    cdef double log_phi_j, alignment_score
+    cdef int32_t valid_reads = 0
+
+    # Hierarchical variables
+    cdef double log_L_anc, log_L_mod, log_L_mix
+    cdef double gamma_j, omega_anc, omega_mod
+    cdef double log_gamma, log_1m_gamma, log_omega_anc, log_omega_mod
+    cdef float D_5p = config.D_avg_5p
+    cdef float D_3p = config.D_avg_3p
+    cdef float epsilon = config.epsilon_error
+    cdef bint use_hierarchical = state.hierarchical_enabled
+
+    # Unknown variables
+    cdef double log_phi_u, s_max, s_unknown
+    cdef double unknown_margin = config.unknown_margin
+    cdef bint use_unknown = state.unknown_enabled
+
+    cdef Alignment* aln
+    cdef double* log_phi = <double*>malloc(state.n_refs * sizeof(double))
+
+    if log_phi == NULL:
+        return NEG_INF
+
+    # Precompute log(phi_j)
+    for ref_idx in range(state.n_refs):
+        log_phi[ref_idx] = log(fmax(state.phi_weights[ref_idx], 1e-15))
+
+    log_phi_u = log(fmax(state.phi_unknown, 1e-15)) if use_unknown else NEG_INF
+
+    for read_idx in range(pool.unique_read_count):
+        alignment_count = pool.read_alignment_counts[read_idx]
+        if alignment_count == 0:
             continue
 
+        start_pos = pool.read_alignment_starts[read_idx]
+        end_pos = start_pos + alignment_count
+
+        # Get PMD prior
+        omega_anc = 0.5
+        omega_mod = 0.5
+        if use_hierarchical and state.omega_ancient != NULL:
+            omega_anc = state.omega_ancient[read_idx]
+            omega_mod = 1.0 - omega_anc
+        log_omega_anc = log(fmax(omega_anc, 1e-10))
+        log_omega_mod = log(fmax(omega_mod, 1e-10))
+
+        # Find max score for unknown
+        s_max = NEG_INF
+        if use_unknown:
+            for alignment_idx in range(start_pos, end_pos):
+                aln = &pool.alignments[alignment_idx]
+                if aln.alignment_score > s_max:
+                    s_max = aln.alignment_score
+            s_unknown = s_max - unknown_margin
+
+        # Compute log P(read | phi)
         log_normalizer = NEG_INF
 
         for alignment_idx in range(start_pos, end_pos):
-            if alignment_idx + 1 < end_pos:
-                PREFETCH_READ(&pool.alignments[alignment_idx + 1].alignment_score)
-            ref_idx = pool.alignments[alignment_idx].reference_index
-            if ref_idx < ref_count:
-                alignment_score = pool.alignments[alignment_idx].alignment_score
-                log_likelihood = <double>alignment_score
-                log_weighted_score = log_weights_ptr[ref_idx] + log_likelihood
-                log_normalizer = stable_log_sum_exp(log_normalizer, log_weighted_score)
+            aln = &pool.alignments[alignment_idx]
+            ref_idx = aln.reference_index
+            if ref_idx >= state.n_refs:
+                continue
+
+            alignment_score = <double>aln.alignment_score
+
+            if use_hierarchical:
+                gamma_j = state.gamma_values[ref_idx]
+                log_gamma = log(fmax(gamma_j, 1e-10))
+                log_1m_gamma = log(fmax(1.0 - gamma_j, 1e-10))
+
+                log_L_anc = compute_log_L_ancient(aln, D_5p, D_3p, epsilon)
+                log_L_mod = compute_log_L_modern(aln, epsilon)
+
+                log_L_mix = stable_log_sum_exp(
+                    log_gamma + log_omega_anc + log_L_anc,
+                    log_1m_gamma + log_omega_mod + log_L_mod
+                )
+
+                log_weighted = log_phi[ref_idx] + log_L_mix
+            else:
+                log_weighted = log_phi[ref_idx] + alignment_score
+
+            log_normalizer = stable_log_sum_exp(log_normalizer, log_weighted)
+
+        if use_unknown:
+            log_weighted = log_phi_u + s_unknown
+            log_normalizer = stable_log_sum_exp(log_normalizer, log_weighted)
 
         if log_normalizer > NEG_INF + 1e10:
-            for alignment_idx in range(start_pos, end_pos):
-                if alignment_idx + 1 < end_pos:
-                    PREFETCH_READ(&pool.alignments[alignment_idx + 1].alignment_score)
-                ref_idx = pool.alignments[alignment_idx].reference_index
-                if ref_idx < ref_count:
-                    alignment_score = pool.alignments[alignment_idx].alignment_score
-                    log_likelihood = <double>alignment_score
-                    log_weighted_score = log_weights_ptr[ref_idx] + log_likelihood
-                    posterior = exp(log_weighted_score - log_normalizer)
-                    posterior = fmax(fmin(posterior, 0.999), 1e-12)
-                    thread_local_weights[thread_id][ref_idx] += posterior
-        else:
-            uniform_weight = 1.0 / alignment_count if alignment_count > 0 else 0.0
-            for alignment_idx in range(start_pos, end_pos):
-                ref_idx = pool.alignments[alignment_idx].reference_index
-                if ref_idx < ref_count:
-                    thread_local_weights[thread_id][ref_idx] += uniform_weight
-
-    cdef uint32_t** thread_touched_ref_idx = <uint32_t**>calloc(max_threads, sizeof(uint32_t*))
-    cdef int* thread_touched_count = <int*>calloc(max_threads, sizeof(int))
-    for thread_id in range(max_threads):
-        thread_touched_ref_idx[thread_id] = <uint32_t*>calloc(ref_count, sizeof(uint32_t))
-        thread_touched_count[thread_id] = 0
-
-    for thread_id in range(max_threads):
-        if thread_used[thread_id]:
-            for ref_idx in range(ref_count):
-                if thread_local_weights[thread_id][ref_idx] != 0.0:
-                    thread_touched_ref_idx[thread_id][thread_touched_count[thread_id]] = ref_idx;
-                    thread_touched_count[thread_id] += 1
-
-    for thread_id in range(max_threads):
-        if thread_used[thread_id]:
-            for ti in range(thread_touched_count[thread_id]):
-                ref_idx = thread_touched_ref_idx[thread_id][ti]
-                new_weights[ref_idx] += thread_local_weights[thread_id][ref_idx]
-
-    for thread_id in range(max_threads):
-        if thread_local_weights[thread_id]:
-            free(thread_local_weights[thread_id])
-        if thread_touched_ref_idx[thread_id]:
-            free(thread_touched_ref_idx[thread_id])
-    free(thread_local_weights)
-    free(thread_touched_ref_idx)
-    free(thread_touched_count)
-    free(thread_used)
-
-cdef void execute_em_maximization_step_vectorized(MemoryPool* pool,
-                                                 double alpha_prior,
-                                                 PrecomputedWeights* precomp,
-                                                 EMAlgorithmConfig* config=NULL,
-                                                 int current_iteration=0,
-                                                 double current_ll=-1e20,
-                                                 double prev_ll=-1e20) noexcept nogil:
-    """Execute M-step: update reference weights from expected counts.
-
-    Normalizes accumulated counts with optional Dirichlet prior and dominance
-    regularization. Detects pathological convergence and activates emergency
-    regularization if enabled.
-
-    Parameters
-    ----------
-    pool : MemoryPool*
-        Memory pool containing weights
-    alpha_prior : double
-        Dirichlet prior strength for regularization
-    precomp : PrecomputedWeights*
-        Precomputed weights structure (marked dirty after update)
-    config : EMAlgorithmConfig*
-        Optional configuration for regularization
-    current_iteration : int
-        Current iteration number
-    current_ll : double
-        Current log-likelihood
-    prev_ll : double
-        Previous log-likelihood
-    """
-    global _dominance_iteration_context
-    cdef double* reference_weights = get_reference_weights(pool)
-    cdef double* accumulated_weights = get_temp_buffer_A(pool)
-    cdef double total_sum = 0.0
-    cdef double effective_prior = fmax(alpha_prior, 0.01)
-    cdef uint32_t i
-    cdef double inv_total
-    cdef double adaptive_strength
-    cdef double current_weight
-    cdef double penalty
-    
-    if (config and config.enable_emergency_regularization and 
-        not config.dominance_regularization_active and current_iteration > 0):
-        
-        if detect_pathological_convergence(pool, config, current_iteration, current_ll, prev_ll):
-            bf_nogil_logf_notime(b"EM", "EMERGENCY ACTIVATION: Dominance regularization enabled at iteration %d", 
-                   current_iteration)
-            config.dominance_regularization_active = True
-            config.dominance_strength = 2.0
-            config.entropy_scaling_factor = 2.0
-            config.min_penalty_strength = 0.5
-    
-    for i in range(pool.reference_count):
-        reference_weights[i] = accumulated_weights[i] + effective_prior
-        total_sum += reference_weights[i]
-    
-    if total_sum > 1e-15:
-        inv_total = 1.0 / total_sum
-        for i in range(pool.reference_count):
-            reference_weights[i] *= inv_total
-    else:
-        inv_total = 1.0 / pool.reference_count
-        for i in range(pool.reference_count):
-            reference_weights[i] = inv_total
-        precomp.weights_dirty = True
-        return
-    
-    if config and (config.enable_dominance_regularization or config.dominance_regularization_active):
-        _dominance_iteration_context = current_iteration
-        adaptive_strength = calculate_adaptive_dominance_strength(pool, config)
-        
-        if adaptive_strength > 0.0:
-            total_sum = 0.0
-            for i in range(pool.reference_count):
-                current_weight = reference_weights[i]
-                penalty = exp(-adaptive_strength * current_weight)
-                reference_weights[i] *= penalty
-                total_sum += reference_weights[i]
-            
-            if total_sum > 1e-15:
-                inv_total = 1.0 / total_sum
-                for i in range(pool.reference_count):
-                    reference_weights[i] *= inv_total
-            
-    for i in range(pool.reference_count):
-        reference_weights[i] = fmax(fmin(reference_weights[i], 0.999), 1e-12)
-    
-    precomp.weights_dirty = True
-
-cdef double compute_log_likelihood_vectorized(MemoryPool* pool,
-                                            PrecomputedWeights* precomp) except -1.0 nogil:
-    """Calculate total log-likelihood of current weight assignment.
-
-    Parameters
-    ----------
-    pool : MemoryPool*
-        Memory pool containing alignments
-    precomp : PrecomputedWeights*
-        Precomputed log weights
-
-    Returns
-    -------
-    double
-        Mean log-likelihood per read
-    """
-    cdef uint32_t read_idx, ref_idx
-    cdef uint64_t start_pos, end_pos, alignment_idx
-    cdef uint32_t alignment_count
-    cdef float alignment_score
-    cdef double log_likelihood
-    cdef double log_weighted_score, log_normalizer
-    cdef double total_log_likelihood = 0.0
-    cdef double NEG_INF = -1e20
-    cdef int32_t valid_reads = 0
-
-    cdef double* reference_weights = get_reference_weights(pool)
-    cdef double read_likelihood = NEG_INF
-
-    update_precomputed_weights(precomp, reference_weights)
-
-    for read_idx in range(pool.unique_read_count):
-        PREFETCH_READ(&pool.read_alignment_starts[read_idx])
-        PREFETCH_READ(&pool.read_alignment_counts[read_idx])
-        alignment_count = pool.read_alignment_counts[read_idx]
-        if alignment_count == 0:
-            continue
-
-        start_pos = pool.read_alignment_starts[read_idx]
-        end_pos = start_pos + alignment_count
-
-        if alignment_count == 1:
-            alignment_idx = start_pos
-            ref_idx = pool.alignments[alignment_idx].reference_index
-            if ref_idx < pool.reference_count:
-                alignment_score = pool.alignments[alignment_idx].alignment_score                
-                log_likelihood = <double>alignment_score
-                log_weighted_score = precomp.log_weights[ref_idx] + log_likelihood
-                read_likelihood = log_weighted_score
-            
-        else:
-            log_normalizer = NEG_INF
-            for alignment_idx in range(start_pos, end_pos):
-                PREFETCH_READ(&pool.alignments[alignment_idx].alignment_score)
-                ref_idx = pool.alignments[alignment_idx].reference_index
-                if ref_idx < pool.reference_count:
-                    alignment_score = pool.alignments[alignment_idx].alignment_score
-                    
-                    log_likelihood = <double>alignment_score
-                    log_weighted_score = precomp.log_weights[ref_idx] + log_likelihood
-                    log_normalizer = stable_log_sum_exp(log_normalizer, log_weighted_score)
-
-            read_likelihood = log_normalizer
-
-        if read_likelihood > NEG_INF + 1e10:
-            total_log_likelihood += read_likelihood
+            total_ll += log_normalizer
             valid_reads += 1
 
-    return total_log_likelihood / valid_reads if valid_reads > 0 else NEG_INF
+    free(log_phi)
 
-cdef bint detect_pathological_convergence(MemoryPool* pool, 
-                                         EMAlgorithmConfig* config,
-                                         int current_iteration, 
-                                         double current_ll, 
-                                         double prev_ll) noexcept nogil:
+    return total_ll / valid_reads if valid_reads > 0 else NEG_INF
 
-    cdef double* weights = get_reference_weights(pool)
-    cdef double entropy = calculate_dataset_entropy(pool)
-    cdef double max_weight = 0.0
-    cdef uint32_t dominant_refs = 0
-    cdef uint32_t i
-    cdef double dominant_threshold
-    
-    if entropy < config.emergency_entropy_threshold:
-        bf_nogil_logf_notime(
-            b"EM",
-            "emergency_trigger: reason=low_entropy entropy=%.3f threshold=%.3f",
-            entropy,
-            config.emergency_entropy_threshold,
-        )
+
+# =============================================================================
+# SQUAREM Acceleration
+# =============================================================================
+
+cdef SQUAREMState* create_squarem_state(uint32_t dimension) noexcept nogil:
+    """Allocate SQUAREM working arrays."""
+    cdef SQUAREMState* sq = <SQUAREMState*>malloc(sizeof(SQUAREMState))
+    if sq == NULL:
+        return NULL
+
+    sq.dimension = dimension
+    sq.allocated = False
+
+    sq.theta_0 = <double*>malloc(dimension * sizeof(double))
+    sq.theta_1 = <double*>malloc(dimension * sizeof(double))
+    sq.theta_2 = <double*>malloc(dimension * sizeof(double))
+    sq.r_vector = <double*>malloc(dimension * sizeof(double))
+    sq.v_vector = <double*>malloc(dimension * sizeof(double))
+    sq.theta_extrapolated = <double*>malloc(dimension * sizeof(double))
+
+    if (sq.theta_0 == NULL or sq.theta_1 == NULL or sq.theta_2 == NULL or
+        sq.r_vector == NULL or sq.v_vector == NULL or sq.theta_extrapolated == NULL):
+        free_squarem_state(sq)
+        return NULL
+
+    sq.allocated = True
+    return sq
+
+
+cdef void free_squarem_state(SQUAREMState* sq) noexcept nogil:
+    """Free SQUAREM state."""
+    if sq == NULL:
+        return
+
+    if sq.theta_0 != NULL: free(sq.theta_0)
+    if sq.theta_1 != NULL: free(sq.theta_1)
+    if sq.theta_2 != NULL: free(sq.theta_2)
+    if sq.r_vector != NULL: free(sq.r_vector)
+    if sq.v_vector != NULL: free(sq.v_vector)
+    if sq.theta_extrapolated != NULL: free(sq.theta_extrapolated)
+
+    free(sq)
+
+
+cdef void copy_phi_to_array(EMState* state, double* arr) noexcept nogil:
+    """Copy phi weights to array."""
+    memcpy(arr, state.phi_weights, state.n_refs * sizeof(double))
+
+
+cdef void copy_array_to_phi(double* arr, EMState* state) noexcept nogil:
+    """Copy array to phi weights."""
+    memcpy(state.phi_weights, arr, state.n_refs * sizeof(double))
+
+
+cdef bint squarem_step(EMState* state, void* pool_ptr, EMConfig* config,
+                       SQUAREMState* sq, double* ll_out) noexcept nogil:
+    """
+    SQUAREM acceleration with monotonicity safeguard.
+
+    1. Compute theta_1 = M(theta_0), theta_2 = M(theta_1)
+    2. Extrapolate: theta_sq = theta_0 - 2*alpha*r + alpha^2*v
+    3. Project to feasible set (simplex)
+    4. If LL(theta_sq) >= LL(theta_1): accept
+       Else: fall back to theta_1
+
+    Returns True if accelerated step accepted.
+    """
+    cdef uint32_t i, n = state.n_refs
+    cdef double r_norm = 0.0, v_norm = 0.0
+    cdef double r_temp, v_temp
+    cdef double alpha
+    cdef double ll_0, ll_1, ll_sq
+    cdef double total
+
+    # Save theta_0
+    copy_phi_to_array(state, sq.theta_0)
+    ll_0 = compute_log_likelihood(state, pool_ptr, config)
+
+    # theta_1 = M(theta_0)
+    e_step(state, pool_ptr, config)
+    m_step(state, config)
+    copy_phi_to_array(state, sq.theta_1)
+    ll_1 = compute_log_likelihood(state, pool_ptr, config)
+
+    # theta_2 = M(theta_1)
+    e_step(state, pool_ptr, config)
+    m_step(state, config)
+    copy_phi_to_array(state, sq.theta_2)
+
+    # Compute r = theta_1 - theta_0, v = (theta_2 - theta_1) - r
+    for i in range(n):
+        r_temp = sq.theta_1[i] - sq.theta_0[i]
+        sq.r_vector[i] = r_temp
+        r_norm += r_temp * r_temp
+
+        v_temp = (sq.theta_2[i] - sq.theta_1[i]) - r_temp
+        sq.v_vector[i] = v_temp
+        v_norm += v_temp * v_temp
+
+    r_norm = libc_sqrt(r_norm)
+    v_norm = libc_sqrt(v_norm)
+
+    # Compute step length alpha = -||r|| / ||v||
+    if v_norm > 1e-15:
+        alpha = -r_norm / v_norm
+    else:
+        alpha = -1.0
+
+    # Clamp alpha
+    if alpha > -0.01:
+        alpha = -0.01
+    elif alpha < -50.0:
+        alpha = -50.0
+
+    # Extrapolate: theta_sq = theta_0 - 2*alpha*r + alpha^2*v
+    total = 0.0
+    for i in range(n):
+        sq.theta_extrapolated[i] = (sq.theta_0[i]
+                                    - 2.0 * alpha * sq.r_vector[i]
+                                    + alpha * alpha * sq.v_vector[i])
+        sq.theta_extrapolated[i] = fmax(sq.theta_extrapolated[i], 1e-15)
+        total += sq.theta_extrapolated[i]
+
+    # Normalize to simplex
+    if total > 0:
+        for i in range(n):
+            sq.theta_extrapolated[i] /= total
+
+    # Evaluate extrapolated point
+    copy_array_to_phi(sq.theta_extrapolated, state)
+    normalize_phi(state)
+    ll_sq = compute_log_likelihood(state, pool_ptr, config)
+
+    # SAFEGUARD: monotonicity check
+    if ll_sq >= ll_1 - 1e-10:
+        ll_out[0] = ll_sq
+        bf_nogil_logf_notime(b"EM_UNIFIED", "SQUAREM accepted: alpha=%.3f LL=%.6f->%.6f",
+                            alpha, ll_0, ll_sq)
         return True
-    
-    dominant_threshold = fmax(0.01, 1.0 / (10.0 * libc_sqrt(<double>pool.reference_count)))
-    
-    for i in range(pool.reference_count):
-        if weights[i] > max_weight:
-            max_weight = weights[i]
-        if weights[i] > dominant_threshold:
-            dominant_refs += 1
-    
-    if max_weight > config.emergency_max_weight_threshold:
-        bf_nogil_logf_notime(
-            b"EM",
-            "emergency_trigger: reason=dominant_weight max_weight=%.3f threshold=%.3f",
-            max_weight,
-            config.emergency_max_weight_threshold,
-        )
-        return True
-    
-    if pool.reference_count > 1000:
-        if dominant_refs < config.emergency_min_dominant_refs:
-            bf_nogil_logf_notime(
-                b"EM",
-                "emergency_trigger: reason=insufficient_dominant_refs detected=%u total=%u min_expected=%u threshold=%.4f",
-                dominant_refs,
-                pool.reference_count,
-                config.emergency_min_dominant_refs,
-                dominant_threshold,
-            )
-            return True
-    
-    cdef int stabilization_period = 3
-    if (current_iteration > stabilization_period and 
-        current_ll < prev_ll - config.emergency_likelihood_drop):
-        bf_nogil_logf_notime(
-            b"EM",
-            "emergency_trigger: reason=likelihood_drop delta=%.6f threshold=%.6f stabilization_period=%d",
-            prev_ll - current_ll,
-            config.emergency_likelihood_drop,
-            stabilization_period,
-        )
-        return True
-    
-    return False
+    else:
+        # Fall back to standard EM step theta_1
+        copy_array_to_phi(sq.theta_1, state)
+        normalize_phi(state)
+        ll_out[0] = ll_1
+        bf_nogil_logf_notime(b"EM_UNIFIED", "SQUAREM rejected (LL decreased): falling back to EM step")
+        return False
 
-cdef int execute_em_algorithm(MemoryPool* pool, EMAlgorithmConfig* config) except -1 nogil:
-    """Execute EM algorithm with SQUAREM acceleration for read reassignment.
 
-    Implements the Expectation-Maximization algorithm for reassigning multi-mapping
-    reads to references. Includes SQUAREM acceleration (Varadhan & Roland 2008) with
-    three steplength schemes (S1, S2, S3) and globalization with backtracking.
+# =============================================================================
+# Output Transform (POST-PROCESSING ONLY)
+# =============================================================================
 
-    Algorithm:
-    1. E-step: Calculate expected read assignments based on current weights
-    2. M-step: Update reference weights based on expected assignments
-    3. SQUAREM: Accelerate convergence using extrapolation when enabled
-    4. Globalization: Backtrack if extrapolation decreases likelihood
+cdef void transform_to_output(EMState* state, double* output_pi,
+                              double power_rho) noexcept nogil:
+    """
+    Transform phi-space weights to reported pi weights.
+
+    pi_j = phi_j^rho / sum_j' phi_j'^rho
+
+    This is ONLY for reporting, not used in EM iteration.
+
+    Power transform interpretation (temperature analogy):
+    - rho < 1: FLATTENS distribution (counteracts rich-get-richer bias)
+      - e.g., rho=0.7 makes concentrated distributions more uniform
+    - rho = 1: No change (standard EM output)
+    - rho > 1: SHARPENS distribution (amplifies differences)
+
+    Note: Using phi^rho (NOT phi^(1/rho)) for flattening with rho < 1.
+    This is analogous to temperature T = 1/rho > 1 which smooths distributions.
+    """
+    cdef double total = 0.0
+    cdef uint32_t j
+
+    for j in range(state.n_refs):
+        # phi^rho: rho < 1 flattens, rho > 1 sharpens
+        output_pi[j] = libc_pow(state.phi_weights[j], power_rho)
+        total += output_pi[j]
+
+    if total > 0:
+        for j in range(state.n_refs):
+            output_pi[j] /= total
+
+
+# =============================================================================
+# Convergence Tracking
+# =============================================================================
+
+cdef ConvergenceState* create_convergence_state(int32_t history_length) noexcept nogil:
+    """Create convergence tracking state."""
+    cdef ConvergenceState* conv = <ConvergenceState*>malloc(sizeof(ConvergenceState))
+    if conv == NULL:
+        return NULL
+
+    conv.history_length = history_length
+    conv.ll_history = <double*>calloc(history_length, sizeof(double))
+    conv.param_history = <double*>calloc(history_length, sizeof(double))
+
+    if conv.ll_history == NULL or conv.param_history == NULL:
+        free_convergence_state(conv)
+        return NULL
+
+    conv.current_index = 0
+    conv.filled_count = 0
+    conv.current_ll = NEG_INF
+    conv.prev_ll = NEG_INF
+
+    return conv
+
+
+cdef void free_convergence_state(ConvergenceState* conv) noexcept nogil:
+    """Free convergence state."""
+    if conv == NULL:
+        return
+
+    if conv.ll_history != NULL:
+        free(conv.ll_history)
+    if conv.param_history != NULL:
+        free(conv.param_history)
+
+    free(conv)
+
+
+cdef void update_convergence_history(ConvergenceState* conv,
+                                     double ll_change, double param_change) noexcept nogil:
+    """Update convergence history with new values."""
+    if conv == NULL:
+        return
+
+    conv.ll_history[conv.current_index] = ll_change
+    conv.param_history[conv.current_index] = param_change
+
+    conv.current_index = (conv.current_index + 1) % conv.history_length
+    if conv.filled_count < conv.history_length:
+        conv.filled_count += 1
+
+
+cdef double compute_mad(double* values, int32_t n) noexcept nogil:
+    """Compute Median Absolute Deviation."""
+    if n <= 0:
+        return 0.0
+
+    # For small n, just use mean absolute deviation
+    cdef double mean = 0.0
+    cdef double mad = 0.0
+    cdef int32_t i
+
+    for i in range(n):
+        mean += values[i]
+    mean /= n
+
+    for i in range(n):
+        mad += fabs(values[i] - mean)
+    mad /= n
+
+    return mad * 1.4826  # Scale factor for consistency with standard deviation
+
+
+cdef bint check_convergence_mad(ConvergenceState* conv,
+                                double base_tolerance) noexcept nogil:
+    """
+    Check convergence using MAD-based criterion.
+
+    Converged when:
+    - MAD(LL changes) < tolerance
+    - AND MAD(param changes) < tolerance
+    """
+    if conv == NULL or conv.filled_count < 3:
+        return False
+
+    cdef double ll_mad = compute_mad(conv.ll_history, conv.filled_count)
+    cdef double param_mad = compute_mad(conv.param_history, conv.filled_count)
+
+    cdef double ll_tol = fmax(base_tolerance, ll_mad)
+    cdef double param_tol = fmax(base_tolerance, param_mad)
+
+    # Check if recent changes are within tolerance
+    cdef double recent_ll_change = conv.ll_history[(conv.current_index - 1 + conv.history_length) % conv.history_length]
+    cdef double recent_param_change = conv.param_history[(conv.current_index - 1 + conv.history_length) % conv.history_length]
+
+    return (recent_ll_change <= ll_tol) and (recent_param_change <= param_tol)
+
+
+cdef double compute_param_change_norm(EMState* current, EMState* prev) noexcept nogil:
+    """Compute L2 norm of parameter change."""
+    cdef double norm_sq = 0.0
+    cdef double diff
+    cdef uint32_t j
+
+    for j in range(current.n_refs):
+        diff = current.phi_weights[j] - prev.phi_weights[j]
+        norm_sq += diff * diff
+
+    return libc_sqrt(norm_sq)
+
+
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+
+cdef int run_em(void* pool_ptr, EMConfig* config,
+                double* output_weights) noexcept nogil:
+    """
+    Run EM algorithm.
 
     Parameters
     ----------
-    pool : MemoryPool*
-        Memory pool containing alignments and weight arrays
-    config : EMAlgorithmConfig*
-        Algorithm configuration (iterations, tolerance, SQUAREM settings)
+    pool_ptr : void*
+        Pointer to MemoryPool
+    config : EMConfig*
+        Algorithm configuration
+    output_weights : double*
+        Output array for final weights [n_refs]
 
     Returns
     -------
     int
-        0 on success, negative error code on failure
-
-    Notes
-    -----
-    Reference: Varadhan, R. and Roland, C. (2008). Simple and Globally Convergent
-    Methods for Accelerating the Convergence of Any EM Algorithm. Scandinavian
-    Journal of Statistics, 35: 335-353.
+        Number of iterations run, or -1 on error
     """
-    cdef int32_t iteration = 0
-    cdef double current_log_likelihood = -1e20
-    cdef double prev_log_likelihood = -1e20
-    cdef bint use_squarem = config.use_squarem_acceleration
-    cdef double tolerance = fmax(config.convergence_tolerance, 1e-8)
-    cdef int32_t max_iterations = config.maximum_iterations
-    cdef double* ll_history = NULL
-    cdef double* param_history = NULL
-    cdef double* prev_weights = NULL
-    cdef double alpha = -999.0
-    cdef double* squarem_memory = NULL
-    cdef double* theta_0 = NULL
-    cdef double* theta_1 = NULL
-    cdef double* theta_2 = NULL
-    cdef double* r_vector = NULL
-    cdef double* v_vector = NULL
-    cdef double* theta_extrapolated = NULL
-    cdef double r_norm, v_norm, r_temp, v_temp
-    cdef uint32_t i
-    cdef uint32_t ref_cnt
-    cdef double r_temp0, r_temp1, r_temp2, r_temp3, r_temp4, r_temp5, r_temp6, r_temp7
-    cdef double v_temp0, v_temp1, v_temp2, v_temp3, v_temp4, v_temp5, v_temp6, v_temp7
-    cdef size_t array_size, total_size
-    cdef double test_ll = 0.0
-    cdef int backtrack_steps = 0
-    cdef double* reference_weights = get_reference_weights(pool)
-    cdef PrecomputedWeights* precomp = NULL
-    cdef double backtrack_factor = 0.5
-    cdef int total_backtrack_steps = 0
-    cdef double ll_before_backtrack, ll_after_backtrack
-    global _dominance_last_base_strength, _dominance_last_final_strength
-    global _dominance_last_concentration, _dominance_last_entropy_threshold
-    global _dominance_last_auto_entropy, _dominance_last_auto_density
-    global _dominance_last_auto_ref_factor, _dominance_last_auto_clamped
-    global _dominance_logged_mode, _dominance_logged_adaptive, _dominance_logged_skip
-    global _dominance_last_mode_manual, _dominance_last_iteration
-    global _dominance_iteration_context
+    cdef MemoryPool* pool = <MemoryPool*>pool_ptr
+    cdef uint32_t n_refs = pool.reference_count
+    cdef uint32_t n_reads = pool.unique_read_count
 
-    _dominance_last_base_strength = -1.0
-    _dominance_last_final_strength = -1.0
-    _dominance_last_concentration = -1.0
-    _dominance_last_entropy_threshold = -1.0
-    _dominance_last_auto_entropy = -1.0
-    _dominance_last_auto_density = -1.0
-    _dominance_last_auto_ref_factor = -1.0
-    _dominance_last_auto_clamped = -1.0
-    _dominance_logged_mode = False
-    _dominance_logged_adaptive = False
-    _dominance_logged_skip = False
-    _dominance_last_mode_manual = False
-    _dominance_last_iteration = -1
-    _dominance_iteration_context = -1
-    _dominance_reset_iteration_metrics()
-
-    if config.enable_emergency_regularization:
-        if config.emergency_entropy_threshold == 0.0:
-            config.emergency_entropy_threshold = 0.15
-        if config.emergency_max_weight_threshold == 0.0:
-            config.emergency_max_weight_threshold = 0.3
-        if config.emergency_min_dominant_refs == 0:
-            config.emergency_min_dominant_refs = max_int32(10, pool.reference_count / 100)
-        if config.emergency_likelihood_drop == 0.0:
-            config.emergency_likelihood_drop = 1e-3
-
-        config.dominance_regularization_active = False
-
-        bf_nogil_logf_notime(
-            b"EM",
-            "em_session: mode=emergency_regularization entropy_threshold=%.3f max_weight=%.3f min_dominant_refs=%u ll_drop=%.6f",
-            config.emergency_entropy_threshold,
-            config.emergency_max_weight_threshold,
-            config.emergency_min_dominant_refs,
-            config.emergency_likelihood_drop,
-        )
-    elif config.enable_dominance_regularization:
-        bf_nogil_logf_notime(
-            b"EM",
-            "em_session: mode=dominance_regularization base_strength=%.3f adaptive=%s entropy_scaling=%.3f",
-            config.dominance_strength,
-            b"true" if config.use_adaptive_dominance else b"false",
-            config.entropy_scaling_factor,
-        )
-    else:
-        bf_nogil_logf_notime(b"EM", "em_session: mode=standard")
-
-    ll_history = <double*>calloc(5, sizeof(double))
-    param_history = <double*>calloc(5, sizeof(double))
-    if not ll_history or not param_history:
-        if ll_history: free(ll_history)
-        if param_history: free(param_history)
+    # Create state
+    cdef EMState* state = create_em_state(n_refs, n_reads, config)
+    if state == NULL:
+        bf_nogil_logf_notime(b"EM_UNIFIED", "ERROR: Failed to allocate EMState")
         return -1
 
-    prev_weights = <double*>malloc(pool.reference_count * sizeof(double))
-    if not prev_weights:
-        free(ll_history)
-        free(param_history)
+    cdef EMState* prev_state = create_em_state(n_refs, n_reads, config)
+    if prev_state == NULL:
+        free_em_state(state)
+        bf_nogil_logf_notime(b"EM_UNIFIED", "ERROR: Failed to allocate prev_state")
         return -1
 
-    precomp = create_precomputed_weights(pool.reference_count)
-    if not precomp:
-        free(prev_weights)
-        free(ll_history)
-        free(param_history)
+    # Create convergence tracker
+    cdef ConvergenceState* conv = create_convergence_state(config.history_length)
+    if conv == NULL:
+        free_em_state(state)
+        free_em_state(prev_state)
         return -1
 
-    if use_squarem:
-        array_size = pool.reference_count * sizeof(double)
-        total_size = array_size * 6
-        squarem_memory = <double*>malloc(total_size)
-        if not squarem_memory:
-            free_precomputed_weights(precomp)
-            free(prev_weights)
-            free(ll_history)
-            free(param_history)
-            return -1
-        theta_0 = squarem_memory
-        theta_1 = squarem_memory + pool.reference_count
-        theta_2 = squarem_memory + 2 * pool.reference_count
-        r_vector = squarem_memory + 3 * pool.reference_count
-        v_vector = squarem_memory + 4 * pool.reference_count
-        theta_extrapolated = squarem_memory + 5 * pool.reference_count
-
-    initialize_em_weights(pool, config)
-    diagnose_initialization_quality(pool)
-
-    memcpy(prev_weights, reference_weights, pool.reference_count * sizeof(double))
-
-    if config.enable_emergency_regularization:
-        bf_nogil_logf_notime(b"EM", "emergency_regularization: initial_state=inactive")
-    elif config.enable_dominance_regularization:
-        bf_nogil_logf_notime(
-            b"EM",
-            "dominance_regularization: initial_state=active base_strength=%.3f adaptive=%s entropy_scaling=%.3f range=[%.3f, %.3f]",
-            config.dominance_strength,
-            b"true" if config.use_adaptive_dominance else b"false",
-            config.entropy_scaling_factor,
-            config.min_penalty_strength,
-            config.max_penalty_strength,
-        )
-    else:
-        bf_nogil_logf_notime(b"EM", "regularization: mode=standard")
+    # Create SQUAREM state if enabled
+    cdef SQUAREMState* sq = NULL
+    if config.squarem_enabled:
+        sq = create_squarem_state(n_refs)
+        if sq == NULL:
+            bf_nogil_logf_notime(b"EM_UNIFIED", "WARNING: SQUAREM allocation failed, using standard EM")
 
     bf_nogil_logf_notime(
-        b"EM",
-        "squarem: enabled=%s start_iteration=%d globalization=%s",
-        b"true" if use_squarem else b"false",
-        config.squarem_start_iter,
-        b"true" if config.enable_globalization else b"false",
+        b"EM_UNIFIED",
+        "Starting: refs=%u reads=%u max_iter=%d tol=%.2e hierarchical=%s unknown=%s squarem=%s rho=%.2f",
+        n_refs, n_reads, config.max_iterations, config.convergence_tolerance,
+        b"true" if config.hierarchical_enabled else b"false",
+        b"true" if config.unknown_enabled else b"false",
+        b"true" if (config.squarem_enabled and sq != NULL) else b"false",
+        config.power_rho
     )
 
-    for iteration in range(max_iterations):
-        prev_log_likelihood = current_log_likelihood
-        memcpy(prev_weights, reference_weights, pool.reference_count * sizeof(double))
+    cdef int iteration
+    cdef double current_ll, prev_ll = NEG_INF
+    cdef double ll_change, param_change
+    cdef double ll_new
+    cdef bint converged = False
+    cdef bint use_squarem
 
-        if use_squarem and iteration >= config.squarem_start_iter:
-            memcpy(theta_0, reference_weights, pool.reference_count * sizeof(double))
+    for iteration in range(config.max_iterations):
+        # Save previous state
+        copy_em_state(prev_state, state)
+        prev_ll = conv.current_ll if conv.current_ll > NEG_INF + 1e10 else compute_log_likelihood(state, pool_ptr, config)
 
-            execute_em_expectation_step_vectorized(pool, config.thread_count, precomp, config, iteration)
-            execute_em_maximization_step_vectorized(pool, config.regularization_weight, precomp,
-                                                   config, iteration, current_log_likelihood, prev_log_likelihood)
-            memcpy(theta_1, reference_weights, pool.reference_count * sizeof(double))
+        # Decide whether to use SQUAREM
+        use_squarem = (config.squarem_enabled and sq != NULL and
+                       iteration >= config.squarem_start_iter)
 
-            execute_em_expectation_step_vectorized(pool, config.thread_count, precomp, config, iteration)
-            execute_em_maximization_step_vectorized(pool, config.regularization_weight, precomp,
-                                                   config, iteration, current_log_likelihood, prev_log_likelihood)
-            memcpy(theta_2, reference_weights, pool.reference_count * sizeof(double))
-
-            r_norm = 0.0
-            v_norm = 0.0
-            ref_cnt = pool.reference_count
-            i = 0
-            while i + 8 <= ref_cnt:
-                r_temp0 = theta_1[i]     - theta_0[i]
-                r_temp1 = theta_1[i+1]   - theta_0[i+1]
-                r_temp2 = theta_1[i+2]   - theta_0[i+2]
-                r_temp3 = theta_1[i+3]   - theta_0[i+3]
-                r_temp4 = theta_1[i+4]   - theta_0[i+4]
-                r_temp5 = theta_1[i+5]   - theta_0[i+5]
-                r_temp6 = theta_1[i+6]   - theta_0[i+6]
-                r_temp7 = theta_1[i+7]   - theta_0[i+7]
-                r_vector[i]   = r_temp0
-                r_vector[i+1] = r_temp1
-                r_vector[i+2] = r_temp2
-                r_vector[i+3] = r_temp3
-                r_vector[i+4] = r_temp4
-                r_vector[i+5] = r_temp5
-                r_vector[i+6] = r_temp6
-                r_vector[i+7] = r_temp7
-                v_temp0 = (theta_2[i]   - theta_1[i])   - r_temp0
-                v_temp1 = (theta_2[i+1] - theta_1[i+1]) - r_temp1
-                v_temp2 = (theta_2[i+2] - theta_1[i+2]) - r_temp2
-                v_temp3 = (theta_2[i+3] - theta_1[i+3]) - r_temp3
-                v_temp4 = (theta_2[i+4] - theta_1[i+4]) - r_temp4
-                v_temp5 = (theta_2[i+5] - theta_1[i+5]) - r_temp5
-                v_temp6 = (theta_2[i+6] - theta_1[i+6]) - r_temp6
-                v_temp7 = (theta_2[i+7] - theta_1[i+7]) - r_temp7
-                v_vector[i]   = v_temp0
-                v_vector[i+1] = v_temp1
-                v_vector[i+2] = v_temp2
-                v_vector[i+3] = v_temp3
-                v_vector[i+4] = v_temp4
-                v_vector[i+5] = v_temp5
-                v_vector[i+6] = v_temp6
-                v_vector[i+7] = v_temp7
-                r_norm += r_temp0*r_temp0 + r_temp1*r_temp1 + r_temp2*r_temp2 + r_temp3*r_temp3 + r_temp4*r_temp4 + r_temp5*r_temp5 + r_temp6*r_temp6 + r_temp7*r_temp7
-                v_norm += v_temp0*v_temp0 + v_temp1*v_temp1 + v_temp2*v_temp2 + v_temp3*v_temp3 + v_temp4*v_temp4 + v_temp5*v_temp5 + v_temp6*v_temp6 + v_temp7*v_temp7
-                i += 8
-
-            while i < ref_cnt:
-                r_temp = theta_1[i] - theta_0[i]
-                r_vector[i] = r_temp
-                v_temp = (theta_2[i] - theta_1[i]) - r_temp
-                v_vector[i] = v_temp
-                r_norm += r_temp * r_temp
-                v_norm += v_temp * v_temp
-                i += 1
-
-            r_norm = libc_sqrt(r_norm)
-            v_norm = libc_sqrt(v_norm)
-
-            if v_norm > 1e-15:
-                alpha = -r_norm / v_norm
-            else:
-                alpha = -1.0
-
-            if alpha > -0.01:
-                alpha = -0.01
-            elif alpha < -50.0:
-                alpha = -50.0
-
-            for i in range(pool.reference_count):
-                theta_extrapolated[i] = (theta_0[i] - 2.0 * alpha * r_vector[i] +
-                                       alpha * alpha * v_vector[i])
-                theta_extrapolated[i] = fmax(fmin(theta_extrapolated[i], 0.999), 1e-15)
-
-            safe_normalize_weights(theta_extrapolated, pool.reference_count)
-
-            backtrack_steps = 0
-            if config.enable_globalization:
-                memcpy(reference_weights, theta_extrapolated, pool.reference_count * sizeof(double))
-                ll_before_backtrack = prev_log_likelihood
-                test_ll = compute_log_likelihood_vectorized(pool, precomp)
-                
-                if test_ll < prev_log_likelihood - 1e-6:
-                    bf_nogil_logf_notime(b"EM", "  BACKTRACKING: LL %.6f -> %.6f (alpha=%.3f triggered backtrack)",
-                           ll_before_backtrack, test_ll, alpha)
-                    
-                    backtrack_factor = 0.5
-                    while backtrack_steps < config.max_backtrack_steps and test_ll < prev_log_likelihood - 1e-6:
-                        for i in range(pool.reference_count):
-                            reference_weights[i] = (theta_0[i] + backtrack_factor * 
-                                                   (theta_extrapolated[i] - theta_0[i]))
-                            reference_weights[i] = fmax(fmin(reference_weights[i], 0.999), 1e-15)
-                        
-                        safe_normalize_weights(reference_weights, pool.reference_count)
-                        test_ll = compute_log_likelihood_vectorized(pool, precomp)
-                        
-                        backtrack_factor *= config.backtrack_factor
-                        backtrack_steps += 1
-                    
-                    ll_after_backtrack = test_ll
-                    total_backtrack_steps += backtrack_steps
-                    
-                    bf_nogil_logf_notime(
-                        b"EM",
-                        "squarem_backtrack: steps=%d ll_before=%.6f ll_after=%.6f factor=%.3f",
-                        backtrack_steps,
-                        ll_before_backtrack,
-                        ll_after_backtrack,
-                        backtrack_factor,
-                    )
-                    
-                    if test_ll < prev_log_likelihood - 1e-6:
-                        bf_nogil_logf_notime(b"EM", "squarem_backtrack: status=fallback_to_standard_step")
-                        memcpy(reference_weights, theta_1, pool.reference_count * sizeof(double))
-                        alpha = -999.0
-            else:
-                memcpy(reference_weights, theta_extrapolated, pool.reference_count * sizeof(double))
-
-            execute_em_expectation_step_vectorized(pool, config.thread_count, precomp, config, iteration)
-            execute_em_maximization_step_vectorized(pool, config.regularization_weight, precomp,
-                                                   config, iteration, current_log_likelihood, prev_log_likelihood)
-
+        if use_squarem:
+            squarem_step(state, pool_ptr, config, sq, &current_ll)
         else:
-            alpha = -999.0
-            execute_em_expectation_step_vectorized(pool, config.thread_count, precomp, config, iteration)
-            execute_em_maximization_step_vectorized(pool, config.regularization_weight, precomp,
-                                                   config, iteration, current_log_likelihood, prev_log_likelihood)
+            # Standard E-step and M-step
+            e_step(state, pool_ptr, config)
+            m_step(state, config)
+            current_ll = compute_log_likelihood(state, pool_ptr, config)
 
-        safe_normalize_weights(reference_weights, pool.reference_count)
-        current_log_likelihood = compute_log_likelihood_vectorized(pool, precomp)
+        # Compute changes
+        ll_change = fabs(current_ll - prev_ll) / fmax(fabs(current_ll), 1.0)
+        param_change = compute_param_change_norm(state, prev_state)
 
-        if check_trend_based_convergence(current_log_likelihood, prev_log_likelihood,
-                                        pool, prev_weights, tolerance, iteration,
-                                        config, precomp, ll_history, param_history, alpha):
-            pool.algorithm_converged = True
+        # Update convergence history
+        update_convergence_history(conv, ll_change, param_change)
+        conv.current_ll = current_ll
+        conv.prev_ll = prev_ll
+
+        # Log progress
+        if iteration % 10 == 0 or iteration < 5:
             bf_nogil_logf_notime(
-                b"EM",
-                "em_convergence: status=achieved iteration=%d",
-                iteration + 1,
+                b"EM_UNIFIED",
+                "Iter %d: LL=%.6f dLL=%.2e ||dphi||=%.2e",
+                iteration, current_ll, ll_change, param_change
             )
+
+        # Check convergence
+        if check_convergence_mad(conv, config.convergence_tolerance):
+            bf_nogil_logf_notime(
+                b"EM_UNIFIED",
+                "CONVERGED at iter %d: LL=%.6f dLL=%.2e ||dphi||=%.2e",
+                iteration, current_ll, ll_change, param_change
+            )
+            converged = True
             break
 
-    if iteration >= max_iterations - 1:
+    if not converged:
         bf_nogil_logf_notime(
-            b"EM",
-            "em_convergence: status=max_iterations iterations=%d",
-            max_iterations,
-        )
-        pool.algorithm_converged = False
-
-    _dominance_flush_iteration_metrics(_dominance_last_iteration)
-
-    if total_backtrack_steps > 0:
-        bf_nogil_logf_notime(
-            b"EM",
-            "squarem_backtrack_summary: total_steps=%d iterations=%d avg_per_iteration=%.1f",
-            total_backtrack_steps,
-            iteration + 1,
-            <double>total_backtrack_steps / <double>(iteration + 1),
+            b"EM_UNIFIED",
+            "MAX_ITER reached (%d): LL=%.6f dLL=%.2e ||dphi||=%.2e",
+            config.max_iterations, current_ll, ll_change, param_change
         )
 
-    pool.iteration_count = iteration + 1
-    pool.final_log_likelihood = current_log_likelihood
-
-    if squarem_memory: free(squarem_memory)
-    free_precomputed_weights(precomp)
-    free(prev_weights)
-    free(ll_history)
-    free(param_history)
+    # Transform to output (apply power rho POST-PROCESSING)
+    transform_to_output(state, output_weights, config.power_rho)
 
     bf_nogil_logf_notime(
-        b"EM",
-        "em_summary: iterations=%d log_likelihood=%.6f converged=%s",
-        pool.iteration_count,
-        pool.final_log_likelihood,
-        b"true" if pool.algorithm_converged else b"false",
-    )
-    
-    if config.enable_emergency_regularization:
-        bf_nogil_logf_notime(
-            b"EM",
-            "emergency_regularization: activated=%s",
-            b"true" if config.dominance_regularization_active else b"false",
-        )
-    elif config.enable_dominance_regularization:
-        bf_nogil_logf_notime(b"EM", "dominance_regularization: active_throughout=true")
-
-    return 0
-
-cdef int apply_probability_filtering_optimal(MemoryPool* pool, EMAlgorithmConfig* config) except -1 nogil:
-    cdef uint32_t read_idx, ref_idx, rid
-    cdef int64_t start_pos, end_pos, ai
-    cdef uint32_t alignment_count
-    cdef float alignment_score, uniform_zp
-    cdef double log_lik 
-    cdef double log_weighted, log_norm, posterior
-    cdef double NEG_INF = -1e20
-    cdef int64_t alignments_removed
-    cdef int64_t write_idx = 0
-    cdef bint keep_alignment
-    cdef double min_threshold = fmax(config.minimum_probability_threshold, 1e-8)
-    cdef double fraction_threshold = config.probability_fraction_filter
-    cdef double* reference_weights = get_reference_weights(pool)
-    cdef PrecomputedWeights* precomp = NULL
-    cdef float* read_max_probs
-    cdef int32_t* survivors_per_read
-    cdef int64_t survivors_total = 0
-    cdef uint64_t start_pos_rebuild
-    cdef double thr
-    cdef double p
-
-    precomp = create_precomputed_weights(pool.reference_count)
-    if not precomp:
-        return -1
-    update_precomputed_weights(precomp, reference_weights)
-
-    bf_nogil_logf_notime(
-        b"EM",
-        "probability_filter_integrated: start pmd_output=%s total_alignments=%lld",
-        b"enabled" if pool.pmd_enabled_for_output else b"disabled",
-        <long long>pool.alignment_count,
+        b"EM_UNIFIED",
+        "Output transform: power_rho=%.2f (post-processing only)",
+        config.power_rho
     )
 
-    if pool.scratch_read_max_probs == NULL or pool.scratch_survivors_per_read == NULL or pool.scratch_unique_read_count < <int32_t>pool.unique_read_count:
-        if pool.scratch_read_max_probs != NULL:
-            free(pool.scratch_read_max_probs)
-        if pool.scratch_survivors_per_read != NULL:
-            free(pool.scratch_survivors_per_read)
-        pool.scratch_read_max_probs = <float*>calloc(pool.unique_read_count, sizeof(float))
-        pool.scratch_survivors_per_read = <int32_t*>calloc(pool.unique_read_count, sizeof(int32_t))
-        pool.scratch_unique_read_count = pool.unique_read_count
-    else:
-        memset(pool.scratch_read_max_probs, 0, pool.unique_read_count * sizeof(float))
-        memset(pool.scratch_survivors_per_read, 0, pool.unique_read_count * sizeof(int32_t))
-    read_max_probs = pool.scratch_read_max_probs
-    survivors_per_read = pool.scratch_survivors_per_read
+    # Cleanup
+    if sq != NULL:
+        free_squarem_state(sq)
+    free_convergence_state(conv)
+    free_em_state(prev_state)
+    free_em_state(state)
 
-    for read_idx in prange(pool.unique_read_count, nogil=True, schedule='static', num_threads=config.thread_count):
-        alignment_count = pool.read_alignment_counts[read_idx]
-        if alignment_count == 0:
-            continue
-        start_pos = pool.read_alignment_starts[read_idx]
-        end_pos = start_pos + alignment_count
-        if alignment_count == 1:
-            read_max_probs[read_idx] = 1.0
-            if 1.0 >= min_threshold and (fraction_threshold == 0.0 or 1.0 >= fraction_threshold * 1.0):
-                survivors_per_read[read_idx] = 1
-            continue
-
-        log_norm = NEG_INF
-        for ai in range(start_pos, end_pos):
-            ref_idx = pool.alignments[ai].reference_index
-            if ref_idx < pool.reference_count:
-                alignment_score = pool.alignments[ai].alignment_score
-                log_lik = <double>alignment_score
-                log_weighted = precomp.log_weights[ref_idx] + log_lik
-                log_norm = stable_log_sum_exp(log_norm, log_weighted)
-        if log_norm == NEG_INF:
-            uniform_zp = 1.0 / alignment_count if alignment_count > 0 else 0.0
-            read_max_probs[read_idx] = uniform_zp
-            if uniform_zp >= min_threshold and (fraction_threshold == 0.0 or uniform_zp >= fraction_threshold * uniform_zp):
-                survivors_per_read[read_idx] = alignment_count
-            continue
-
-        p = 0.0
-        for ai in range(start_pos, end_pos):
-            ref_idx = pool.alignments[ai].reference_index
-            if ref_idx < pool.reference_count:
-                alignment_score = pool.alignments[ai].alignment_score
-                log_lik = <double>alignment_score
-                log_weighted = precomp.log_weights[ref_idx] + log_lik
-                posterior = exp(log_weighted - log_norm)
-                if posterior > p:
-                    p = posterior
-        read_max_probs[read_idx] = <float>p
-        thr = fraction_threshold * p
-        for ai in range(start_pos, end_pos):
-            ref_idx = pool.alignments[ai].reference_index
-            if ref_idx < pool.reference_count:
-                alignment_score = pool.alignments[ai].alignment_score
-                log_lik = <double>alignment_score
-                log_weighted = precomp.log_weights[ref_idx] + log_lik
-                posterior = exp(log_weighted - log_norm)
-                if posterior >= min_threshold and (fraction_threshold == 0.0 or posterior >= thr):
-                    survivors_per_read[read_idx] += 1
+    return iteration + 1
 
 
-    survivors_total = 0
-    for read_idx in range(pool.unique_read_count):
-        survivors_total += survivors_per_read[read_idx]
+# =============================================================================
+# Python-accessible wrapper
+# =============================================================================
 
-    bf_nogil_logf_notime(
-        b"EM",
-        "probability_filter_integrated: survivors=%lld total=%lld",
-        <long long>survivors_total,
-        <long long>pool.alignment_count,
-    )
-
-    if survivors_total <= 0:
-        bf_nogil_logf_notime(b"WARN", "probability_filter_integrated: survivors=0 (aborting)")
-        free_precomputed_weights(precomp)
-        return -1
-
-
-    if pool.precomputed_zp_values:
-        free(pool.precomputed_zp_values)
-    pool.precomputed_zp_values = <float*>malloc(survivors_total * sizeof(float))
-    if not pool.precomputed_zp_values:
-        free_precomputed_weights(precomp)
-        return -1
-
-
-    write_idx = 0
-    for read_idx in range(pool.unique_read_count):
-        alignment_count = pool.read_alignment_counts[read_idx]
-        if alignment_count == 0:
-            continue
-
-        start_pos = pool.read_alignment_starts[read_idx]
-        end_pos = start_pos + alignment_count
-
-        if alignment_count == 1:
-            p = 1.0
-            if p >= min_threshold and (fraction_threshold == 0.0 or p >= fraction_threshold * 1.0):
-                if write_idx != start_pos:
-                    pool.alignments[write_idx] = pool.alignments[start_pos]
-                pool.precomputed_zp_values[write_idx] = 1.0
-                write_idx += 1
-            continue
-
-
-        log_norm = NEG_INF
-        for ai in range(start_pos, end_pos):
-            ref_idx = pool.alignments[ai].reference_index
-            if ref_idx < pool.reference_count:
-                alignment_score = pool.alignments[ai].alignment_score
-                log_weighted = precomp.log_weights[ref_idx] + alignment_score
-                log_norm = stable_log_sum_exp(log_norm, log_weighted)
-
-        if log_norm == NEG_INF:
-
-            uniform_zp = 1.0 / alignment_count if alignment_count > 0 else 0.0
-            if uniform_zp >= min_threshold and (fraction_threshold == 0.0 or uniform_zp >= fraction_threshold * uniform_zp):
-                for ai in range(start_pos, end_pos):
-                    if write_idx != ai:
-                        pool.alignments[write_idx] = pool.alignments[ai]
-                    pool.precomputed_zp_values[write_idx] = uniform_zp
-                    write_idx += 1
-            continue
-
-        thr = (<double>fraction_threshold) * (<double>read_max_probs[read_idx])
-        for ai in range(start_pos, end_pos):
-            ref_idx = pool.alignments[ai].reference_index
-            if ref_idx < pool.reference_count:
-                alignment_score = pool.alignments[ai].alignment_score
-                log_weighted = precomp.log_weights[ref_idx] + alignment_score
-                posterior = exp(log_weighted - log_norm)
-                keep_alignment = (posterior >= min_threshold) and (fraction_threshold == 0.0 or posterior >= thr)
-                if keep_alignment:
-                    if write_idx != ai:
-                        pool.alignments[write_idx] = pool.alignments[ai]
-                    # clamp for stability
-                    if posterior < 1e-12:
-                        posterior = 1e-12
-                    elif posterior > 0.999:
-                        posterior = 0.999
-                    pool.precomputed_zp_values[write_idx] = <float>posterior
-                    write_idx += 1
-
-    alignments_removed = pool.alignment_count - write_idx
-    pool.alignment_count = write_idx
-    pool.zp_values_computed = True
-
-    bf_nogil_logf_notime(
-        b"EM",
-        "probability_filter_integrated: compacted_alignments=%llu removed=%lld",
-        <unsigned long long>write_idx,
-        <long long>alignments_removed,
-    )
-
-
-    memset(pool.read_alignment_counts, 0, pool.unique_read_count * sizeof(uint32_t))
-    for ai in range(pool.alignment_count):
-        rid = pool.alignments[ai].read_index
-        if rid < pool.unique_read_count:
-            pool.read_alignment_counts[rid] += 1
-        else:
-            bf_nogil_logf_notime(b"EM", "probability_filter_integrated_error: invalid_read_id=%u alignment=%llu", rid, <unsigned long long>ai)
-
-    start_pos_rebuild = 0
-    for rid in range(pool.unique_read_count):
-        pool.read_alignment_starts[rid] = start_pos_rebuild
-        start_pos_rebuild += pool.read_alignment_counts[rid]
-
-    pool.final_unique_reads = 0
-    for rid in range(pool.unique_read_count):
-        if pool.read_alignment_counts[rid] > 0:
-            pool.final_unique_reads += 1
-
-    free_precomputed_weights(precomp)
-
-    bf_nogil_logf_notime(b"EM", "probability_filter_integrated: completed")
-    return 0
-
-
-cdef int check_trend_based_convergence(double current_ll, double prev_ll,
-                                      MemoryPool* pool, double* prev_weights,
-                                      double base_tolerance, int iteration,
-                                      EMAlgorithmConfig* config,
-                                      PrecomputedWeights* precomp,
-                                      double* ll_history, double* param_history,
-                                      double alpha) noexcept nogil:
- 
-    cdef bint is_squarem
-    cdef double ll_change, ll_rel_change, residual_norm
-    cdef double dimension_scale, scaled_residual
-    cdef int H, idx, filled
-    cdef bint ll_ok_strict, param_ok_strict
-    cdef bint have_models
-    cdef double ll_tail, r_inf
-    cdef int i0, i1, j0, j1, j2
-    cdef double d_k, d_km1, rho
-    cdef double r_k, r_km1, r_km2, dr, dr_prev, denom
-    cdef bint pred_ll_ok, pred_r_ok
-    cdef double ll_med, ll_sigma, pr_med, pr_sigma
-    cdef double ll_eps_floor, param_eps_floor
-    cdef double ll_tol_eff, param_tol_eff
-
-    is_squarem = (alpha > -900.0)
-
-    ll_change = fabs(current_ll - prev_ll)
-    ll_rel_change = ll_change / fmax(fabs(current_ll), 1.0)
-    residual_norm = compute_residual_norm_efficient(pool, prev_weights, config, precomp)
-
-    dimension_scale = libc_sqrt(<double>pool.reference_count)
-    scaled_residual = residual_norm / dimension_scale
-
-    H = 5
-    idx = iteration % H
-    ll_history[idx] = ll_rel_change
-    param_history[idx] = residual_norm
-    filled = _count_filled(iteration, H)
-
-    _mad_statistics(ll_history, H, filled, &ll_med, &ll_sigma)
-    _mad_statistics(param_history, H, filled, &pr_med, &pr_sigma)
-
-    ll_eps_floor    = 10.0 * DBL_EPSILON * fmax(1.0, fabs(current_ll))
-    param_eps_floor = 10.0 * DBL_EPSILON
-
-    ll_tol_eff    = fmax(base_tolerance, fmax(3.0 * ll_sigma, ll_eps_floor))
-    param_tol_eff = fmax(base_tolerance, fmax(3.0 * (pr_sigma / dimension_scale), param_eps_floor))
-
-    ll_ok_strict    = (ll_rel_change <= base_tolerance)
-    param_ok_strict = (residual_norm <= base_tolerance) or (scaled_residual <= base_tolerance)
-
-    if ll_ok_strict and param_ok_strict:
-        bf_nogil_logf_notime(b"EM", "Iter %d: CONVERGED [strict] DLL=%.2e<=%.1e, ||F||=%.2e, ||F||sqrt(p)=%.2e<=%.1e",
-               iteration + 1, ll_rel_change, base_tolerance, residual_norm, scaled_residual, base_tolerance)
-        return True
-
-    have_models = (filled >= 3)
-    ll_tail = 1e300
-    r_inf   = 1e300
-
-    if have_models:
-        i0 = idx
-        i1 = (idx - 1 + H) % H
-        d_k   = ll_history[i0]
-        d_km1 = ll_history[i1]
-        if d_km1 > 0.0:
-            rho = d_k / d_km1
-            if rho >= 0.0 and rho < 1.0 and d_k < d_km1:
-                ll_tail = d_k * rho / (1.0 - rho)
-
-        j0 = idx
-        j1 = (idx - 1 + H) % H
-        j2 = (idx - 2 + H) % H
-        r_k   = param_history[j0]
-        r_km1 = param_history[j1]
-        r_km2 = param_history[j2]
-        dr      = r_k   - r_km1
-        dr_prev = r_km1 - r_km2
-        denom   = (dr - dr_prev)
-        if (dr < 0.0) and (denom != 0.0) and (denom < 0.0):
-            r_inf = r_k - (dr * dr) / denom
-        else:
-            r_inf = r_k
-
-    pred_ll_ok = have_models and ((ll_tail <= ll_tol_eff) or (ll_rel_change <= ll_tol_eff))
-    pred_r_ok = have_models and ((r_inf / dimension_scale) <= param_tol_eff)
-
-    if pred_ll_ok and pred_r_ok:
-        bf_nogil_logf_notime(b"EM", "Iter %d: CONVERGED [predictive+MAD] tail_LL=%.2e<=%.1e, Aitken(||F||)->%.2e (scaled=%.2e)<=%.1e",
-               iteration + 1, ll_tail, ll_tol_eff, r_inf, r_inf / dimension_scale, param_tol_eff)
-        return True
-
-    if is_squarem:
-        bf_nogil_logf_notime(
-            b"EM",
-            "Iter %d: DLL=%.2e (base=%.1e, eff=%.1e) ||F||=%.2e, ||F||sqrt(p)=%.2e (base=%.1e, eff=%.1e) alpha=%.3f "
-            "[strict ok: LL=%s Param=%s | pred ok: LL=%s Param=%s | models=%s]\n",
-            iteration + 1,
-            ll_rel_change,
-            base_tolerance,
-            ll_tol_eff,
-            residual_norm,
-            scaled_residual,
-            base_tolerance,
-            param_tol_eff,
-            alpha,
-            b"Y" if ll_ok_strict else b"N",
-            b"Y" if param_ok_strict else b"N",
-            b"Y" if pred_ll_ok else b"N",
-            b"Y" if pred_r_ok else b"N",
-            b"Y" if have_models else b"N",
-        )
-    else:
-        bf_nogil_logf_notime(
-            b"EM",
-            "Iter %d: DLL=%.2e (base=%.1e, eff=%.1e) ||F||=%.2e, ||F||sqrt(p)=%.2e (base=%.1e, eff=%.1e) "
-            "[strict ok: LL=%s Param=%s | pred ok: LL=%s Param=%s | models=%s]\n",
-            iteration + 1,
-            ll_rel_change,
-            base_tolerance,
-            ll_tol_eff,
-            residual_norm,
-            scaled_residual,
-            base_tolerance,
-            param_tol_eff,
-            b"Y" if ll_ok_strict else b"N",
-            b"Y" if param_ok_strict else b"N",
-            b"Y" if pred_ll_ok else b"N",
-            b"Y" if pred_r_ok else b"N",
-            b"Y" if have_models else b"N",
-        )
-
-    return False
-
-cdef double compute_residual_norm_efficient(MemoryPool* pool, double* prev_weights,
-                                           EMAlgorithmConfig* config,
-                                           PrecomputedWeights* precomp) except -1.0 nogil:
-
-    cdef double* current_weights = get_reference_weights(pool)
-    cdef double* temp_weights = get_temp_buffer_B(pool)
-    cdef double norm_squared = 0.0
-    cdef uint32_t i
-    cdef double diff
-
-    memcpy(temp_weights, current_weights, pool.reference_count * sizeof(double))
-
-    memcpy(current_weights, prev_weights, pool.reference_count * sizeof(double))
-
-    cdef int32_t thread_cnt = config.thread_count
-    execute_em_expectation_step_vectorized(pool, thread_cnt, precomp)
-    execute_em_maximization_step_vectorized(pool, config.regularization_weight, precomp,
-                                           config, 0, -1e20, -1e20)
-
-    for i in range(pool.reference_count):
-        diff = current_weights[i] - prev_weights[i]
-        norm_squared += diff * diff
-
-    memcpy(current_weights, temp_weights, pool.reference_count * sizeof(double))
-
-    return libc_sqrt(norm_squared)
-
-
-cdef void compute_initialization_stats(MemoryPool* pool, InitializationStats* stats) noexcept nogil:
-    cdef int64_t i
-    cdef float score
-    cdef double sum_score = 0.0
-    
-    stats.min_score = 1e30
-    stats.max_score = -1e30
-    stats.total_alignments = pool.alignment_count
-    
-    for i in range(pool.alignment_count):
-        score = pool.alignments[i].alignment_score
-        if score < stats.min_score:
-            stats.min_score = score
-        if score > stats.max_score:
-            stats.max_score = score
-        sum_score += score
-    
-    stats.mean_score = sum_score / pool.alignment_count if pool.alignment_count > 0 else 0.0
-    stats.score_range = stats.max_score - stats.min_score
-    
-    bf_nogil_logf_notime(
-        b"EM",
-        "initialization_stats: min_score=%.3f max_score=%.3f mean_score=%.3f range=%.3f",
-        stats.min_score,
-        stats.max_score,
-        stats.mean_score,
-        stats.score_range,
-    )
-
-
-cdef int64_t identify_unique_alignments(MemoryPool* pool, InitializationStats* stats,
-                                       UniqueAlignment* unique_alignments, int64_t capacity) noexcept nogil:
-    cdef int64_t unique_count = 0
-    cdef UniqueAlignment* uniques = unique_alignments
-    cdef uint32_t read_idx
-    cdef uint64_t start_pos, end_pos, ai
-    cdef uint32_t alignment_count
-    cdef float best_score, second_best_score, score_gap, current_score
-    cdef uint32_t best_ref_idx, second_best_ref_idx
-    cdef double dynamic_threshold
-    
-    if not uniques:
-        return -1
-    
-    dynamic_threshold = fmax(5.0, stats.score_range * 0.2)
-    
-    bf_nogil_logf_notime(
-        b"EM",
-        "unique_detection: gap_threshold=%.3f range_fraction=%.1f%%",
-        dynamic_threshold,
-        (dynamic_threshold / stats.score_range) * 100.0 if stats.score_range > 0 else 0.0,
-    )
-    
-    for read_idx in range(pool.unique_read_count):
-        alignment_count = pool.read_alignment_counts[read_idx]
-        if alignment_count == 0:
-            continue
-            
-        start_pos = pool.read_alignment_starts[read_idx]
-        end_pos = start_pos + alignment_count
-        
-        if alignment_count == 1:
-            ai = start_pos
-            uniques[unique_count].read_index = read_idx
-            uniques[unique_count].reference_index = pool.alignments[ai].reference_index
-            uniques[unique_count].alignment_score = pool.alignments[ai].alignment_score
-            uniques[unique_count].confidence_score = 100.0 
-            unique_count += 1
-            
-        else:
-            best_score = -1e30
-            second_best_score = -1e30
-            best_ref_idx = 0
-            second_best_ref_idx = 0
-            
-            for ai in range(start_pos, end_pos):
-                current_score = pool.alignments[ai].alignment_score
-                if (current_score > best_score) or (current_score == best_score and pool.alignments[ai].reference_index < best_ref_idx):
-                    second_best_score = best_score
-                    second_best_ref_idx = best_ref_idx
-                    best_score = current_score
-                    best_ref_idx = pool.alignments[ai].reference_index
-                elif (current_score > second_best_score) or (current_score == second_best_score and pool.alignments[ai].reference_index < second_best_ref_idx):
-                    second_best_score = current_score
-                    second_best_ref_idx = pool.alignments[ai].reference_index
-            
-            score_gap = best_score - second_best_score
-            if score_gap >= dynamic_threshold:
-                uniques[unique_count].read_index = read_idx
-                uniques[unique_count].reference_index = best_ref_idx
-                uniques[unique_count].alignment_score = best_score
-                uniques[unique_count].confidence_score = score_gap
-                unique_count += 1
-    
-    stats.unique_alignments = unique_count
-    stats.uniqueness_ratio = <double>unique_count / <double>pool.final_unique_reads
-    
-    bf_nogil_logf_notime(
-        b"EM",
-        "unique_detection: unique_alignments=%lld total_reads=%u coverage=%.1f%%",
-        <long long>unique_count,
-        pool.final_unique_reads,
-        stats.uniqueness_ratio * 100.0,
-    )
-    
-    return unique_count
-
-cdef void compute_quality_weights(MemoryPool* pool, InitializationStats* stats,
-                                UniqueAlignment* unique_alignments, int64_t unique_count,
-                                double* quality_weighted_counts) noexcept nogil:
-    cdef int64_t i
-    cdef uint32_t ref_idx
-    cdef double score_percentile, quality_weight
-    cdef double score_normalized, score_weight, confidence_weight
-    
-    memset(quality_weighted_counts, 0, pool.reference_count * sizeof(double))
-
-    if unique_count <= 0:
-        bf_nogil_logf_notime(b"EM", "quality_weighting: applied=false unique_alignments=0")
-        return
-
-    for i in range(unique_count):
-        ref_idx = unique_alignments[i].reference_index
-        if ref_idx >= pool.reference_count:
-            continue
-        
-        if stats.score_range > 0.0:
-            score_normalized = (unique_alignments[i].alignment_score - stats.min_score) / stats.score_range
-        else:
-            score_normalized = 0.5
-
-        score_weight = 0.1 + 0.9 * score_normalized
-        confidence_weight = fmin(1.0, unique_alignments[i].confidence_score / 10.0)
-        quality_weight = 0.7 * score_weight + 0.3 * confidence_weight
-        quality_weighted_counts[ref_idx] += quality_weight
-
-    bf_nogil_logf_notime(
-        b"EM",
-        "quality_weighting: applied=true unique_alignments=%lld",
-        <long long>unique_count,
-    )
-
-cdef void initialize_em_weights(MemoryPool* pool, EMAlgorithmConfig* config) noexcept nogil:
-    """Initialize reference weights using quality-weighted unique alignments.
-
-    Uses simplified initialization approach:
-    - Quality-weighted counting from unique alignments
-    - Dirichlet prior for regularization
-    - No length normalization (inappropriate for short ancient DNA)
-    - No penalty pre-correction (moved to post-EM filtering)
+def run_em_python(pool_capsule, config_dict):
+    """
+    Python wrapper for EM algorithm.
 
     Parameters
     ----------
-    pool : MemoryPool*
-        Memory pool to initialize
-    config : EMAlgorithmConfig*
-        Configuration with prior strength parameter
+    pool_capsule : PyCapsule
+        Capsule containing MemoryPool pointer
+    config_dict : dict
+        Configuration dictionary with keys:
+        - max_iterations: int
+        - convergence_tolerance: float
+        - dirichlet_prior: float
+        - gamma_prior: float
+        - power_rho: float
+        - unknown_enabled: bool
+        - unknown_margin: float
+        - hierarchical_enabled: bool
+        - D_avg_5p, D_avg_3p, epsilon_error: float
+        - squarem_enabled: bool
+        - squarem_start_iter: int
+        - thread_count: int
+
+    Returns
+    -------
+    tuple
+        (iterations, output_weights) or (error_code, None)
     """
-    cdef InitializationStats stats
-    cdef UniqueAlignment* unique_alignments = NULL
-    cdef int64_t unique_count
-    cdef double* reference_weights = get_reference_weights(pool)
-    cdef double* quality_counts = get_temp_buffer_A(pool)
-    
-    cdef uint32_t ref_idx
-    cdef int64_t i
-    cdef double uniform_weight = 1.0 / pool.reference_count
-    cdef double alpha_prior = config.init_prior_strength  # Dirichlet concentration parameter from config
-    cdef double total_sum = 0.0
+    import numpy as np
 
-    bf_nogil_logf_notime(b"EM", "initialization: stage=start")
+    cdef void* pool_ptr = PyCapsule_GetPointer(pool_capsule, <char*>NULL)
+    cdef MemoryPool* pool = <MemoryPool*>pool_ptr
 
-    compute_initialization_stats(pool, &stats)
-    
-    unique_alignments = <UniqueAlignment*>malloc(pool.final_unique_reads * sizeof(UniqueAlignment))
-    if not unique_alignments:
-        bf_nogil_logf_notime(b"EM", "initialization_fallback: reason=allocation_failed strategy=uniform")
-        for ref_idx in range(pool.reference_count):
-            reference_weights[ref_idx] = uniform_weight
-        return
-    
-    unique_count = identify_unique_alignments(pool, &stats, unique_alignments, pool.final_unique_reads)
-    if unique_count <= 0:
-        bf_nogil_logf_notime(b"EM", "initialization_fallback: reason=no_unique_alignments strategy=uniform")
-        for ref_idx in range(pool.reference_count):
-            reference_weights[ref_idx] = uniform_weight
-        free(unique_alignments)
-        return
-    
-    # Compute quality-weighted counts (keeps existing logic)
-    compute_quality_weights(pool, &stats, unique_alignments, unique_count, quality_counts)
+    # Build config
+    cdef EMConfig config
+    config.max_iterations = config_dict.get('max_iterations', 50)
+    config.convergence_tolerance = config_dict.get('convergence_tolerance', 1e-6)
+    config.dirichlet_prior = config_dict.get('dirichlet_prior', 0.01)
+    config.gamma_prior = config_dict.get('gamma_prior', 1.0)
+    config.power_rho = config_dict.get('power_rho', 1.0)
+    config.unknown_enabled = config_dict.get('unknown_enabled', False)
+    config.unknown_margin = config_dict.get('unknown_margin', 2.0)
+    config.hierarchical_enabled = config_dict.get('hierarchical_enabled', False)
+    config.D_avg_5p = config_dict.get('D_avg_5p', 0.02)
+    config.D_avg_3p = config_dict.get('D_avg_3p', 0.02)
+    config.epsilon_error = config_dict.get('epsilon_error', 0.01)
+    config.squarem_enabled = config_dict.get('squarem_enabled', True)
+    config.squarem_start_iter = config_dict.get('squarem_start_iter', 3)
+    config.enable_globalization = config_dict.get('enable_globalization', True)
+    config.backtrack_factor = config_dict.get('backtrack_factor', 0.5)
+    config.max_backtrack_steps = config_dict.get('max_backtrack_steps', 5)
+    config.thread_count = config_dict.get('thread_count', 1)
+    config.history_length = config_dict.get('history_length', 5)
 
-    total_sum = 0.0
-    for ref_idx in range(pool.reference_count):
-        reference_weights[ref_idx] = quality_counts[ref_idx] + alpha_prior
-        total_sum += reference_weights[ref_idx]
-    
-    if total_sum > 0.0:
-        for ref_idx in range(pool.reference_count):
-            reference_weights[ref_idx] /= total_sum
-    else:
-        for ref_idx in range(pool.reference_count):
-            reference_weights[ref_idx] = uniform_weight
+    # Allocate output
+    cdef uint32_t n_refs = pool.reference_count
+    output_weights = np.zeros(n_refs, dtype=np.float64)
+    cdef double[::1] output_view = output_weights
 
-    free(unique_alignments)
-    cdef double min_weight = 1e30
-    cdef double max_weight = 0.0
-    cdef uint32_t refs_with_evidence = 0
-    
-    for ref_idx in range(pool.reference_count):
-        if reference_weights[ref_idx] < min_weight:
-            min_weight = reference_weights[ref_idx]
-        if reference_weights[ref_idx] > max_weight:
-            max_weight = reference_weights[ref_idx]
-        if quality_counts[ref_idx] > 0.0:
-            refs_with_evidence += 1
-    
-    bf_nogil_logf_notime(
-        b"EM",
-        "initialization_summary: unique_alignments=%lld references_with_signal=%u/%u weight_min=%.6f weight_max=%.6f prior=%.2f",
-        <long long>unique_count,
-        refs_with_evidence,
-        pool.reference_count,
-        min_weight,
-        max_weight,
-        alpha_prior,
-    )
+    # Run EM
+    cdef int result
+    with nogil:
+        result = run_em(pool_ptr, &config, &output_view[0])
 
-cdef void diagnose_initialization_quality(MemoryPool* pool) noexcept nogil:
+    if result < 0:
+        return (result, None)
+
+    return (result, output_weights)
+
+
+def execute_em_py(
+    uintptr_t pool_ptr,
+    int max_iterations,
+    double convergence_tolerance,
+    double dirichlet_prior,
+    double power_rho,
+    bint unknown_enabled,
+    double unknown_margin,
+    bint hierarchical_enabled,
+    double D_avg_5p,
+    double D_avg_3p,
+    double epsilon_error,
+    bint squarem_enabled,
+    int squarem_start_iter,
+    bint enable_globalization,
+    double backtrack_factor,
+    int max_backtrack_steps,
+    int thread_count,
+):
     """
-    Print diagnostics about the initial EM weight vector.
+    Python wrapper for EM algorithm.
 
-    This helper computes basic summary statistics (min/max, entropy,
-    dominant reference counts) for the reference weight distribution and
-    prints human-readable diagnostics to aid debugging of EM initialization.
+    Updates the memory pool's reference weights in place.
 
     Parameters
     ----------
-    pool : MemoryPool*
-        Memory pool containing the initialized reference weights.
+    pool_ptr : uintptr_t
+        Pointer to MemoryPool
+    max_iterations : int
+        Maximum EM iterations
+    convergence_tolerance : double
+        Convergence threshold
+    dirichlet_prior : double
+        Dirichlet prior alpha
+    power_rho : double
+        Power transform exponent (1.0 = no transform, <1 = flattening)
+    unknown_enabled : bool
+        Enable unknown component
+    unknown_margin : double
+        Margin below best score for unknown
+    hierarchical_enabled : bool
+        Enable hierarchical ancient/modern
+    D_avg_5p, D_avg_3p : double
+        Average PMD damage rates
+    epsilon_error : double
+        Sequencing error rate
+    squarem_enabled : bool
+        Enable SQUAREM acceleration
+    squarem_start_iter : int
+        Start SQUAREM after this iteration
+    enable_globalization : bool
+        Enable backtracking
+    backtrack_factor : double
+        Backtracking step reduction
+    max_backtrack_steps : int
+        Maximum backtracking attempts
+    thread_count : int
+        Number of threads
+
+    Returns
+    -------
+    int
+        0 on success, -1 on failure
     """
-    cdef double* weights = get_reference_weights(pool)
-    cdef double entropy = 0.0
-    cdef double max_weight = 0.0
-    cdef double min_weight = 1e30
-    cdef uint32_t dominant_refs = 0
-    cdef uint32_t ref_idx
-    cdef double w
-    cdef double max_entropy = log(<double>pool.reference_count)
-    cdef double entropy_ratio
-    
-    for ref_idx in range(pool.reference_count):
-        w = weights[ref_idx]
-        if w > max_weight:
-            max_weight = w
-        if w < min_weight:
-            min_weight = w
-        if w > 2.0 / pool.reference_count:
-            dominant_refs += 1
-        if w > 1e-15:
-            entropy -= w * log(w)
-    
-    entropy_ratio = entropy / max_entropy if max_entropy > 0.0 else 0.0
-    
-    bf_nogil_logf_notime(
-        b"EM",
-        "initialization_diagnostics: weight_min=%.6f weight_max=%.6f ratio=%.1fx entropy=%.3f/%.3f entropy_pct=%.1f dominant_refs=%u/%u (%.1f%%)",
-        min_weight,
-        max_weight,
-        max_weight / fmax(min_weight, 1e-15),
-        entropy,
-        max_entropy,
-        entropy_ratio * 100.0,
-        dominant_refs,
-        pool.reference_count,
-        (dominant_refs * 100.0) / pool.reference_count,
-    )
+    import numpy as np
+
+    cdef MemoryPool* pool = <MemoryPool*>pool_ptr
+    cdef uint32_t n_refs = pool.reference_count
+    cdef uint32_t j
+
+    # Build config
+    cdef EMConfig config
+    config.max_iterations = max_iterations
+    config.convergence_tolerance = convergence_tolerance
+    config.dirichlet_prior = dirichlet_prior
+    config.gamma_prior = 1.0  # Default
+    config.power_rho = power_rho
+    config.unknown_enabled = unknown_enabled
+    config.unknown_margin = unknown_margin
+    config.hierarchical_enabled = hierarchical_enabled
+    config.D_avg_5p = D_avg_5p
+    config.D_avg_3p = D_avg_3p
+    config.epsilon_error = epsilon_error
+    config.squarem_enabled = squarem_enabled
+    config.squarem_start_iter = squarem_start_iter
+    config.enable_globalization = enable_globalization
+    config.backtrack_factor = backtrack_factor
+    config.max_backtrack_steps = max_backtrack_steps
+    config.thread_count = thread_count
+    config.history_length = 5  # Default
+
+    # Allocate output buffer
+    output_weights = np.zeros(n_refs, dtype=np.float64)
+    cdef double[::1] output_view = output_weights
+
+    # Run EM
+    cdef int iterations
+    cdef void* pool_void = <void*>pool_ptr
+    cdef double* ref_weights
+    with nogil:
+        iterations = run_em(pool_void, &config, &output_view[0])
+
+    if iterations < 0:
+        return -1
+
+    # Copy output weights back to pool's reference weights
+    # This matches what execute_em_algorithm does
+    ref_weights = get_reference_weights(pool)
+    for j in range(n_refs):
+        ref_weights[j] = output_view[j]
+
+    # Update pool iteration count and convergence flag
+    pool.iteration_count = iterations
+    pool.algorithm_converged = (iterations < max_iterations)
+
+    return 0
