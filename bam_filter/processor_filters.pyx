@@ -20,7 +20,7 @@ from cython.parallel cimport prange, threadid
 
 from libc.stdlib cimport calloc, free, malloc, realloc
 from libc.string cimport memset
-from libc.stdint cimport int64_t, int32_t, uint32_t, uint64_t
+from libc.stdint cimport int64_t, int32_t, uint32_t, uint64_t, uint8_t
 from libc.math cimport log2, fmin, fmax, exp, sqrt, pow, INFINITY
 
 cdef uint32_t UINT32_MAX = 0xFFFFFFFF
@@ -61,6 +61,13 @@ from bam_filter.processor_graph_taxonomy cimport (
     detect_taxonomy_anomalies,
     TaxonomyGraphConfig
 )
+from bam_filter.processor_network_qc cimport (
+    NetworkQCConfig,
+    NetworkQCReference,
+    compute_reference_qc_metrics,
+    compute_tax_ambiguity_flags,
+)
+
 cdef extern from "bam_filter/c_logging.h":
     void bf_nogil_logf_notime(const char* tag, const char* fmt, ...) nogil
 cdef extern from "htslib/sam.h":
@@ -144,8 +151,10 @@ cdef int apply_probability_filtering(MemoryPool* pool, EMAlgorithmConfig* config
         end_pos = start_pos + alignment_count
         if alignment_count == 1:
             read_max_probs[read_idx] = 1.0
-            if 1.0 >= min_threshold and (fraction_threshold == 0.0 or 1.0 >= fraction_threshold * 1.0):
-                survivors_per_read[read_idx] = 1
+            # Check corrected ANI filter (set by PMD correction stage)
+            if pool.alignments[start_pos].passes_ani_filter == 1:
+                if 1.0 >= min_threshold and (fraction_threshold == 0.0 or 1.0 >= fraction_threshold * 1.0):
+                    survivors_per_read[read_idx] = 1
             continue
 
         log_norm = NEG_INF
@@ -160,7 +169,10 @@ cdef int apply_probability_filtering(MemoryPool* pool, EMAlgorithmConfig* config
             uniform_zp = 1.0 / alignment_count if alignment_count > 0 else 0.0
             read_max_probs[read_idx] = uniform_zp
             if uniform_zp >= min_threshold and (fraction_threshold == 0.0 or uniform_zp >= fraction_threshold * uniform_zp):
-                survivors_per_read[read_idx] = alignment_count
+                # Count only alignments that pass corrected ANI filter
+                for ai in range(start_pos, end_pos):
+                    if pool.alignments[ai].passes_ani_filter == 1:
+                        survivors_per_read[read_idx] += 1
             continue
 
         p = 0.0
@@ -177,7 +189,7 @@ cdef int apply_probability_filtering(MemoryPool* pool, EMAlgorithmConfig* config
         thr = fraction_threshold * p
         for ai in range(start_pos, end_pos):
             ref_idx = pool.alignments[ai].reference_index
-            if ref_idx < pool.reference_count:
+            if ref_idx < pool.reference_count and pool.alignments[ai].passes_ani_filter == 1:
                 alignment_score = pool.alignments[ai].alignment_score
                 log_lik = <double>alignment_score
                 log_weighted = precomp.log_weights[ref_idx] + log_lik
@@ -218,11 +230,13 @@ cdef int apply_probability_filtering(MemoryPool* pool, EMAlgorithmConfig* config
 
         if alignment_count == 1:
             p = 1.0
-            if p >= min_threshold and (fraction_threshold == 0.0 or p >= fraction_threshold * 1.0):
-                if write_idx != start_pos:
-                    pool.alignments[write_idx] = pool.alignments[start_pos]
-                pool.precomputed_zp_values[write_idx] = 1.0
-                write_idx += 1
+            # Check corrected ANI filter before keeping
+            if pool.alignments[start_pos].passes_ani_filter == 1:
+                if p >= min_threshold and (fraction_threshold == 0.0 or p >= fraction_threshold * 1.0):
+                    if write_idx != start_pos:
+                        pool.alignments[write_idx] = pool.alignments[start_pos]
+                    pool.precomputed_zp_values[write_idx] = 1.0
+                    write_idx += 1
             continue
 
         log_norm = NEG_INF
@@ -237,16 +251,19 @@ cdef int apply_probability_filtering(MemoryPool* pool, EMAlgorithmConfig* config
             uniform_zp = 1.0 / alignment_count if alignment_count > 0 else 0.0
             if uniform_zp >= min_threshold and (fraction_threshold == 0.0 or uniform_zp >= fraction_threshold * uniform_zp):
                 for ai in range(start_pos, end_pos):
-                    if write_idx != ai:
-                        pool.alignments[write_idx] = pool.alignments[ai]
-                    pool.precomputed_zp_values[write_idx] = uniform_zp
-                    write_idx += 1
+                    # Check corrected ANI filter
+                    if pool.alignments[ai].passes_ani_filter == 1:
+                        if write_idx != ai:
+                            pool.alignments[write_idx] = pool.alignments[ai]
+                        pool.precomputed_zp_values[write_idx] = uniform_zp
+                        write_idx += 1
             continue
 
         thr = (<double>fraction_threshold) * (<double>read_max_probs[read_idx])
         for ai in range(start_pos, end_pos):
             ref_idx = pool.alignments[ai].reference_index
-            if ref_idx < pool.reference_count:
+            # Check both reference index and corrected ANI filter
+            if ref_idx < pool.reference_count and pool.alignments[ai].passes_ani_filter == 1:
                 alignment_score = pool.alignments[ai].alignment_score
                 log_weighted = precomp.log_weights[ref_idx] + alignment_score
                 posterior = exp(log_weighted - log_norm)
@@ -480,7 +497,9 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
                                        uint32_t hub_degree_threshold,
                                        bint strict_mode,
                                        bint remove_cross_domain_edges,
-                                       bint flag_misannotations) except -1 nogil:
+                                       bint flag_misannotations,
+                                       NetworkQCConfig* network_qc_config,
+                                       uint8_t tax_ambiguity_removal_level) except -1 nogil:
     """Apply three-tier filtering that combines clustering, topology metrics, and taxonomy checks.
 
     Parameters
@@ -753,6 +772,126 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
     ) != 0:
         bf_nogil_logf_notime(b"CLUSTER", "ERROR: Tiered filtering failed\\n")
         # Continue anyway, don't fail completely
+
+    # =========================================================================
+    # Network QC Filtering (Taxonomic Ambiguity Detection)
+    # =========================================================================
+    # Computes neighbor taxonomy entropy per node and flags references with
+    # taxonomically diverse neighbors. HUB references are skipped since they
+    # are expected to have high entropy by nature (many connections).
+    cdef NetworkQCReference* network_qc_metrics = NULL
+    cdef uint32_t tax_ambiguity_removed = 0
+    cdef uint32_t qc_idx
+    cdef int32_t* community_ids_for_qc = NULL
+    cdef int32_t* taxonomy_ids_for_qc = NULL
+    cdef char* structural_roles_for_qc = NULL
+    cdef uint32_t max_community_id = 0
+    cdef uint32_t nodes_with_neighbors = 0
+    cdef uint32_t nodes_processed = 0
+    cdef uint32_t flag_counts[4]
+    cdef uint32_t fl
+
+    if network_qc_config != NULL and tax_ambiguity_removal_level > 0:
+        if verbose:
+            bf_nogil_logf_notime(b"NETQC", "Applying network QC filtering (removal_level=%d)...\n", tax_ambiguity_removal_level)
+
+        # Allocate network QC metrics array
+        network_qc_metrics = <NetworkQCReference*>calloc(array_size, sizeof(NetworkQCReference))
+        if network_qc_metrics == NULL:
+            bf_nogil_logf_notime(b"NETQC", "ERROR: Failed to allocate network QC metrics\\n")
+        else:
+            # Build community IDs, taxonomy IDs, and structural roles arrays
+            community_ids_for_qc = <int32_t*>calloc(array_size, sizeof(int32_t))
+            taxonomy_ids_for_qc = <int32_t*>calloc(array_size, sizeof(int32_t))
+            structural_roles_for_qc = <char*>calloc(array_size, sizeof(char))
+
+            if community_ids_for_qc != NULL and taxonomy_ids_for_qc != NULL and structural_roles_for_qc != NULL:
+                # Populate community and taxonomy IDs
+                # Note: UINT32_MAX is used as sentinel for isolated nodes
+                for qc_idx in range(array_size):
+                    if community_results != NULL and qc_idx < community_results.num_nodes:
+                        if community_results.community_membership[qc_idx] == UINT32_MAX:
+                            # Isolated node - use -1 for int32 representation
+                            community_ids_for_qc[qc_idx] = -1
+                        else:
+                            community_ids_for_qc[qc_idx] = <int32_t>community_results.community_membership[qc_idx]
+                            # Track max valid community ID (skip sentinel values)
+                            if community_results.community_membership[qc_idx] > max_community_id:
+                                max_community_id = community_results.community_membership[qc_idx]
+                    else:
+                        community_ids_for_qc[qc_idx] = -1  # No community
+
+                    # Get taxonomy ID and structural role from pattern_data if available
+                    if pattern_data != NULL:
+                        taxonomy_ids_for_qc[qc_idx] = pattern_data[qc_idx].taxid
+                        structural_roles_for_qc[qc_idx] = pattern_data[qc_idx].structural_role
+                    else:
+                        taxonomy_ids_for_qc[qc_idx] = -1
+                        structural_roles_for_qc[qc_idx] = 0  # PERIPHERAL
+
+                # Compute per-reference QC metrics
+                # Note: This is a simplified version that uses existing neighbor data
+                nodes_with_neighbors = 0
+                nodes_processed = 0
+                for qc_idx in range(array_size):
+                    if neighbor_lists != NULL and neighbor_counts != NULL and neighbor_lists[qc_idx] != NULL:
+                        nodes_with_neighbors += 1
+                        if neighbor_counts[qc_idx] > 0:
+                            nodes_processed += 1
+                            compute_reference_qc_metrics(
+                                qc_idx,
+                                &network_qc_metrics[qc_idx],
+                                community_ids_for_qc,
+                                taxonomy_ids_for_qc,
+                                neighbor_lists[qc_idx],
+                                NULL,  # neighbor_weights (use degree)
+                                neighbor_counts[qc_idx],
+                                NULL,  # community_strength_sums
+                                NULL,  # community_strength_sq
+                                NULL,  # community_counts
+                                max_community_id + 1,  # n_communities
+                                community_ids_for_qc[qc_idx],  # ref_community
+                                network_qc_config,
+                            )
+
+                # Compute taxonomic ambiguity flags (skips HUB references)
+                compute_tax_ambiguity_flags(network_qc_metrics, array_size, structural_roles_for_qc, network_qc_config)
+
+                # Count tax ambiguity flags at each level for logging
+                for fl in range(4):
+                    flag_counts[fl] = 0
+                for qc_idx in range(array_size):
+                    if network_qc_metrics[qc_idx].tax_ambiguity_flag < 4:
+                        flag_counts[network_qc_metrics[qc_idx].tax_ambiguity_flag] += 1
+
+                if verbose:
+                    bf_nogil_logf_notime(b"NETQC", "qc_analyzed=%u communities=%u flags: clean=%u biased=%u mixed=%u highly_mixed=%u\n",
+                                         nodes_processed, max_community_id + 1,
+                                         flag_counts[0], flag_counts[1], flag_counts[2], flag_counts[3])
+
+                # Apply taxonomic ambiguity filtering and copy metrics to pattern_data for TSV export
+                for qc_idx in range(array_size):
+                    # Copy QC metrics to pattern_data for export
+                    if pattern_data != NULL:
+                        pattern_data[qc_idx].neighbor_tax_entropy = network_qc_metrics[qc_idx].neighbor_tax_entropy
+                        pattern_data[qc_idx].tax_ambiguity_flag = network_qc_metrics[qc_idx].tax_ambiguity_flag
+
+                    # Apply filtering based on tax ambiguity flag
+                    if network_qc_metrics[qc_idx].tax_ambiguity_flag >= tax_ambiguity_removal_level:
+                        if keep_flag[qc_idx]:  # Only count if not already removed
+                            keep_flag[qc_idx] = 0
+                            tax_ambiguity_removed += 1
+
+                bf_nogil_logf_notime(b"NETQC", "Network QC filtering: removed %u taxonomically ambiguous references\n", tax_ambiguity_removed)
+
+            # Cleanup
+            if community_ids_for_qc != NULL:
+                free(community_ids_for_qc)
+            if taxonomy_ids_for_qc != NULL:
+                free(taxonomy_ids_for_qc)
+            if structural_roles_for_qc != NULL:
+                free(structural_roles_for_qc)
+            free(network_qc_metrics)
 
     # Cleanup neighbor lists (after edge removal is complete)
     if neighbor_lists != NULL and neighbor_counts != NULL:

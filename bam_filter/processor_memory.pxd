@@ -15,3 +15,5 @@ cdef void destroy_memory_pool(MemoryPool* pool) noexcept nogil
 cdef int shrink_memory_pool(MemoryPool* pool) except -1 nogil
 
 cdef void cleanup_presorted_memory() noexcept nogil
+
+cdef void cleanup_em_intermediate_memory(MemoryPool* pool) noexcept nogil

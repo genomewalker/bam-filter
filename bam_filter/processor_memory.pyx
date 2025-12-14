@@ -342,6 +342,74 @@ cdef void destroy_memory_pool(MemoryPool* pool) noexcept nogil:
     free(pool)
 
 
+cdef void cleanup_em_intermediate_memory(MemoryPool* pool) noexcept nogil:
+    """Free EM algorithm intermediate memory after probability filtering.
+
+    This function frees memory that is only needed during EM iterations,
+    reducing peak memory usage before graph analysis stages. It preserves:
+    - gamma_values: Needed for output (ancient/modern classification)
+    - precomputed_zp_values: Needed for BAM writing
+    - unified_buffer: Part of memory pool, contains reference lengths
+
+    Memory freed:
+    - squarem_block: SQUAREM acceleration scratch memory
+    - eta_values: Hierarchical EM intermediate (logit of gamma)
+    - S_anc_accum: Hierarchical EM ancient accumulator
+    - S_mod_accum: Hierarchical EM modern accumulator
+    - scratch_read_max_probs: Filtering scratch arrays
+    - scratch_survivors_per_read: Filtering scratch arrays
+
+    Parameters
+    ----------
+    pool : MemoryPool*
+        Memory pool to clean up (safe to pass NULL)
+    """
+    cdef size_t freed_bytes = 0
+
+    if not pool:
+        return
+
+    # Free SQUAREM scratch memory
+    if pool.squarem_block != NULL:
+        freed_bytes += pool.squarem_block_capacity * sizeof(double)
+        free(pool.squarem_block)
+        pool.squarem_block = NULL
+        pool.squarem_block_capacity = 0
+
+    # Free hierarchical EM intermediate arrays (but NOT gamma_values - needed for output)
+    if pool.eta_values != NULL:
+        freed_bytes += pool.reference_count * sizeof(double)
+        free(pool.eta_values)
+        pool.eta_values = NULL
+
+    if pool.S_anc_accum != NULL:
+        freed_bytes += pool.reference_count * sizeof(double)
+        free(pool.S_anc_accum)
+        pool.S_anc_accum = NULL
+
+    if pool.S_mod_accum != NULL:
+        freed_bytes += pool.reference_count * sizeof(double)
+        free(pool.S_mod_accum)
+        pool.S_mod_accum = NULL
+
+    # Free filtering scratch arrays
+    if pool.scratch_read_max_probs != NULL:
+        freed_bytes += pool.scratch_unique_read_count * sizeof(float)
+        free(pool.scratch_read_max_probs)
+        pool.scratch_read_max_probs = NULL
+
+    if pool.scratch_survivors_per_read != NULL:
+        freed_bytes += pool.scratch_unique_read_count * sizeof(int32_t)
+        free(pool.scratch_survivors_per_read)
+        pool.scratch_survivors_per_read = NULL
+
+    pool.scratch_unique_read_count = 0
+
+    if freed_bytes > 0:
+        bf_nogil_logf_notime(b"MEMORY", "cleanup_em_intermediate: freed %.1f MB",
+                            <double>freed_bytes / (1024.0 * 1024.0))
+
+
 cdef int shrink_memory_pool(MemoryPool* pool) except -1 nogil:
     """Shrink memory pool to used capacity.
 

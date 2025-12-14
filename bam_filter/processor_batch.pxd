@@ -1,5 +1,5 @@
 # cython: language_level=3
-from libc.stdint cimport uint32_t, uint64_t, int32_t, int64_t
+from libc.stdint cimport uint32_t, uint64_t, int32_t, int64_t, uint8_t, uint16_t
 from libc.stddef cimport size_t
 
 # Import shared types and HTSlib typedefs (use relative cimports so sibling pxds are found)
@@ -8,6 +8,9 @@ from .processor_sort cimport radix_sort_uint64, radix_sort_alignments_by_read_id
 from .processor cimport hts_idx_t, hts_itr_t, samFile, sam_hdr_t
 from .processor_types cimport CompactAlignment
 from .processor_hash cimport ThreadLocalHashMap
+
+# Import PMD context for thread-local stats collection
+from .processor_pmd cimport PMDGlobalContext
 from .processor_hash cimport (
     kh_seqid_map_t, 
     khint_t, 
@@ -31,6 +34,14 @@ cdef struct BatchAlignment:
     uint32_t alignment_position
     float    alignment_score
     float    pmd_score
+    # ANI snapshot fields (for on-the-fly AN/DA tag computation)
+    uint16_t aligned_length       # Total aligned bases
+    uint16_t match_count          # Exact matches
+    uint8_t  ct_5p_count          # C→T mismatches in first 8bp from 5' end
+    uint8_t  ga_3p_count          # G→A mismatches in last 8bp from 3' end
+    # Damage opportunity counts (for hierarchical EM)
+    uint8_t  c_at_5p_count        # C bases in reference at first 8bp (5' damage zone)
+    uint8_t  g_at_3p_count        # G bases in reference at last 8bp (3' damage zone)
 
 cdef struct ProcessingBatch:
     int64_t batch_identifier
@@ -58,7 +69,16 @@ cdef int process_batch_alignments(samFile* bam_file, sam_hdr_t* header,
                                            ProcessingBatch* batch,
                                            AlignmentScoringConfig* scoring_config,
                                            ThreadLocalHashMap* thread_map,
-                                           int32_t thread_id) except -1 nogil 
+                                           int32_t thread_id) except -1 nogil
+
+# Extended version with PMD stats collection
+cdef int process_batch_alignments_with_pmd(samFile* bam_file, sam_hdr_t* header,
+                                            hts_idx_t* index, int64_t* reference_ids,
+                                            ProcessingBatch* batch,
+                                            AlignmentScoringConfig* scoring_config,
+                                            ThreadLocalHashMap* thread_map,
+                                            int32_t thread_id,
+                                            PMDGlobalContext* pmd_context) except -1 nogil 
 
 cdef int assign_global_sequential_ids_fast(ProcessingBatch** batches, int64_t batch_count,
                                           ThreadLocalHashMap** thread_maps, int num_threads) except -1 nogil 

@@ -1,13 +1,14 @@
 # cython: language_level=3
 # Declarations exported by processor_filters.pyx
 
-from libc.stdint cimport int32_t, int64_t, uint32_t
+from libc.stdint cimport int32_t, int64_t, uint32_t, uint8_t
 from bam_filter.processor cimport MemoryPool
 from bam_filter.processor_graph cimport ReferencePattern, ReferenceStats, GraphMetrics, ReadIndex
 from bam_filter.processor_types cimport EMAlgorithmConfig
 from bam_filter.processor_graph_ops cimport WeightedGraph
 from bam_filter.processor_mapping cimport ReferenceMapping
 from bam_filter.processor_taxonomy_filters cimport TaxonomyFilterConfig, TaxonomyFilterStats
+from bam_filter.processor_network_qc cimport NetworkQCConfig
 from bam_filter.taxonomy_db cimport TaxonomyDB
 
 cdef extern from "htslib/sam.h":
@@ -41,4 +42,7 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
                                        uint32_t hub_degree_threshold,
                                        bint strict_mode,
                                        bint remove_cross_domain_edges,
-                                       bint flag_misannotations) except -1 nogil
+                                       bint flag_misannotations,
+                                       # Network QC filtering parameters
+                                       NetworkQCConfig* network_qc_config,
+                                       uint8_t chimera_removal_level) except -1 nogil

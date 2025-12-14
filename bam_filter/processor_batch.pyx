@@ -26,8 +26,19 @@ from bam_filter.processor cimport Alignment, MemoryPool, AlignmentScoringConfig
 from bam_filter.processor cimport min_int64, max_int64, INVALID_SEQUENTIAL_ID
 from bam_filter.processor_sort cimport radix_sort_alignments_by_read_id, radix_sort_uint64, radix_sort_compact_by_position
 from bam_filter.processor_hash cimport ThreadLocalHashMap, extract_read_hash_identifier
-from bam_filter.processor_md_quality cimport calculate_md_quality_score, alignment_passes_quality_filters
+from bam_filter.processor_md_quality cimport (
+    calculate_md_quality_score,
+    calculate_md_quality_score_with_stats,
+    alignment_passes_quality_filters,
+    ANIStats,
+)
 from bam_filter.processor_types cimport ProcessingError, PROCESSING_SUCCESS, PROCESSING_ERROR_MEMORY_ALLOCATION
+
+# Import PMD context and thread accumulator
+from bam_filter.processor_pmd cimport (
+    PMDGlobalContext,
+    PMDStatsAccumulator,
+)
 from cython.parallel cimport prange, threadid
 from .processor_types cimport (
     BGZF,
@@ -329,6 +340,172 @@ cdef int process_batch_alignments(samFile* bam_file, sam_hdr_t* header,
             temp_alignment.reference_index = <uint32_t>reference_id
             temp_alignment.alignment_position = <uint32_t>alignment_position
             raw_score = calculate_md_quality_score(bam_record, header, scoring_config, pmd_ptr)
+            temp_alignment.alignment_score = raw_score
+            temp_alignment.pmd_score = temp_pmd_score if scoring_config.calculate_pmd else 0.0
+
+            if batch.actual_alignment_count >= batch.batch_capacity:
+                if grow_batch_capacity(batch) != 0:
+                    batch.error_status = PROCESSING_ERROR_MEMORY_ALLOCATION
+                    hts_itr_destroy(iterator)
+                    bam_destroy1(bam_record)
+                    return -1
+
+            batch.batch_alignments[batch.actual_alignment_count] = temp_alignment
+            batch.actual_alignment_count += 1
+            alignment_position += 1
+
+        hts_itr_destroy(iterator)
+        iterator = NULL
+
+    bam_destroy1(bam_record)
+    return 0
+
+
+cdef int process_batch_alignments_with_pmd(samFile* bam_file, sam_hdr_t* header,
+                                            hts_idx_t* index, int64_t* reference_ids,
+                                            ProcessingBatch* batch,
+                                            AlignmentScoringConfig* scoring_config,
+                                            ThreadLocalHashMap* thread_map,
+                                            int32_t thread_id,
+                                            PMDGlobalContext* pmd_context) except -1 nogil:
+    """Process alignments with PMD statistics collection.
+
+    Extended version of process_batch_alignments that also collects PMD statistics
+    into thread-local accumulators and stores ANI snapshot values for each alignment.
+
+    Parameters
+    ----------
+    bam_file : samFile*
+        Open BAM file handle
+    header : sam_hdr_t*
+        BAM header
+    index : hts_idx_t*
+        BAM index for random access
+    reference_ids : int64_t*
+        Array mapping batch indices to BAM reference IDs
+    batch : ProcessingBatch*
+        Batch structure to populate
+    scoring_config : AlignmentScoringConfig*
+        Scoring and filtering configuration
+    thread_map : ThreadLocalHashMap*
+        Thread-local hash map for read ID assignment
+    thread_id : int32_t
+        Thread identifier
+    pmd_context : PMDGlobalContext*
+        Global PMD context with thread-local accumulators (NULL to skip PMD stats)
+
+    Returns
+    -------
+    int
+        0 on success, -1 on error
+    """
+    cdef hts_itr_t* iterator = NULL
+    cdef bam1_t* bam_record = NULL
+    cdef int64_t reference_id
+    cdef int32_t result_code
+    cdef int64_t alignment_position
+    cdef double raw_score
+    cdef uint64_t read_hash
+    cdef uint32_t local_sequential_id
+    cdef khint_t k
+    cdef int ret
+    cdef BatchAlignment temp_alignment
+    cdef int64_t ref_idx
+    cdef float temp_pmd_score = 0.0
+    cdef float* pmd_ptr = NULL
+    cdef ANIStats ani_stats
+    cdef ANIStats* ani_ptr = NULL
+    cdef PMDStatsAccumulator* pmd_acc = NULL
+
+    # Set up PMD output pointer if enabled
+    if scoring_config.calculate_pmd:
+        pmd_ptr = &temp_pmd_score
+
+    # Get thread-local PMD accumulator if context provided and stats collection enabled
+    if pmd_context != NULL and pmd_context.collect_stats:
+        if thread_id >= 0 and thread_id < pmd_context.num_threads:
+            pmd_acc = &pmd_context.thread_contexts[thread_id].stats
+        ani_ptr = &ani_stats
+
+    batch.processed_by_thread_id = thread_id
+
+    bam_record = bam_init1()
+    if not bam_record:
+        batch.error_status = PROCESSING_ERROR_MEMORY_ALLOCATION
+        return -1
+
+    for ref_idx in range(batch.reference_start_index, batch.reference_end_index):
+        reference_id = reference_ids[ref_idx]
+        iterator = sam_itr_queryi(index, reference_id, 0, 0x7fffffff)
+        if not iterator:
+            continue
+
+        alignment_position = 0
+        while True:
+            result_code = sam_itr_next(bam_file, iterator, bam_record)
+            if result_code < 0:
+                break
+
+            if not alignment_passes_quality_filters(bam_record, scoring_config):
+                alignment_position += 1
+                continue
+
+            read_hash = <uint64_t>extract_read_hash_identifier(bam_record)
+            k = kh_get_seqid_map(thread_map.hash_to_id_map, read_hash)
+            if k == kh_end_seqid_map(thread_map.hash_to_id_map):
+                local_sequential_id = thread_map.next_local_id
+                thread_map.next_local_id += 1
+                k = kh_put_seqid_map(thread_map.hash_to_id_map, read_hash, &ret)
+                if ret != -1:
+                    kh_val_seqid_map_wrap(thread_map.hash_to_id_map, k)[0] = local_sequential_id
+            else:
+                local_sequential_id = kh_val_seqid_map_wrap(thread_map.hash_to_id_map, k)[0]
+
+            temp_alignment.read_index = local_sequential_id
+            temp_alignment.reference_index = <uint32_t>reference_id
+            temp_alignment.alignment_position = <uint32_t>alignment_position
+
+            # Use extended function that collects PMD stats and ANI values
+            if pmd_acc != NULL or ani_ptr != NULL:
+                # Reset ANI stats for this alignment
+                if ani_ptr != NULL:
+                    ani_stats.aligned_length = 0
+                    ani_stats.match_count = 0
+                    ani_stats.ct_5p_count = 0
+                    ani_stats.ga_3p_count = 0
+                    ani_stats.other_mm_count = 0
+                    ani_stats.c_at_5p_count = 0
+                    ani_stats.g_at_3p_count = 0
+
+                raw_score = calculate_md_quality_score_with_stats(
+                    bam_record, header, scoring_config, pmd_ptr, ani_ptr, pmd_acc
+                )
+
+                # Store ANI values in batch alignment
+                if ani_ptr != NULL:
+                    temp_alignment.aligned_length = ani_stats.aligned_length
+                    temp_alignment.match_count = ani_stats.match_count
+                    temp_alignment.ct_5p_count = ani_stats.ct_5p_count
+                    temp_alignment.ga_3p_count = ani_stats.ga_3p_count
+                    temp_alignment.c_at_5p_count = ani_stats.c_at_5p_count
+                    temp_alignment.g_at_3p_count = ani_stats.g_at_3p_count
+                else:
+                    temp_alignment.aligned_length = 0
+                    temp_alignment.match_count = 0
+                    temp_alignment.ct_5p_count = 0
+                    temp_alignment.ga_3p_count = 0
+                    temp_alignment.c_at_5p_count = 0
+                    temp_alignment.g_at_3p_count = 0
+            else:
+                # Fall back to original function when PMD stats not needed
+                raw_score = calculate_md_quality_score(bam_record, header, scoring_config, pmd_ptr)
+                temp_alignment.aligned_length = 0
+                temp_alignment.match_count = 0
+                temp_alignment.ct_5p_count = 0
+                temp_alignment.ga_3p_count = 0
+                temp_alignment.c_at_5p_count = 0
+                temp_alignment.g_at_3p_count = 0
+
             temp_alignment.alignment_score = raw_score
             temp_alignment.pmd_score = temp_pmd_score if scoring_config.calculate_pmd else 0.0
 
@@ -746,6 +923,16 @@ cdef int populate_memory_pool_direct(MemoryPool* pool,
                 dst.alignment_position = src.alignment_position
                 dst.alignment_score = src.alignment_score
                 dst.pmd_score = src.pmd_score
+                # Copy ANI snapshot fields for damage-corrected ANI computation
+                dst.aligned_length = src.aligned_length
+                dst.match_count = src.match_count
+                dst.ct_5p_count = src.ct_5p_count
+                dst.ga_3p_count = src.ga_3p_count
+                dst.c_at_5p_count = src.c_at_5p_count
+                dst.g_at_3p_count = src.g_at_3p_count
+                # Initialize PMD correction fields (computed after PMD fitting)
+                dst.corrected_ani = 0.0
+                dst.passes_ani_filter = 1  # Assume passes until corrected
                 write_idx += 1
             destroy_processing_batch(batches[batch_idx])
             batches[batch_idx] = NULL
@@ -791,6 +978,16 @@ cdef int populate_memory_pool_direct(MemoryPool* pool,
                 dst[local_idx].alignment_position = src[local_idx].alignment_position
                 dst[local_idx].alignment_score = src[local_idx].alignment_score
                 dst[local_idx].pmd_score = src[local_idx].pmd_score
+                # Copy ANI snapshot fields for damage-corrected ANI computation
+                dst[local_idx].aligned_length = src[local_idx].aligned_length
+                dst[local_idx].match_count = src[local_idx].match_count
+                dst[local_idx].ct_5p_count = src[local_idx].ct_5p_count
+                dst[local_idx].ga_3p_count = src[local_idx].ga_3p_count
+                dst[local_idx].c_at_5p_count = src[local_idx].c_at_5p_count
+                dst[local_idx].g_at_3p_count = src[local_idx].g_at_3p_count
+                # Initialize PMD correction fields (computed after PMD fitting)
+                dst[local_idx].corrected_ani = 0.0
+                dst[local_idx].passes_ani_filter = 1  # Assume passes until corrected
             destroy_processing_batch(batches[batch_idx])
             batches[batch_idx] = NULL
 

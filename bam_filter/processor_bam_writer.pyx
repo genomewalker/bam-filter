@@ -22,9 +22,12 @@ from libc.string cimport memcpy, memset
 from libc.stdint cimport intptr_t
 
 # Import basic types from processor pxd
-from bam_filter.processor cimport MemoryPool, samFile
+from bam_filter.processor cimport MemoryPool, Alignment, samFile
 from bam_filter.processor_mapping cimport ReferenceMapping, create_filtered_header_efficient
 from bam_filter import logging as bf_logging
+
+# Import PMD curve for damage-corrected ANI computation
+from bam_filter.processor_pmd cimport PMDCurve, compute_raw_ani, compute_corrected_ani, ANISnapshot
 
 LOG_TAG = "BAM-WRITER"
 
@@ -385,10 +388,12 @@ cdef int write_filtered_bam(MemoryPool* pool,
 
 	Notes
 	-----
-	Adds three tags to filtered alignments:
+	Adds up to five tags to filtered alignments:
 	- ZP:f: Posterior probability from EM algorithm
 	- ZS:f: Alignment score (log-likelihood)
-	- PM:f: PMD score (if enabled)
+	- PM:f: PMD score (if PMD enabled)
+	- AN:f: Raw ANI (Average Nucleotide Identity) percentage
+	- DA:f: Damage-corrected ANI percentage (if PMD curve available)
 	"""
 	cdef samFile* in_bam = NULL
 	cdef samFile* out_bam = NULL
@@ -400,8 +405,20 @@ cdef int write_filtered_bam(MemoryPool* pool,
 	cdef uint8_t* zp_tag = <uint8_t*>malloc(7)
 	cdef uint8_t* zs_tag = <uint8_t*>malloc(7)
 	cdef uint8_t* pm_tag = <uint8_t*>malloc(7)
+	cdef uint8_t* an_tag = <uint8_t*>malloc(7)
+	cdef uint8_t* da_tag = <uint8_t*>malloc(7)
 	cdef bint write_pmd_tags = pool.pmd_enabled_for_output
-	cdef int tag_size = 14 if not write_pmd_tags else 21
+	cdef bint write_ani_tags = True  # Always write AN tag
+	cdef PMDCurve* pmd_curve = <PMDCurve*>pool.pmd_curve_ptr if pool.pmd_curve_ptr != NULL else NULL
+	cdef bint write_da_tags = (pmd_curve != NULL)  # Only write DA if curve available
+	# Tag sizes: ZP(7) + ZS(7) = 14, PM(7), AN(7), DA(7)
+	cdef int tag_size = 14  # Base: ZP + ZS
+	if write_pmd_tags:
+		tag_size += 7  # PM
+	if write_ani_tags:
+		tag_size += 7  # AN
+	if write_da_tags:
+		tag_size += 7  # DA
 	cdef uint8_t* tag_buffer = <uint8_t*>malloc(tag_size + 4)
 
 	cdef uint64_t alignments_written = 0
@@ -416,14 +433,19 @@ cdef int write_filtered_bam(MemoryPool* pool,
 	cdef bam1_t* in_record = NULL
 	cdef bam1_t* out_record = NULL
 	cdef uint64_t pool_idx
-	cdef float zp_value, zs_value, pm_value
+	cdef float zp_value, zs_value, pm_value, an_value, da_value
 	cdef uint32_t ref_id
 	cdef uint32_t alignment_position_counter
+	cdef Alignment* aln_ptr
+	cdef ANISnapshot ani_snapshot
+	cdef int tag_offset
 
-	# ASCII codes: 'Z' 90, 'P' 80, 'f' 102, 'S' 83, 'M' 77
-	zp_tag[0] = 90; zp_tag[1] = 80; zp_tag[2] = 102
-	zs_tag[0] = 90; zs_tag[1] = 83; zs_tag[2] = 102
-	pm_tag[0] = 80; pm_tag[1] = 77; pm_tag[2] = 102
+	# ASCII codes: 'Z' 90, 'P' 80, 'f' 102, 'S' 83, 'M' 77, 'A' 65, 'N' 78, 'D' 68
+	zp_tag[0] = 90; zp_tag[1] = 80; zp_tag[2] = 102  # ZP:f
+	zs_tag[0] = 90; zs_tag[1] = 83; zs_tag[2] = 102  # ZS:f
+	pm_tag[0] = 80; pm_tag[1] = 77; pm_tag[2] = 102  # PM:f
+	an_tag[0] = 65; an_tag[1] = 78; an_tag[2] = 102  # AN:f (raw ANI)
+	da_tag[0] = 68; da_tag[1] = 65; da_tag[2] = 102  # DA:f (damage-corrected ANI)
 
 	verbosity = bf_logging.get_verbosity()
 
@@ -433,7 +455,7 @@ cdef int write_filtered_bam(MemoryPool* pool,
 
 	if not pool.zp_values_computed or not pool.precomputed_zp_values:
 		bf_logging.error("ZP values are not precomputed; aborting filtered BAM write")
-		free(zp_tag); free(zs_tag); free(pm_tag); free(tag_buffer)
+		free(zp_tag); free(zs_tag); free(pm_tag); free(an_tag); free(da_tag); free(tag_buffer)
 		return -1
 
 	try:
@@ -441,7 +463,7 @@ cdef int write_filtered_bam(MemoryPool* pool,
 		filtered_header = create_filtered_header_efficient(header, mapping)
 		if not filtered_header:
 			bf_logging.error("Failed to create filtered BAM header")
-			free(zp_tag); free(zs_tag); free(pm_tag); free(tag_buffer)
+			free(zp_tag); free(zs_tag); free(pm_tag); free(an_tag); free(da_tag); free(tag_buffer)
 			return -1
 
 		bf_logging.log(LOG_TAG, "Created filtered header with %d references (was %d)",
@@ -528,7 +550,7 @@ cdef int write_filtered_bam(MemoryPool* pool,
 						if pool_idx >= pool.alignment_count:
 							bf_logging.error("Pool index %lu exceeds alignment count %lu", pool_idx, pool.alignment_count)
 							hts_itr_destroy(iterator)
-							free(zp_tag); free(zs_tag); free(pm_tag); free(tag_buffer)
+							free(zp_tag); free(zs_tag); free(pm_tag); free(an_tag); free(da_tag); free(tag_buffer)
 							return -1
 
 						out_record = batch.records[batch.count]
@@ -537,28 +559,63 @@ cdef int write_filtered_bam(MemoryPool* pool,
 						if copy_bam_record(in_record, out_record, tag_size) != 0:
 							bf_logging.error("Failed to copy BAM record into filtered output")
 							hts_itr_destroy(iterator)
-							free(zp_tag); free(zs_tag); free(pm_tag); free(tag_buffer)
+							free(zp_tag); free(zs_tag); free(pm_tag); free(an_tag); free(da_tag); free(tag_buffer)
 							return -1
 
 						out_record.core.tid = pool.alignments[pool_idx].reference_index
 
+						aln_ptr = &pool.alignments[pool_idx]
 						zp_value = pool.precomputed_zp_values[pool_idx]
-						zs_value = pool.alignments[pool_idx].alignment_score
-						pm_value = pool.alignments[pool_idx].pmd_score
+						zs_value = aln_ptr.alignment_score
+						pm_value = aln_ptr.pmd_score
+
+						# Compute raw ANI from alignment's ANI snapshot
+						if aln_ptr.aligned_length > 0:
+							an_value = (<float>aln_ptr.match_count / <float>aln_ptr.aligned_length) * 100.0
+						else:
+							an_value = 0.0
+
+						# Compute damage-corrected ANI if curve available
+						if pmd_curve != NULL and aln_ptr.aligned_length > 0:
+							# Build ANI snapshot from Alignment fields
+							ani_snapshot.aligned_length = aln_ptr.aligned_length
+							ani_snapshot.match_count = aln_ptr.match_count
+							ani_snapshot.ct_5p_count = aln_ptr.ct_5p_count
+							ani_snapshot.ga_3p_count = aln_ptr.ga_3p_count
+							ani_snapshot.other_mm_count = 0  # Not stored, but computed from total
+							ani_snapshot.flags = 0
+							ani_snapshot.c_at_5p_count = aln_ptr.c_at_5p_count
+							ani_snapshot.g_at_3p_count = aln_ptr.g_at_3p_count
+							da_value = compute_corrected_ani(&ani_snapshot, pmd_curve, 0.01)
+						else:
+							da_value = an_value  # Fallback to raw ANI if no curve
 
 						if out_record.l_data < tag_size:
 							bf_logging.error("Encountered BAM record too small for auxiliary tags")
 							hts_itr_destroy(iterator)
-							free(zp_tag); free(zs_tag); free(pm_tag); free(tag_buffer)
+							free(zp_tag); free(zs_tag); free(pm_tag); free(an_tag); free(da_tag); free(tag_buffer)
 							return -1
 
-						memcpy(tag_buffer, zp_tag, 3)
-						memcpy(tag_buffer + 3, &zp_value, 4)
-						memcpy(tag_buffer + 7, zs_tag, 3)
-						memcpy(tag_buffer + 10, &zs_value, 4)
+						# Build tag buffer: ZP, ZS, [PM], [AN], [DA]
+						tag_offset = 0
+						memcpy(tag_buffer + tag_offset, zp_tag, 3)
+						memcpy(tag_buffer + tag_offset + 3, &zp_value, 4)
+						tag_offset += 7
+						memcpy(tag_buffer + tag_offset, zs_tag, 3)
+						memcpy(tag_buffer + tag_offset + 3, &zs_value, 4)
+						tag_offset += 7
 						if write_pmd_tags:
-							memcpy(tag_buffer + 14, pm_tag, 3)
-							memcpy(tag_buffer + 17, &pm_value, 4)
+							memcpy(tag_buffer + tag_offset, pm_tag, 3)
+							memcpy(tag_buffer + tag_offset + 3, &pm_value, 4)
+							tag_offset += 7
+						if write_ani_tags:
+							memcpy(tag_buffer + tag_offset, an_tag, 3)
+							memcpy(tag_buffer + tag_offset + 3, &an_value, 4)
+							tag_offset += 7
+						if write_da_tags:
+							memcpy(tag_buffer + tag_offset, da_tag, 3)
+							memcpy(tag_buffer + tag_offset + 3, &da_value, 4)
+							tag_offset += 7
 
 						memcpy(out_record.data + (out_record.l_data - tag_size), tag_buffer, tag_size)
 
@@ -569,7 +626,7 @@ cdef int write_filtered_bam(MemoryPool* pool,
 							if write_batch_to_bam(out_bam, header, batch) != 0:
 								bf_logging.error("Failed to flush batch to filtered BAM")
 								hts_itr_destroy(iterator)
-								free(zp_tag); free(zs_tag); free(pm_tag); free(tag_buffer)
+								free(zp_tag); free(zs_tag); free(pm_tag); free(an_tag); free(da_tag); free(tag_buffer)
 								return -1
 							batch.count = 0
 
@@ -581,7 +638,7 @@ cdef int write_filtered_bam(MemoryPool* pool,
 					if write_batch_to_bam(out_bam, header, batch) != 0:
 						bf_logging.error("Failed to flush final batch to filtered BAM")
 						hts_itr_destroy(iterator)
-						free(zp_tag); free(zs_tag); free(pm_tag); free(tag_buffer)
+						free(zp_tag); free(zs_tag); free(pm_tag); free(an_tag); free(da_tag); free(tag_buffer)
 						return -1
 					batch.count = 0
 
@@ -590,7 +647,7 @@ cdef int write_filtered_bam(MemoryPool* pool,
 
 			bf_logging.log(LOG_TAG, "Wrote %lu of %lu alignments", alignments_written, alignments_processed)
 
-			free(zp_tag); free(zs_tag); free(pm_tag); free(tag_buffer)
+			free(zp_tag); free(zs_tag); free(pm_tag); free(an_tag); free(da_tag); free(tag_buffer)
 			return 0
 
 		finally:

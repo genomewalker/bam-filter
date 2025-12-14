@@ -36,6 +36,19 @@ from .processor_types cimport (
     seq_nt16_str, bam_seqi_wrapper
 )
 
+# Import PMD stats accumulator for stats collection
+from bam_filter.processor_pmd cimport (
+    PMDStatsAccumulator,
+    pmd_record_position,
+    PMD_END_5P,
+    PMD_END_3P,
+    PMD_CTX_NONCPG,
+    PMD_CTX_CPG,
+)
+
+# Import ANIStats struct from our own pxd
+from bam_filter.processor_md_quality cimport ANIStats
+
 cdef inline int parse_int(char** ptr_ref) nogil:
     """Fast integer parsing from character pointer.
 
@@ -251,7 +264,9 @@ cdef void initialize_quality_lookup_tables() noexcept nogil:
         p_correct = fmax(fmin(p_correct, 0.9999), 0.0001)
         p_error   = fmax(p_error, 1e-10)
         PRECOMPUTED_LOG_P_CORRECT[qual] = log(p_correct)
-        PRECOMPUTED_LOG_P_ERROR[qual]   = log(p_error)
+        # Use p_error/3 for proper likelihood: P(specific wrong base) = ε_q/3
+        # This makes fast path consistent with PMD path (LOG_EPSILON)
+        PRECOMPUTED_LOG_P_ERROR[qual]   = log(p_error / 3.0)
 
     powv = 1.0
     for i in range(DMAX):
@@ -691,21 +706,9 @@ cdef bint alignment_passes_quality_filters(bam1_t* alignment, AlignmentScoringCo
     if l_qseq < min_read_length or l_qseq > max_read_length:
         return False
 
-    aux = bam_aux_get(alignment, b"NM")
-    if aux != NULL:
-        if aux[0] == ord('i'):
-            nm_val = (<int32_t*>(aux + 1))[0]
-            if nm_val >= 0 and l_qseq > 0:
-                pct_id = (1.0 - (nm_val / <double>l_qseq)) * 100.0
-                if pct_id < min_read_identity:
-                    return False
-        else:
-            nm_val2 = bam_aux2i(aux)
-            if nm_val2 >= 0 and l_qseq > 0:
-                pct_id2 = (1.0 - (nm_val2 / <double>l_qseq)) * 100.0
-                if pct_id2 < min_read_identity:
-                    return False
-
+    # NOTE: ANI filtering removed from here - it now happens AFTER PMD correction
+    # in processor_filters.pyx using corrected ANI (passes_ani_filter flag).
+    # This allows ancient DNA reads with damage to pass through for PMD curve fitting.
     return True
 
 
@@ -757,7 +760,419 @@ cdef bint alignment_passes_quality_filters_with_ani(bam1_t* alignment, Alignment
     if nm_out != NULL:
         nm_out[0] = nm_val
 
-    if config.minimum_read_identity > 0.0 and pct_id < config.minimum_read_identity:
-        return False
-
+    # NOTE: ANI filtering removed from here - it now happens AFTER PMD correction
+    # in processor_filters.pyx using corrected ANI (passes_ani_filter flag).
+    # This allows ancient DNA reads with damage to pass through for PMD curve fitting.
     return True
+
+
+# =============================================================================
+# Extended MD parsing with PMD stats and ANI collection
+# =============================================================================
+
+DEF PMD_STAT_WINDOW = 20  # Collect PMD stats for positions 1-20 from ends
+DEF ANI_DAMAGE_WINDOW = 8  # Count damage mismatches in first/last 8bp for ANI
+
+
+cdef inline bint is_cpg_context_5p(uint8_t* ref_seq, int32_t pos, int32_t read_len) noexcept nogil:
+    """Check if position is in CpG context at 5' end (C followed by G)."""
+    if pos + 1 < read_len:
+        return ref_seq[pos + 1] == 71  # 'G'
+    return False
+
+
+cdef inline bint is_cpg_context_3p(uint8_t* ref_seq, int32_t pos, int32_t read_len) noexcept nogil:
+    """Check if position is in CpG context at 3' end (G preceded by C)."""
+    if pos > 0:
+        return ref_seq[pos - 1] == 67  # 'C'
+    return False
+
+
+cdef double calculate_md_quality_score_with_stats(bam1_t* alignment,
+                                                   sam_hdr_t* header,
+                                                   AlignmentScoringConfig* config,
+                                                   float* pmd_result,
+                                                   ANIStats* ani_stats,
+                                                   PMDStatsAccumulator* pmd_acc) noexcept nogil:
+    """Calculate alignment score while collecting PMD stats and ANI counts.
+
+    This extended function combines alignment scoring with:
+    1. PMD statistics collection (for curve fitting)
+    2. ANI snapshot values (for damage-corrected ANI computation)
+
+    Parameters
+    ----------
+    alignment : bam1_t*
+        BAM alignment record
+    header : sam_hdr_t*
+        BAM header (unused, retained for API compatibility)
+    config : AlignmentScoringConfig*
+        Scoring configuration
+    pmd_result : float*
+        Output for PMD score (NULL if not needed)
+    ani_stats : ANIStats*
+        Output for ANI counts (NULL if not needed)
+    pmd_acc : PMDStatsAccumulator*
+        Thread-local PMD stats accumulator (NULL to skip stats collection)
+
+    Returns
+    -------
+    double
+        Log-likelihood score, or -1e20 on error
+    """
+    if not LOOKUP_TABLES_INITIALIZED:
+        initialize_quality_lookup_tables()
+    if not alignment:
+        return -1e20
+
+    cdef int32_t read_length = alignment.core.l_qseq
+    if read_length <= 0 or read_length > 50000:
+        return -1e20
+
+    cdef uint8_t* qual_data = bam_get_qual(alignment)
+    cdef uint8_t* seq_data = bam_get_seq(alignment)
+    cdef uint8_t* md_aux = bam_aux_get(alignment, b"MD")
+    if not qual_data or not seq_data or not md_aux:
+        return -1e20
+
+    cdef bint calculate_pmd = (pmd_result != NULL and config.calculate_pmd)
+    cdef bint is_single_stranded = config.is_single_stranded if calculate_pmd else False
+    cdef bint collect_stats = (pmd_acc != NULL)
+    cdef bint collect_ani = (ani_stats != NULL)
+
+    # Fast path: no PMD, no stats, no ANI
+    if not calculate_pmd and not collect_stats and not collect_ani:
+        return calculate_md_score_fast_path(<char*>(md_aux + 1), qual_data, read_length)
+
+    # Need to decode read bases for PMD/stats/ANI calculation
+    cdef uint8_t* ref_sequence = NULL
+    cdef uint8_t* read_bases = allocate_sequence_buffers(read_length, &ref_sequence)
+    if not read_bases:
+        return -1e20
+
+    cdef double result
+    try:
+        decode_read_bases(seq_data, read_length, read_bases)
+        result = calculate_md_score_with_stats_impl(
+            <char*>(md_aux + 1), read_bases, ref_sequence, qual_data,
+            read_length, is_single_stranded, calculate_pmd,
+            pmd_result, ani_stats, pmd_acc
+        )
+    finally:
+        free(read_bases)
+
+    return result
+
+
+cdef double calculate_md_score_with_stats_impl(char* md_tag, uint8_t* read_bases,
+                                                uint8_t* ref_sequence, uint8_t* qual_data,
+                                                int32_t read_length, bint is_single_stranded,
+                                                bint calculate_pmd,
+                                                float* pmd_result,
+                                                ANIStats* ani_stats,
+                                                PMDStatsAccumulator* pmd_acc) noexcept nogil:
+    """Internal implementation of MD parsing with stats collection.
+
+    This is the workhorse function that parses the MD tag in a single pass,
+    computing alignment score, PMD likelihood, and collecting statistics.
+    """
+    cdef char* ptr = md_tag
+    cdef int32_t read_pos = 0
+    cdef int32_t match_count = 0, mismatch_count = 0, deletion_count = 0
+    cdef int32_t pmd_corrected_mismatches = 0
+    cdef double total_log_likelihood = 0.0
+    cdef double log_pmd_likelihood = 0.0
+    cdef double log_null_likelihood = 0.0
+
+    # ANI tracking
+    cdef uint16_t aligned_length = 0
+    cdef uint16_t ani_match_count = 0
+    cdef uint8_t ct_5p_count = 0
+    cdef uint8_t ga_3p_count = 0
+    cdef uint8_t other_mm_count = 0
+    # Damage opportunity tracking (total C/G at damage positions)
+    cdef uint8_t c_at_5p_count = 0  # Total C bases in reference at 5' damage zone
+    cdef uint8_t g_at_3p_count = 0  # Total G bases in reference at 3' damage zone
+
+    # Cached constants
+    cdef double log_pi = -6.907755278982137
+    cdef double log_1_minus_pi = -0.001000500333583532
+    cdef double log_C = -4.605170185988091
+    cdef double log_1_minus_C = -0.010050335853501442
+
+    cdef double* LOG_EPS_cached = LOG_EPSILON
+    cdef double* LOG1M_EPS_cached = LOG1M_EPSILON
+    cdef unsigned char* IS_C_cached = IS_C
+    cdef unsigned char* IS_G_cached = IS_G
+    cdef unsigned char* IS_UPPER_cached = IS_UPPER
+
+    cdef uint8_t* rptr = read_bases
+    cdef uint8_t* qptr = qual_data
+    cdef int32_t rlen = read_length
+
+    cdef int32_t num, end_pos, k
+    cdef uint8_t ref_base, read_base, qual_score
+    cdef int qual_idx
+    cdef double log_eps, log_1meps
+    cdef int32_t z_from_5prime, z_from_3prime
+    cdef double tmp_logDz, tmp_log1mDz, tmp_logDy, tmp_log1mDy
+    cdef double log_pmd_comp, log_null_comp
+    cdef double log_p_err_pmd, log_p_err_null, lbf
+    cdef unsigned char ch
+    cdef bint is_c_base, is_g_base, is_ct_mismatch, is_ga_mismatch
+    cdef bint is_cpg
+    cdef int context_type
+
+    cdef double shared_term1, shared_term2, shared_1meps_1, shared_1meps_2
+    cdef double shared_g1, shared_g2, base_term1, base_term2
+    cdef double null_base1, null_base2, pmd_base1, pmd_base2
+    cdef double null_shared1, null_shared2, at_comp, error_penalty
+
+    cdef bint collect_stats = (pmd_acc != NULL)
+
+    while ptr[0] != 0 and read_pos < rlen:
+        ch = <unsigned char>ptr[0]
+
+        # === MATCHES (digit sequence) ===
+        if ch >= 48 and ch <= 57:
+            num = parse_int(&ptr)
+            match_count += num
+            end_pos = read_pos + num
+            if end_pos > rlen:
+                end_pos = rlen
+
+            for k in range(read_pos, end_pos):
+                read_base = rptr[k]
+                ref_sequence[k] = read_base
+                ref_base = read_base
+                qual_score = qptr[k]
+                qual_idx = qual_score if qual_score <= 93 else (SENTINEL_Q if qual_score == 255 else 93)
+
+                is_c_base = IS_C_cached[ref_base]
+                is_g_base = IS_G_cached[ref_base]
+
+                # Count C/G bases in damage zones for hierarchical EM
+                if is_c_base or is_g_base:
+                    z_from_5prime = k + 1
+                    z_from_3prime = rlen - k
+                    if is_c_base and z_from_5prime <= ANI_DAMAGE_WINDOW:
+                        if c_at_5p_count < 255:
+                            c_at_5p_count += 1
+                    if is_g_base and z_from_3prime <= ANI_DAMAGE_WINDOW:
+                        if g_at_3p_count < 255:
+                            g_at_3p_count += 1
+
+                # Collect PMD stats for C/G matches (eligible sites)
+                if collect_stats and (is_c_base or is_g_base):
+                    z_from_5prime = k + 1
+                    z_from_3prime = rlen - k
+
+                    if is_c_base and z_from_5prime <= PMD_STAT_WINDOW:
+                        # C site near 5' end - eligible for C→T damage
+                        is_cpg = is_cpg_context_5p(ref_sequence, k, rlen)
+                        context_type = PMD_CTX_CPG if is_cpg else PMD_CTX_NONCPG
+                        pmd_record_position(pmd_acc, PMD_END_5P, context_type, z_from_5prime, False)
+
+                    if is_g_base and z_from_3prime <= PMD_STAT_WINDOW:
+                        # G site near 3' end - eligible for G→A damage
+                        is_cpg = is_cpg_context_3p(ref_sequence, k, rlen)
+                        context_type = PMD_CTX_CPG if is_cpg else PMD_CTX_NONCPG
+                        pmd_record_position(pmd_acc, PMD_END_3P, context_type, z_from_3prime, False)
+
+                # PMD likelihood calculation (only if enabled)
+                if calculate_pmd:
+                    if is_c_base or is_g_base:
+                        log_eps = LOG_EPS_cached[qual_idx]
+                        log_1meps = LOG1M_EPS_cached[qual_idx]
+                        if is_c_base:
+                            z_from_5prime = k + 1
+                            if is_single_stranded:
+                                z_from_3prime = rlen - k
+                                get_D_terms(z_from_5prime, &tmp_logDz, &tmp_log1mDz)
+                                get_D_terms(z_from_3prime, &tmp_logDy, &tmp_log1mDy)
+                                shared_term1 = log_1_minus_pi + log_1meps
+                                shared_term2 = log_pi + log_1meps
+                                log_pmd_comp = lse2((shared_term1 + tmp_log1mDz + tmp_log1mDy),
+                                                    (shared_term2 + tmp_log1mDz + tmp_log1mDy))
+                                log_null_comp = lse2((shared_term1 + log_1_minus_C),
+                                                     (shared_term2 + log_1_minus_C))
+                                total_log_likelihood += lse2(tmp_log1mDz + log_null_comp, tmp_logDz + log_pmd_comp)
+                            else:
+                                get_D_terms(z_from_5prime, &tmp_logDz, &tmp_log1mDz)
+                                shared_1meps_1 = log_1_minus_pi + log_1meps
+                                shared_1meps_2 = log_pi + log_1meps
+                                log_pmd_comp = lse2((shared_1meps_1 + tmp_log1mDz),
+                                                    (shared_1meps_2 + tmp_log1mDz))
+                                log_null_comp = lse2((shared_1meps_1 + log_1_minus_C),
+                                                     (shared_1meps_2 + log_1_minus_C))
+                                total_log_likelihood += lse2(tmp_log1mDz + log_null_comp, tmp_logDz + log_pmd_comp)
+                        else:
+                            if not is_single_stranded:
+                                z_from_3prime = rlen - k
+                                get_D_terms(z_from_3prime, &tmp_logDz, &tmp_log1mDz)
+                                shared_g1 = log_1_minus_pi + log_1meps
+                                shared_g2 = log_pi + log_1meps
+                                log_pmd_comp = lse2((shared_g1 + tmp_log1mDz),
+                                                    (shared_g2 + tmp_log1mDz))
+                                log_null_comp = lse2((shared_g1 + log_1_minus_C),
+                                                     (shared_g2 + log_1_minus_C))
+                                total_log_likelihood += lse2(tmp_log1mDz + log_null_comp, tmp_logDz + log_pmd_comp)
+                            else:
+                                log_pmd_comp = LOG1M_EPS_cached[qual_idx]
+                                log_null_comp = lse2((log_1_minus_pi + log_1meps + log_1_minus_C),
+                                                     (log_pi + log_1meps + log_1_minus_C))
+                                total_log_likelihood += log_pmd_comp
+                        log_pmd_likelihood += log_pmd_comp
+                        log_null_likelihood += log_null_comp
+                    else:
+                        at_comp = LOG1M_EPS_cached[qual_idx]
+                        log_pmd_likelihood += at_comp
+                        log_null_likelihood += at_comp
+                        total_log_likelihood += at_comp
+                else:
+                    # Fast path for matches (no PMD)
+                    total_log_likelihood += PRECOMPUTED_LOG_P_CORRECT[qual_idx]
+
+            # Update ANI counts
+            ani_match_count += <uint16_t>num
+            aligned_length += <uint16_t>num
+            read_pos = end_pos
+
+        # === DELETIONS (^XYZ) ===
+        elif ch == 94:
+            ptr += 1
+            while ptr[0] != 0 and IS_UPPER_cached[<unsigned char>ptr[0]]:
+                deletion_count += 1
+                ptr += 1
+
+        # === MISMATCHES (single uppercase letter) ===
+        elif IS_UPPER_cached[ch]:
+            if read_pos < rlen:
+                mismatch_count += 1
+                aligned_length += 1
+                ref_base = <uint8_t>ch
+                read_base = rptr[read_pos]
+                ref_sequence[read_pos] = ref_base
+                qual_score = qptr[read_pos]
+                qual_idx = qual_score if qual_score <= 93 else (SENTINEL_Q if qual_score == 255 else 93)
+
+                is_ct_mismatch = IS_C_cached[ref_base] and (read_base == 84)  # C→T
+                is_ga_mismatch = IS_G_cached[ref_base] and (read_base == 65)  # G→A
+
+                z_from_5prime = read_pos + 1
+                z_from_3prime = rlen - read_pos
+
+                # Count C/G ref bases in damage zones (mismatched positions)
+                if IS_C_cached[ref_base] and z_from_5prime <= ANI_DAMAGE_WINDOW:
+                    if c_at_5p_count < 255:
+                        c_at_5p_count += 1
+                if IS_G_cached[ref_base] and z_from_3prime <= ANI_DAMAGE_WINDOW:
+                    if g_at_3p_count < 255:
+                        g_at_3p_count += 1
+
+                # Collect PMD stats for mismatches
+                if collect_stats:
+                    if is_ct_mismatch and z_from_5prime <= PMD_STAT_WINDOW:
+                        is_cpg = is_cpg_context_5p(ref_sequence, read_pos, rlen)
+                        context_type = PMD_CTX_CPG if is_cpg else PMD_CTX_NONCPG
+                        pmd_record_position(pmd_acc, PMD_END_5P, context_type, z_from_5prime, True)
+
+                    if is_ga_mismatch and z_from_3prime <= PMD_STAT_WINDOW:
+                        is_cpg = is_cpg_context_3p(ref_sequence, read_pos, rlen)
+                        context_type = PMD_CTX_CPG if is_cpg else PMD_CTX_NONCPG
+                        pmd_record_position(pmd_acc, PMD_END_3P, context_type, z_from_3prime, True)
+
+                # ANI damage counting (first/last 8bp window)
+                if is_ct_mismatch and z_from_5prime <= ANI_DAMAGE_WINDOW:
+                    if ct_5p_count < 255:
+                        ct_5p_count += 1
+                elif is_ga_mismatch and z_from_3prime <= ANI_DAMAGE_WINDOW:
+                    if ga_3p_count < 255:
+                        ga_3p_count += 1
+                else:
+                    # Other mismatch (not damage-eligible or outside window)
+                    if other_mm_count < 255:
+                        other_mm_count += 1
+
+                # PMD likelihood calculation
+                if calculate_pmd and (is_ct_mismatch or is_ga_mismatch):
+                    log_eps = LOG_EPS_cached[qual_idx]
+                    log_1meps = LOG1M_EPS_cached[qual_idx]
+
+                    if is_single_stranded and is_ct_mismatch:
+                        get_D_terms(z_from_5prime, &tmp_logDz, &tmp_log1mDz)
+                        get_D_terms(z_from_3prime, &tmp_logDy, &tmp_log1mDy)
+                        base_term1 = log_1_minus_pi + tmp_log1mDz + tmp_log1mDy
+                        base_term2 = log_pi + tmp_log1mDz + tmp_log1mDy
+                        log_p_err_pmd = lse4((base_term1 + log_eps),
+                                             (log_1_minus_pi + log_1meps + tmp_logDz + tmp_log1mDy),
+                                             (log_1_minus_pi + log_1meps + tmp_log1mDz + tmp_logDy),
+                                             (base_term2 + log_eps))
+                        null_base1 = log_1_minus_pi + log_1_minus_C
+                        null_base2 = log_pi + log_1_minus_C
+                        log_p_err_null = lse4((null_base1 + log_eps + log_1_minus_C),
+                                              (log_1_minus_pi + log_1meps + log_C + log_1_minus_C),
+                                              (log_1_minus_pi + log_1meps + log_1_minus_C + log_C),
+                                              (null_base2 + log_eps + log_1_minus_C))
+                        lbf = log_p_err_pmd - log_p_err_null
+                        if lbf > 0.0:
+                            pmd_corrected_mismatches += 1
+                        log_pmd_likelihood += log_p_err_pmd
+                        log_null_likelihood += log_p_err_null
+                        total_log_likelihood += lse2(tmp_log1mDz + log_p_err_null, tmp_logDz + log_p_err_pmd)
+                    else:
+                        if is_ct_mismatch:
+                            get_D_terms(z_from_5prime, &tmp_logDz, &tmp_log1mDz)
+                        else:
+                            get_D_terms(z_from_3prime, &tmp_logDz, &tmp_log1mDz)
+                        pmd_base1 = log_1_minus_pi + tmp_log1mDz
+                        pmd_base2 = log_pi + tmp_log1mDz
+                        log_p_err_pmd = lse3((pmd_base1 + log_eps),
+                                             (log_1_minus_pi + log_1meps + tmp_logDz),
+                                             (pmd_base2 + log_eps))
+                        null_shared1 = log_1_minus_pi + log_1_minus_C
+                        null_shared2 = log_pi + log_1_minus_C
+                        log_p_err_null = lse3((null_shared1 + log_eps),
+                                              (log_1_minus_pi + log_1meps + log_C),
+                                              (null_shared2 + log_eps))
+                        lbf = log_p_err_pmd - log_p_err_null
+                        if lbf > 0.0:
+                            pmd_corrected_mismatches += 1
+                        log_pmd_likelihood += log_p_err_pmd
+                        log_null_likelihood += log_p_err_null
+                        total_log_likelihood += lse2(tmp_log1mDz + log_p_err_null, tmp_logDz + log_p_err_pmd)
+                else:
+                    # Non-damage mismatch or no PMD calculation
+                    error_penalty = PRECOMPUTED_LOG_P_ERROR[qual_idx]
+                    total_log_likelihood += error_penalty
+                    if calculate_pmd:
+                        log_pmd_likelihood += error_penalty
+                        log_null_likelihood += error_penalty
+
+                read_pos += 1
+            ptr += 1
+        else:
+            ptr += 1
+
+    # Apply deletion penalty
+    total_log_likelihood += deletion_count * LOG_DELETION_PROB
+
+    # Output results
+    if pmd_result:
+        pmd_result[0] = <float>(log_pmd_likelihood - log_null_likelihood)
+
+    if ani_stats:
+        ani_stats.aligned_length = aligned_length
+        ani_stats.match_count = ani_match_count
+        ani_stats.ct_5p_count = ct_5p_count
+        ani_stats.ga_3p_count = ga_3p_count
+        ani_stats.other_mm_count = other_mm_count
+        ani_stats.c_at_5p_count = c_at_5p_count
+        ani_stats.g_at_3p_count = g_at_3p_count
+
+    # Update accumulator metadata
+    if pmd_acc:
+        pmd_acc.total_alignments += 1
+        pmd_acc.total_bases += <uint64_t>aligned_length
+
+    return total_log_likelihood

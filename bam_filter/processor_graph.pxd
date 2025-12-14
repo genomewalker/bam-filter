@@ -95,6 +95,11 @@ cdef struct ReferencePattern:
     uint32_t edges_after_removal       # Edge count after cross-domain removal
     float cross_domain_fraction        # Fraction of edges that were cross-domain
 
+    # Taxonomic Ambiguity Detection (for identifying references with uncertain taxonomic assignment)
+    # Note: HUB references are expected to have high entropy and are not flagged as ambiguous
+    float neighbor_tax_entropy         # Raw neighbor taxonomy entropy (bits) - measures taxonomic diversity of neighbors
+    uint8_t tax_ambiguity_flag         # 0=clean, 1=biased, 2=mixed, 3=highly_mixed (only for non-HUB refs)
+
 
 cdef struct DatasetSummaryStats:
     uint64_t total_reads_processed
