@@ -24,7 +24,10 @@ from libc.stdint cimport int64_t, int32_t, uint32_t, uint64_t, uint8_t
 from libc.math cimport log2, fmin, fmax, exp, sqrt, pow, INFINITY
 
 cdef uint32_t UINT32_MAX = 0xFFFFFFFF
-from bam_filter.processor cimport MemoryPool
+from bam_filter.processor cimport (
+    MemoryPool,
+    AlignmentCore, HierarchicalData, DamageCounts, BAMWriterAux,
+)
 from bam_filter.processor_graph cimport ReferencePattern, ReferenceStats, ReadIndex
 from bam_filter.processor_types cimport EMAlgorithmConfig, PrecomputedWeights
 from bam_filter.processor_precomputed cimport (
@@ -37,7 +40,7 @@ from bam_filter.processor_fast_math cimport stable_log_sum_exp
 from bam_filter.processor_graph_ops cimport (
     WeightedGraph, GraphNode,
     create_weighted_graph, destroy_weighted_graph, add_edge,
-    build_weighted_graph_from_alignments, prune_low_weight_edges,
+    prune_low_weight_edges,
     calculate_graph_statistics,
     extract_neighbors_from_igraph
 )
@@ -95,14 +98,14 @@ cdef int apply_probability_filtering(MemoryPool* pool, EMAlgorithmConfig* config
 
     Notes
     -----
-    PMD data is stored in alignment structures and moves automatically during
-    compaction. Rebuilds read indexing structures after filtering.
+    Supports both legacy alignments array and split array storage. With split arrays,
+    ANI filtering was already done during population so all alignments pass.
     """
     cdef uint32_t read_idx, ref_idx, rid
     cdef int64_t start_pos, end_pos, ai
     cdef uint32_t alignment_count
     cdef float alignment_score, uniform_zp
-    cdef double log_lik 
+    cdef double log_lik
     cdef double log_weighted, log_norm, posterior
     cdef double NEG_INF = -1e20
     cdef int64_t alignments_removed
@@ -118,6 +121,7 @@ cdef int apply_probability_filtering(MemoryPool* pool, EMAlgorithmConfig* config
     cdef uint64_t start_pos_rebuild
     cdef double thr
     cdef double p
+    cdef bint use_split = (pool.alignment_cores != NULL)
 
     precomp = create_precomputed_weights(pool.reference_count)
     if not precomp:
@@ -126,9 +130,10 @@ cdef int apply_probability_filtering(MemoryPool* pool, EMAlgorithmConfig* config
 
     bf_nogil_logf_notime(
         b"FILTER",
-        "probability_filter: start pmd_output=%s total_alignments=%lld",
+        "probability_filter: start pmd_output=%s total_alignments=%lld split=%d",
         b"enabled" if pool.pmd_enabled_for_output else b"disabled",
         <long long>pool.alignment_count,
+        <int>use_split,
     )
     if pool.scratch_read_max_probs == NULL or pool.scratch_survivors_per_read == NULL or pool.scratch_unique_read_count < <int32_t>pool.unique_read_count:
         if pool.scratch_read_max_probs != NULL:
@@ -143,6 +148,8 @@ cdef int apply_probability_filtering(MemoryPool* pool, EMAlgorithmConfig* config
         memset(pool.scratch_survivors_per_read, 0, pool.unique_read_count * sizeof(int32_t))
     read_max_probs = pool.scratch_read_max_probs
     survivors_per_read = pool.scratch_survivors_per_read
+
+    # Phase 1: Count survivors per read
     for read_idx in prange(pool.unique_read_count, nogil=True, schedule='static', num_threads=config.thread_count):
         alignment_count = pool.read_alignment_counts[read_idx]
         if alignment_count == 0:
@@ -151,35 +158,41 @@ cdef int apply_probability_filtering(MemoryPool* pool, EMAlgorithmConfig* config
         end_pos = start_pos + alignment_count
         if alignment_count == 1:
             read_max_probs[read_idx] = 1.0
-            # Check corrected ANI filter (set by PMD correction stage)
-            if pool.alignments[start_pos].passes_ani_filter == 1:
-                if 1.0 >= min_threshold and (fraction_threshold == 0.0 or 1.0 >= fraction_threshold * 1.0):
-                    survivors_per_read[read_idx] = 1
+            # With split arrays, all alignments already passed ANI filter
+            if 1.0 >= min_threshold and (fraction_threshold == 0.0 or 1.0 >= fraction_threshold * 1.0):
+                survivors_per_read[read_idx] = 1
             continue
 
         log_norm = NEG_INF
         for ai in range(start_pos, end_pos):
-            ref_idx = pool.alignments[ai].reference_index
-            if ref_idx < pool.reference_count:
+            if use_split:
+                ref_idx = pool.alignment_cores[ai].reference_index
+                alignment_score = pool.alignment_cores[ai].alignment_score
+            else:
+                ref_idx = pool.alignments[ai].reference_index
                 alignment_score = pool.alignments[ai].alignment_score
+            if ref_idx < pool.reference_count:
                 log_lik = <double>alignment_score
                 log_weighted = precomp.log_weights[ref_idx] + log_lik
                 log_norm = stable_log_sum_exp(log_norm, log_weighted)
+
         if log_norm == NEG_INF:
             uniform_zp = 1.0 / alignment_count if alignment_count > 0 else 0.0
             read_max_probs[read_idx] = uniform_zp
             if uniform_zp >= min_threshold and (fraction_threshold == 0.0 or uniform_zp >= fraction_threshold * uniform_zp):
-                # Count only alignments that pass corrected ANI filter
-                for ai in range(start_pos, end_pos):
-                    if pool.alignments[ai].passes_ani_filter == 1:
-                        survivors_per_read[read_idx] += 1
+                # With split arrays, all alignments already passed ANI filter
+                survivors_per_read[read_idx] = alignment_count
             continue
 
         p = 0.0
         for ai in range(start_pos, end_pos):
-            ref_idx = pool.alignments[ai].reference_index
-            if ref_idx < pool.reference_count:
+            if use_split:
+                ref_idx = pool.alignment_cores[ai].reference_index
+                alignment_score = pool.alignment_cores[ai].alignment_score
+            else:
+                ref_idx = pool.alignments[ai].reference_index
                 alignment_score = pool.alignments[ai].alignment_score
+            if ref_idx < pool.reference_count:
                 log_lik = <double>alignment_score
                 log_weighted = precomp.log_weights[ref_idx] + log_lik
                 posterior = exp(log_weighted - log_norm)
@@ -188,9 +201,13 @@ cdef int apply_probability_filtering(MemoryPool* pool, EMAlgorithmConfig* config
         read_max_probs[read_idx] = <float>p
         thr = fraction_threshold * p
         for ai in range(start_pos, end_pos):
-            ref_idx = pool.alignments[ai].reference_index
-            if ref_idx < pool.reference_count and pool.alignments[ai].passes_ani_filter == 1:
+            if use_split:
+                ref_idx = pool.alignment_cores[ai].reference_index
+                alignment_score = pool.alignment_cores[ai].alignment_score
+            else:
+                ref_idx = pool.alignments[ai].reference_index
                 alignment_score = pool.alignments[ai].alignment_score
+            if ref_idx < pool.reference_count:
                 log_lik = <double>alignment_score
                 log_weighted = precomp.log_weights[ref_idx] + log_lik
                 posterior = exp(log_weighted - log_norm)
@@ -219,6 +236,7 @@ cdef int apply_probability_filtering(MemoryPool* pool, EMAlgorithmConfig* config
         free_precomputed_weights(precomp)
         return -1
 
+    # Phase 2: Compact alignments
     write_idx = 0
     for read_idx in range(pool.unique_read_count):
         alignment_count = pool.read_alignment_counts[read_idx]
@@ -230,20 +248,32 @@ cdef int apply_probability_filtering(MemoryPool* pool, EMAlgorithmConfig* config
 
         if alignment_count == 1:
             p = 1.0
-            # Check corrected ANI filter before keeping
-            if pool.alignments[start_pos].passes_ani_filter == 1:
-                if p >= min_threshold and (fraction_threshold == 0.0 or p >= fraction_threshold * 1.0):
-                    if write_idx != start_pos:
+            if p >= min_threshold and (fraction_threshold == 0.0 or p >= fraction_threshold * 1.0):
+                if write_idx != start_pos:
+                    if use_split:
+                        pool.alignment_cores[write_idx] = pool.alignment_cores[start_pos]
+                        pool.read_indices[write_idx] = pool.read_indices[start_pos]
+                        if pool.hierarchical != NULL:
+                            pool.hierarchical[write_idx] = pool.hierarchical[start_pos]
+                        if pool.damage_counts != NULL:
+                            pool.damage_counts[write_idx] = pool.damage_counts[start_pos]
+                        if pool.bam_aux != NULL:
+                            pool.bam_aux[write_idx] = pool.bam_aux[start_pos]
+                    else:
                         pool.alignments[write_idx] = pool.alignments[start_pos]
-                    pool.precomputed_zp_values[write_idx] = 1.0
-                    write_idx += 1
+                pool.precomputed_zp_values[write_idx] = 1.0
+                write_idx += 1
             continue
 
         log_norm = NEG_INF
         for ai in range(start_pos, end_pos):
-            ref_idx = pool.alignments[ai].reference_index
-            if ref_idx < pool.reference_count:
+            if use_split:
+                ref_idx = pool.alignment_cores[ai].reference_index
+                alignment_score = pool.alignment_cores[ai].alignment_score
+            else:
+                ref_idx = pool.alignments[ai].reference_index
                 alignment_score = pool.alignments[ai].alignment_score
+            if ref_idx < pool.reference_count:
                 log_weighted = precomp.log_weights[ref_idx] + alignment_score
                 log_norm = stable_log_sum_exp(log_norm, log_weighted)
 
@@ -251,26 +281,47 @@ cdef int apply_probability_filtering(MemoryPool* pool, EMAlgorithmConfig* config
             uniform_zp = 1.0 / alignment_count if alignment_count > 0 else 0.0
             if uniform_zp >= min_threshold and (fraction_threshold == 0.0 or uniform_zp >= fraction_threshold * uniform_zp):
                 for ai in range(start_pos, end_pos):
-                    # Check corrected ANI filter
-                    if pool.alignments[ai].passes_ani_filter == 1:
-                        if write_idx != ai:
+                    if write_idx != ai:
+                        if use_split:
+                            pool.alignment_cores[write_idx] = pool.alignment_cores[ai]
+                            pool.read_indices[write_idx] = pool.read_indices[ai]
+                            if pool.hierarchical != NULL:
+                                pool.hierarchical[write_idx] = pool.hierarchical[ai]
+                            if pool.damage_counts != NULL:
+                                pool.damage_counts[write_idx] = pool.damage_counts[ai]
+                            if pool.bam_aux != NULL:
+                                pool.bam_aux[write_idx] = pool.bam_aux[ai]
+                        else:
                             pool.alignments[write_idx] = pool.alignments[ai]
-                        pool.precomputed_zp_values[write_idx] = uniform_zp
-                        write_idx += 1
+                    pool.precomputed_zp_values[write_idx] = uniform_zp
+                    write_idx += 1
             continue
 
         thr = (<double>fraction_threshold) * (<double>read_max_probs[read_idx])
         for ai in range(start_pos, end_pos):
-            ref_idx = pool.alignments[ai].reference_index
-            # Check both reference index and corrected ANI filter
-            if ref_idx < pool.reference_count and pool.alignments[ai].passes_ani_filter == 1:
+            if use_split:
+                ref_idx = pool.alignment_cores[ai].reference_index
+                alignment_score = pool.alignment_cores[ai].alignment_score
+            else:
+                ref_idx = pool.alignments[ai].reference_index
                 alignment_score = pool.alignments[ai].alignment_score
+            if ref_idx < pool.reference_count:
                 log_weighted = precomp.log_weights[ref_idx] + alignment_score
                 posterior = exp(log_weighted - log_norm)
                 keep_alignment = (posterior >= min_threshold) and (fraction_threshold == 0.0 or posterior >= thr)
                 if keep_alignment:
                     if write_idx != ai:
-                        pool.alignments[write_idx] = pool.alignments[ai]
+                        if use_split:
+                            pool.alignment_cores[write_idx] = pool.alignment_cores[ai]
+                            pool.read_indices[write_idx] = pool.read_indices[ai]
+                            if pool.hierarchical != NULL:
+                                pool.hierarchical[write_idx] = pool.hierarchical[ai]
+                            if pool.damage_counts != NULL:
+                                pool.damage_counts[write_idx] = pool.damage_counts[ai]
+                            if pool.bam_aux != NULL:
+                                pool.bam_aux[write_idx] = pool.bam_aux[ai]
+                        else:
+                            pool.alignments[write_idx] = pool.alignments[ai]
                     if posterior < 1e-12:
                         posterior = 1e-12
                     elif posterior > 0.999:
@@ -289,9 +340,13 @@ cdef int apply_probability_filtering(MemoryPool* pool, EMAlgorithmConfig* config
         <long long>alignments_removed,
     )
 
+    # Rebuild read index structures
     memset(pool.read_alignment_counts, 0, pool.unique_read_count * sizeof(uint32_t))
     for ai in range(pool.alignment_count):
-        rid = pool.alignments[ai].read_index
+        if use_split:
+            rid = pool.read_indices[ai]
+        else:
+            rid = pool.alignments[ai].read_index
         if rid < pool.unique_read_count:
             pool.read_alignment_counts[rid] += 1
         else:
@@ -336,7 +391,7 @@ cdef int apply_reference_filtering(MemoryPool* pool, int32_t min_read_count) noe
 
     Notes
     -----
-    PMD data is integrated in alignment structures and moves automatically.
+    Supports both legacy alignments array and split array storage.
     """
     cdef int64_t* reference_counts = <int64_t*>calloc(pool.reference_count, sizeof(int64_t))
     cdef char* reference_keep_flag = <char*>calloc(pool.reference_count, sizeof(char))
@@ -349,6 +404,7 @@ cdef int apply_reference_filtering(MemoryPool* pool, int32_t min_read_count) noe
     cdef uint64_t start_pos = 0
     cdef uint32_t rid
     cdef float* new_zp_values = NULL
+    cdef bint use_split = (pool.alignment_cores != NULL)
 
     if not reference_counts or not reference_keep_flag:
         if reference_counts: free(reference_counts)
@@ -356,7 +412,10 @@ cdef int apply_reference_filtering(MemoryPool* pool, int32_t min_read_count) noe
         return -1
 
     for alignment_idx in range(pool.alignment_count):
-        ref_id = pool.alignments[alignment_idx].reference_index
+        if use_split:
+            ref_id = pool.alignment_cores[alignment_idx].reference_index
+        else:
+            ref_id = pool.alignments[alignment_idx].reference_index
         if ref_id < pool.reference_count:
             reference_counts[ref_id] += 1
     cdef int64_t zero_count = 0
@@ -388,7 +447,10 @@ cdef int apply_reference_filtering(MemoryPool* pool, int32_t min_read_count) noe
     )
     cdef int64_t surviving_alignments = 0
     for alignment_idx in range(pool.alignment_count):
-        ref_id = pool.alignments[alignment_idx].reference_index
+        if use_split:
+            ref_id = pool.alignment_cores[alignment_idx].reference_index
+        else:
+            ref_id = pool.alignments[alignment_idx].reference_index
         if ref_id < pool.reference_count and reference_keep_flag[ref_id]:
             surviving_alignments += 1
 
@@ -406,11 +468,24 @@ cdef int apply_reference_filtering(MemoryPool* pool, int32_t min_read_count) noe
 
     new_alignment_idx = 0
     for alignment_idx in range(pool.alignment_count):
-        ref_id = pool.alignments[alignment_idx].reference_index
+        if use_split:
+            ref_id = pool.alignment_cores[alignment_idx].reference_index
+        else:
+            ref_id = pool.alignments[alignment_idx].reference_index
 
         if (ref_id < pool.reference_count and reference_keep_flag[ref_id]):
             if new_alignment_idx != alignment_idx:
-                pool.alignments[new_alignment_idx] = pool.alignments[alignment_idx]
+                if use_split:
+                    pool.alignment_cores[new_alignment_idx] = pool.alignment_cores[alignment_idx]
+                    pool.read_indices[new_alignment_idx] = pool.read_indices[alignment_idx]
+                    if pool.hierarchical != NULL:
+                        pool.hierarchical[new_alignment_idx] = pool.hierarchical[alignment_idx]
+                    if pool.damage_counts != NULL:
+                        pool.damage_counts[new_alignment_idx] = pool.damage_counts[alignment_idx]
+                    if pool.bam_aux != NULL:
+                        pool.bam_aux[new_alignment_idx] = pool.bam_aux[alignment_idx]
+                else:
+                    pool.alignments[new_alignment_idx] = pool.alignments[alignment_idx]
 
             if new_zp_values and pool.precomputed_zp_values:
                 new_zp_values[new_alignment_idx] = pool.precomputed_zp_values[alignment_idx]
@@ -429,14 +504,16 @@ cdef int apply_reference_filtering(MemoryPool* pool, int32_t min_read_count) noe
         alignments_removed,
         pool.alignment_count,
     )
-    bf_nogil_logf_notime(b"FILTER-PMD", "  All data (including integrated PMD) moved together\n")
 
     if alignments_removed > 0:
         bf_nogil_logf_notime(b"FILTER-PMD", "Rebuilding read indices...\n")
 
         memset(pool.read_alignment_counts, 0, pool.unique_read_count * sizeof(uint32_t))
         for alignment_idx in range(pool.alignment_count):
-            current_rid = pool.alignments[alignment_idx].read_index
+            if use_split:
+                current_rid = pool.read_indices[alignment_idx]
+            else:
+                current_rid = pool.alignments[alignment_idx].read_index
             if current_rid < pool.unique_read_count:
                 pool.read_alignment_counts[current_rid] += 1
             else:

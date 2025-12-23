@@ -71,3 +71,11 @@ target/
 old-files*/
 examples/
 .groupedtimelineinclude
+
+# Development scripts and backups
+.scripts/
+.backup_em_refactor/
+
+# Accidental files
+"End: $(date)"
+echo

@@ -18,3 +18,9 @@ cdef void calculate_abundance_metrics(
 	double read_length_mean,
 	int64_t scale
 ) noexcept nogil
+
+# Weighted (mass-based) histogram functions for posterior-weighted coverage
+cdef double calculate_weighted_spatial_entropy(double* mass, int64_t n_bins) noexcept nogil
+cdef double calculate_weighted_gini(double* mass, int64_t n_bins) noexcept nogil
+cdef double calculate_norm_weighted_gini(double* mass, int64_t n_bins) noexcept nogil
+cdef int64_t estimate_histogram_bins_from_length(int64_t ref_length) noexcept nogil

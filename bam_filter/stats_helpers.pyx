@@ -18,7 +18,7 @@ can cimport and reuse them. We will progressively move more helpers here.
 
 from libc.stdint cimport int32_t, int64_t, uint8_t, uint32_t
 from libc.stdlib cimport malloc, free
-from libc.string cimport strlen
+from libc.string cimport strlen, memset
 from libc.math cimport sqrt
 
 # minimal externs required by helpers
@@ -149,139 +149,68 @@ cdef int count_gc_bases(bam1_t* b) noexcept nogil:
 
 cdef int count_reference_gc_bases(bam1_t* b, int32_t* ref_length_out) noexcept nogil:
     """
-    Count G and C bases in the REFERENCE sequence (not the read).
-    Reconstructs reference from CIGAR + MD tag.
+    Count G and C bases in the REFERENCE sequence using MD tag.
+    Efficient single-pass implementation without strlen.
 
-    For C→T damaged reads:
-    - Read has T (damaged)
-    - Reference has C (original)
-    - This function counts the C in reference
-
-    Parameters:
-    - b: BAM record
-    - ref_length_out: Output parameter for reference length (ACGT bases only)
-
-    Returns: Number of G+C bases in reference sequence
+    For damaged reads (C→T): reference has C, read has T.
+    This function counts the original C in reference.
     """
     cdef int ref_gc = 0
     cdef int32_t ref_length = 0
-    cdef int32_t read_pos = 0
-    cdef int32_t i, j
+    cdef int read_pos = 0
+    cdef int i
 
-    # Get CIGAR array
-    cdef int n_cigar = b.core.n_cigar
-    if n_cigar == 0:
+    if b == NULL:
         ref_length_out[0] = 0
         return 0
 
-    cdef uint32_t* cigar = <uint32_t*>(b.data + b.core.l_qname)
-    cdef uint8_t* seq = b.data + b.core.l_qname + (n_cigar * 4)
+    cdef uint8_t* seq = bam_get_seq(b)
+    cdef int read_len = b.core.l_qseq
 
-    # Get MD tag
     cdef uint8_t* md_tag = bam_aux_get(b, b"MD")
     if md_tag == NULL:
-        # No MD tag, fall back to read GC
         ref_length_out[0] = 0
         return 0
 
-    # Parse MD tag (skip type byte)
-    cdef char* md_str = <char*>(md_tag + 1)
-    cdef int md_len = strlen(md_str)
-    cdef int md_pos = 0
-    cdef int md_num = 0
-    cdef char md_char
-    cdef int in_number = 0
-    cdef int in_deletion = 0
+    # Verify MD tag is string type ('Z')
+    if md_tag[0] != 90:
+        ref_length_out[0] = 0
+        return 0
 
-    # Process CIGAR and MD together
-    cdef uint32_t op, op_len
-    cdef int cigar_idx = 0
-    cdef int bases_to_process = 0
-    cdef int read_base_encoded
-    cdef char read_base_char, ref_base_char
+    cdef char* md = <char*>(md_tag + 1)
+    cdef char c
+    cdef int num = 0
+    cdef int base_code
 
-    for cigar_idx in range(n_cigar):
-        op = cigar[cigar_idx] & 0xF
-        op_len = cigar[cigar_idx] >> 4
+    while True:
+        c = md[0]
+        if c == 0:
+            break
+        md += 1
 
-        if op == 0 or op == 7 or op == 8:  # M, =, X (match/mismatch)
-            for i in range(op_len):
-                # Parse MD to determine if match or mismatch
-                while md_pos < md_len:
-                    md_char = md_str[md_pos]
-
-                    if md_char >= 48 and md_char <= 57:  # '0'-'9'
-                        if not in_number:
-                            md_num = 0
-                            in_number = 1
-                        md_num = md_num * 10 + (md_char - 48)
-                        md_pos += 1
-                    else:
-                        if in_number:
-                            in_number = 0
-                            if md_num > 0:
-                                # Process matches
-                                for j in range(md_num):
-                                    if i + j >= op_len:
-                                        break
-                                    # Match: ref = read
-                                    read_base_encoded = (seq[(read_pos + j) >> 1] >> (((read_pos + j) & 1) << 2)) & 0xF
-                                    if read_base_encoded == 2 or read_base_encoded == 4:  # C or G
-                                        ref_gc += 1
-                                    if read_base_encoded >= 1 and read_base_encoded <= 8:  # A,C,G,T only
-                                        ref_length += 1
-                                i += j
-                                read_pos += j
-                                md_num = 0
-                                if i >= op_len:
-                                    break
-
-                        if md_char == 94:  # '^' - deletion marker
-                            break  # Handle deletions in D operation
-                        elif md_char >= 65 and md_char <= 90:  # A-Z (mismatch)
-                            # Mismatch: ref base from MD, read base different
-                            ref_base_char = md_char
-                            if ref_base_char == 67 or ref_base_char == 71:  # 'C' or 'G'
-                                ref_gc += 1
-                            ref_length += 1
-                            read_pos += 1
-                            md_pos += 1
-                            break
-                        else:
-                            md_pos += 1
-
-                    if i >= op_len - 1:
-                        break
-
-        elif op == 1:  # I (insertion) - skip in reference
-            read_pos += op_len
-            # Don't advance MD, insertions not in reference
-
-        elif op == 2:  # D (deletion) - count in reference
-            # Parse MD to get deleted bases
-            while md_pos < md_len:
-                md_char = md_str[md_pos]
-                if md_char >= 48 and md_char <= 57:  # Number
-                    md_pos += 1
-                elif md_char == 94:  # '^' - start of deletion
-                    md_pos += 1  # Skip '^'
-                    # Read deleted bases
-                    while md_pos < md_len:
-                        md_char = md_str[md_pos]
-                        if md_char >= 65 and md_char <= 90:  # A-Z
-                            if md_char == 67 or md_char == 71:  # 'C' or 'G'
-                                ref_gc += 1
-                            ref_length += 1
-                            md_pos += 1
-                        else:
-                            break
-                    break
-                else:
-                    break
-
-        elif op == 4:  # S (soft clip) - skip
-            read_pos += op_len
-            # Don't count soft clips in reference
+        if c >= 48 and c <= 57:  # '0'-'9': matches
+            num = c - 48
+            while md[0] >= 48 and md[0] <= 57:
+                num = num * 10 + (md[0] - 48)
+                md += 1
+            for i in range(num):
+                if read_pos < read_len:
+                    base_code = bam_seqi(seq, read_pos)
+                    if base_code == 2 or base_code == 4:  # C or G
+                        ref_gc += 1
+                    ref_length += 1
+                    read_pos += 1
+        elif c == 94:  # '^': deletion in read
+            while md[0] >= 65 and md[0] <= 90:  # A-Z
+                if md[0] == 67 or md[0] == 71:  # 'C' or 'G'
+                    ref_gc += 1
+                ref_length += 1
+                md += 1
+        elif c >= 65 and c <= 90:  # A-Z: mismatch
+            if c == 67 or c == 71:  # 'C' or 'G'
+                ref_gc += 1
+            ref_length += 1
+            read_pos += 1
 
     ref_length_out[0] = ref_length
     return ref_gc

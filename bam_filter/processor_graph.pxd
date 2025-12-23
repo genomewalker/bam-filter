@@ -136,7 +136,7 @@ cdef struct ReferenceStats:
     uint32_t repeat_reads
     uint32_t shared_reads
     uint32_t connections              # number of connected references
-    
+
     # Alignment scoring statistics
     uint64_t alignment_count
     double score_mean
@@ -144,7 +144,7 @@ cdef struct ReferenceStats:
     double score_min
     double score_max
     double score_variance             # Temporary: for compatibility
-    
+
     # PMD scoring statistics (if available)
     bint pmd_available
     double pmd_mean
@@ -153,11 +153,19 @@ cdef struct ReferenceStats:
     double pmd_max
     uint64_t pmd_nonzero_count
     double pmd_variance               # Temporary: for compatibility
-    
+
     # Calculated percentages (temporary: for compatibility)
     double unique_percentage
     double repeat_percentage
     double shared_percentage
+
+    # Coverage statistics (computed from RLE coverage in MemoryPool)
+    int64_t bases_covered             # Number of bases with at least one alignment
+    int64_t n_intervals               # Number of contiguous coverage intervals
+    double breadth                    # bases_covered / reference_length
+    double norm_spatial_entropy       # Normalized spatial entropy [0,1] - uniformity of covered positions
+    double norm_gini                  # Normalized Gini coefficient [0,1] - coverage inequality
+    double weighted_contiguity_breadth  # WCB = sum(interval_len^2) / bases_covered^2 (Herfindahl index)
 
 cdef struct ReadIndex:
     uint32_t** ref_to_reads
@@ -240,6 +248,12 @@ cdef struct GraphConfig:
 cdef void calculate_dataset_summary_stats(MemoryPool* pool, DatasetSummaryStats* stats) noexcept nogil
 cdef void calculate_reference_stats(MemoryPool* pool, sam_hdr_t* bam_header,
                                    ReferenceStats* ref_stats) noexcept nogil
+cdef void calculate_reference_coverage(MemoryPool* pool, ReferenceStats* ref_stats) noexcept nogil
+cdef void calculate_reference_coverage_batched(MemoryPool* pool, ReferenceStats* ref_stats) noexcept nogil
+cdef void compute_authenticity_scores(MemoryPool* pool, ReferenceStats* ref_stats) noexcept nogil
+cdef int init_cwrp(MemoryPool* pool, double cwrp_lambda, bint iterative_auth,
+                   int32_t auth_update_interval, double damage_weight,
+                   int32_t low_cov_floor, double low_cov_shrink_tau) noexcept nogil
 cdef void print_pattern_summary(MemoryPool* memory_pool, sam_hdr_t* bam_header,
                                 ReferenceMapping* mapping, ReferencePattern* pattern_data,
                                 GraphConfig* gconfig, ReferenceStats* ref_stats) noexcept nogil
@@ -286,3 +300,38 @@ cdef int write_graph_tsv(MemoryPool* pool, sam_hdr_t* bam_header,
 
 
 cdef int _uint32_compare(const void* a, const void* b) noexcept nogil
+
+# =============================================================================
+# Iterative Ancientness Field Functions (Full Fix)
+# =============================================================================
+
+# Initialize ancientness arrays in MemoryPool
+cdef int init_ancientness_arrays(MemoryPool* pool) noexcept nogil
+
+# Accumulate posterior-weighted features from current EM state
+cdef void accumulate_posterior_weighted_features(
+    MemoryPool* pool, double* phi_weights, ReferenceStats* ref_stats
+) noexcept nogil
+
+# Compute latent ancientness η from damage-aware features
+cdef double compute_eta_from_features(
+    double entropy, double gini, double damage_5p, double damage_3p,
+    double short_frac, double mean_length, double damage_weight
+) noexcept nogil
+
+# Map η to authenticity score for CWRP
+cdef double compute_authenticity_from_eta(double eta) noexcept nogil
+
+# Map η to gamma (ancient fraction) for hierarchical model
+cdef double compute_gamma_from_eta(double eta) noexcept nogil
+
+# Apply low-coverage shrinkage toward neutral
+cdef void apply_low_coverage_shrinkage(
+    MemoryPool* pool, int32_t low_cov_floor, double shrink_tau
+) noexcept nogil
+
+# Main update function: recompute ancientness field from posterior-weighted coverage
+cdef void update_ancientness_field(
+    MemoryPool* pool, double* phi_weights, ReferenceStats* ref_stats,
+    double damage_weight, int32_t low_cov_floor, double shrink_tau
+) noexcept nogil

@@ -37,15 +37,44 @@ cdef struct RefStats:
     int max_read_length
     int read_length_mode
 
-    # ANI and quality metrics
+    # ANI and quality metrics (raw, from edit distance)
     double ani_mean
     double ani_std
     double ani_median
     double min_ani
     double max_ani
+
+    # Corrected ANI (damage-corrected, set by PMD stage)
+    double ani_corrected_mean
+    double ani_corrected_std
+
+    # Per-reference damage counts for computing corrected ANI (stored in Pass 1)
+    int64_t total_aligned_length    # Sum of aligned_length across all alignments
+    int64_t total_match_count       # Sum of match_count across all alignments
+    int64_t total_ct_5p_count       # Sum of C→T mismatches in first 8bp (5' end)
+    int64_t total_ga_3p_count       # Sum of G→A mismatches in last 8bp (3' end)
+    int64_t total_c_at_5p_count     # Sum of C bases in reference at first 8bp (damage opportunities)
+    int64_t total_g_at_3p_count     # Sum of G bases in reference at last 8bp (damage opportunities)
+    double sum_damage_llr           # Sum of position-specific damage log-likelihood ratios
+    int64_t damage_llr_count        # Number of alignments with damage_llr computed
+    # Per-position damage counts for full damage model (20 positions from each end)
+    double n_5p[20]                 # C bases at each 5' position (opportunities)
+    double k_5p[20]                 # C→T mismatches at each 5' position
+    double n_3p[20]                 # G bases at each 3' position (opportunities)
+    double k_3p[20]                 # G→A mismatches at each 3' position
+
     double aligned_length_mean
     double aln_score_mean
     double aln_score_std
+
+    # ZP/ZS tag statistics (from reassign/EM output)
+    double zp_mean     # Mean EM posterior probability
+    double zp_std      # Std of EM posterior
+    double zs_mean     # Mean log-likelihood alignment score
+    double zs_std      # Std of log-likelihood score
+    int64_t zp_count   # Number of alignments with ZP tag
+    int64_t zs_count   # Number of alignments with ZS tag
+
     double mapq_mean
     double mapq_std
     double edit_dist_mean
@@ -112,9 +141,16 @@ cdef struct RefStats:
     double sum_interval_length_sq  # Sum of interval_length^2 for WCB (computed inline)
 
     # Contamination detection metrics (computed post-hoc from existing stats)
-    double weighted_contiguity_breadth  # WCB = sum(interval_len^2) / ref_length^2
+    double weighted_contiguity_breadth  # WCB = sum(interval_len^2) / bases_covered^2 (Herfindahl index)
     double complexity_penalized_coverage  # CPC = breadth * (1 - dust_mean)
     double overlap_redundancy_index  # ORI = total_aligned_bases / bases_covered
+    double mega_genome_sparsity_index  # MGSI = log10(expected_breadth / observed_breadth)
+    double coverage_compressibility_ratio  # CCR = n_intervals / (bases_covered / read_len_mean)
+    double feature_space_clustering_score  # FSCS = variance of GC/complexity across aligned regions
+
+    # Authenticity metrics (computed post-hoc from spatial distribution)
+    double authenticity_score  # norm_spatial_entropy - norm_gini (higher = more authentic)
+    double authenticity_pvalue  # P(score <= x | real distribution), lower = likely contamination
 
     # Reference lengths
     int64_t ref_length
@@ -142,6 +178,9 @@ cdef struct FilterConditions:
 
 cdef void initialize_reference_stats(RefStats* stats, int64_t ref_length, int64_t bam_ref_length) noexcept nogil
 
+# Import PMD types for damage correction
+from bam_filter.processor_pmd cimport PMDStatsAccumulator, PMDCurve
+
 cdef int calculate_reference_stats(
     samFile* htsfile,
     sam_hdr_t* header,
@@ -158,5 +197,9 @@ cdef int calculate_reference_stats(
     int trim_min,
     int trim_max,
     bint verbose,
-    void* trusted_reads_hash_int
+    void* trusted_reads_hash_int,
+    PMDStatsAccumulator* pmd_acc,
+    bint collect_damage_stats,
+    PMDCurve* pmd_curve,
+    float pmd_epsilon
 ) nogil

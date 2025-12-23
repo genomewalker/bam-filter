@@ -16,14 +16,19 @@ Provides numerically-stable mathematical operations including log-sum-exp
 and safe weight normalization to prevent numerical instability.
 """
 
-from libc.math cimport exp, log
+from libc.math cimport exp, log, fabs, fmax, log1p
+
+cdef double LOG2 = 0.6931471805599453  # log(2.0)
 
 
 cdef double stable_log_sum_exp(double log_a, double log_b) noexcept nogil:
-    """Numerically stable log-sum-exp for two values.
+    """Numerically stable branchless log-sum-exp for two values.
 
     Computes log(exp(log_a) + exp(log_b)) without overflow/underflow issues
     by factoring out the larger exponent before computing the sum.
+
+    Uses branchless fmax/fabs and fast approximation for large differences.
+    When |log_a - log_b| > 20, the smaller term contributes < 2e-9 and is skipped.
 
     Parameters
     ----------
@@ -37,11 +42,15 @@ cdef double stable_log_sum_exp(double log_a, double log_b) noexcept nogil:
     double
         log(exp(log_a) + exp(log_b))
     """
-    if log_a == log_b:
-        return log_a + log(2.0)
-    cdef double m = log_a if log_a > log_b else log_b
-    cdef double diff = (log_a - log_b) if log_a > log_b else (log_b - log_a)
-    return m + log(1.0 + exp(-diff))
+    cdef double m = fmax(log_a, log_b)
+    cdef double diff = fabs(log_a - log_b)
+
+    # Fast path: if diff > 20, exp(-diff) < 2e-9, smaller term is negligible
+    if diff > 20.0:
+        return m
+
+    # Use log1p for better numerical accuracy with small values
+    return m + log1p(exp(-diff))
 
 
 cdef void safe_normalize_weights(double* weights, int dimension) noexcept nogil:

@@ -28,6 +28,8 @@ cdef struct ANIStats:
     # Damage opportunity counts (for hierarchical EM)
     uint8_t  c_at_5p_count        # Total C bases in reference at first 8bp (5' damage zone)
     uint8_t  g_at_3p_count        # Total G bases in reference at last 8bp (3' damage zone)
+    # Position-specific damage log-likelihood ratio
+    float    damage_llr           # log(L_ancient/L_modern) using position-specific D(z)
 
 # Public C-visible functions provided by the MD/PMD quality module
 cdef void initialize_quality_lookup_tables() noexcept nogil

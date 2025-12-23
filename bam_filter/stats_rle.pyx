@@ -12,7 +12,7 @@
 
 from libc.stdint cimport int32_t, int64_t
 from libc.stdlib cimport malloc, free, realloc, calloc, qsort
-from libc.math cimport log, exp, sqrt, ceil
+from libc.math cimport log, log10, exp, sqrt, ceil
 
 from bam_filter.stats cimport RefStats, RLEInterval, RLECoverage
 from bam_filter.stats_helpers cimport compare_pairs, compare_int64
@@ -548,6 +548,142 @@ cdef inline double calculate_norm_gini_smart(int32_t* counts, int64_t n_bins) no
     return (actual_gini - min_gini) / (max_gini - min_gini)
 
 
+# =============================================================================
+# Weighted (mass-based) histogram functions for posterior-weighted coverage
+# =============================================================================
+
+cdef double calculate_weighted_spatial_entropy(double* mass, int64_t n_bins) noexcept nogil:
+    """Calculate normalized spatial entropy from mass-weighted histogram.
+
+    Args:
+        mass: Histogram where mass[b] = sum of (segment_length * depth) for bin b
+        n_bins: Number of histogram bins
+
+    Returns:
+        Normalized entropy in [0, 1] where 1 = perfectly uniform distribution
+    """
+    if n_bins <= 1:
+        return 1.0
+
+    cdef double total = 0.0
+    cdef double entropy = 0.0
+    cdef double p
+    cdef int64_t i
+
+    for i in range(n_bins):
+        total += mass[i]
+
+    if total <= 0.0:
+        return 1.0
+
+    for i in range(n_bins):
+        if mass[i] > 0.0:
+            p = mass[i] / total
+            entropy -= p * log(p)
+
+    cdef double max_entropy = log(<double>n_bins)
+    return entropy / max_entropy if max_entropy > 0.0 else 1.0
+
+
+cdef double calculate_weighted_gini(double* mass, int64_t n_bins) noexcept nogil:
+    """Calculate Gini coefficient from mass-weighted histogram.
+
+    Args:
+        mass: Histogram where mass[b] = sum of coverage mass for bin b
+        n_bins: Number of histogram bins
+
+    Returns:
+        Gini coefficient in [0, 1] where 0 = perfect equality
+    """
+    if n_bins <= 1:
+        return 0.0
+
+    cdef double total = 0.0
+    cdef int64_t non_zero_count = 0
+    cdef int64_t i, j, rank
+
+    for i in range(n_bins):
+        if mass[i] > 0.0:
+            non_zero_count += 1
+        total += mass[i]
+
+    if total <= 0.0:
+        return 0.0
+
+    cdef int64_t zero_count = n_bins - non_zero_count
+
+    cdef double* non_zero_values = <double*>malloc(non_zero_count * sizeof(double))
+    if non_zero_values == NULL:
+        return 0.0
+
+    j = 0
+    for i in range(n_bins):
+        if mass[i] > 0.0:
+            non_zero_values[j] = mass[i]
+            j += 1
+
+    qsort(non_zero_values, non_zero_count, sizeof(double), compare_double)
+
+    cdef double gini_sum = 0.0
+    for i in range(non_zero_count):
+        rank = zero_count + i + 1
+        gini_sum += (2 * rank - n_bins - 1) * non_zero_values[i]
+
+    cdef double gini = gini_sum / (n_bins * total)
+
+    free(non_zero_values)
+    return gini
+
+
+cdef int compare_double(const void* a, const void* b) noexcept nogil:
+    """Comparison function for qsort on doubles."""
+    cdef double va = (<double*>a)[0]
+    cdef double vb = (<double*>b)[0]
+    if va < vb:
+        return -1
+    elif va > vb:
+        return 1
+    return 0
+
+
+cdef double calculate_norm_weighted_gini(double* mass, int64_t n_bins) noexcept nogil:
+    """Calculate normalized Gini coefficient from mass-weighted histogram.
+
+    Normalizes by max possible Gini = (n_bins - 1) / n_bins.
+
+    Args:
+        mass: Histogram where mass[b] = sum of coverage mass for bin b
+        n_bins: Number of histogram bins
+
+    Returns:
+        Normalized Gini in [0, 1] where 0 = perfect equality, 1 = max inequality
+    """
+    if n_bins <= 1:
+        return 0.0
+
+    cdef double actual_gini = calculate_weighted_gini(mass, n_bins)
+    cdef double max_gini = <double>(n_bins - 1) / n_bins
+
+    if max_gini <= 0.0:
+        return 0.0
+
+    return actual_gini / max_gini
+
+
+cdef int64_t estimate_histogram_bins_from_length(int64_t ref_length) noexcept nogil:
+    """Estimate histogram bins from reference length using simple heuristic.
+
+    Uses sqrt(ref_length / 100) with bounds [10, 1000].
+    """
+    cdef double bins_f = sqrt(<double>ref_length / 100.0)
+    cdef int64_t n_bins = <int64_t>bins_f
+    if n_bins < 10:
+        n_bins = 10
+    if n_bins > 1000:
+        n_bins = 1000
+    return n_bins
+
+
 cdef inline int64_t estimate_histogram_bins(
     int64_t n_positions,
     int64_t* interval_starts,
@@ -724,6 +860,12 @@ cdef void calculate_rle_coverage_stats(RLECoverage* rle, RefStats* stats, int tr
         stats.n_intervals = 0
         stats.sum_interval_length_sq = 0.0
         stats.weighted_contiguity_breadth = 0.0
+        stats.mega_genome_sparsity_index = 0.0
+        stats.coverage_compressibility_ratio = 0.0
+        stats.feature_space_clustering_score = 0.0
+        # Authenticity metrics (p-value computed post-hoc across all refs)
+        stats.authenticity_score = 0.0
+        stats.authenticity_pvalue = 1.0
         return
 
     clock_gettime(CLOCK_MONOTONIC, &ts_covstat_start)
@@ -821,9 +963,51 @@ cdef void calculate_rle_coverage_stats(RLECoverage* rle, RefStats* stats, int tr
     # Store interval stats and calculate WCB
     stats.n_intervals = n_intervals
     stats.sum_interval_length_sq = sum_interval_len_sq
-    # WCB = sum(interval_len^2) / ref_length^2 - rewards long intervals over scattered tiny hits
-    cdef double ref_len_sq = <double>rle.ref_length * <double>rle.ref_length
-    stats.weighted_contiguity_breadth = sum_interval_len_sq / ref_len_sq if ref_len_sq > 0.0 else 0.0
+    # WCB = sum(interval_len^2) / bases_covered^2 - Herfindahl-like concentration index
+    # Range: 1/n_intervals (uniform) to 1.0 (single interval)
+    # High WCB = few long intervals (good), Low WCB = many scattered fragments (bad)
+    cdef double bases_cov_sq = <double>total_bases_covered * <double>total_bases_covered
+    stats.weighted_contiguity_breadth = sum_interval_len_sq / bases_cov_sq if bases_cov_sq > 0.0 else 0.0
+
+    # MGSI = Mega-Genome Sparsity Index
+    # Compares observed breadth to expected breadth under Poisson model
+    # Expected breadth: E[b] = 1 - exp(-n_reads * read_len / ref_length)
+    # MGSI = log10(E[b] / b) - high values indicate suspiciously sparse coverage
+    cdef double expected_breadth_mgsi = 0.0
+    cdef double read_len_estimate = stats.read_length_mean if stats.read_length_mean > 0 else 50.0
+    cdef double expected_cov = 0.0
+    if rle.ref_length > 0 and stats.n_reads > 0:
+        expected_cov = (<double>stats.n_reads * read_len_estimate) / <double>rle.ref_length
+        expected_breadth_mgsi = 1.0 - exp(-expected_cov)
+    if stats.breadth > 0.0 and expected_breadth_mgsi > 0.0:
+        stats.mega_genome_sparsity_index = log10(expected_breadth_mgsi / stats.breadth)
+    else:
+        stats.mega_genome_sparsity_index = 0.0
+
+    # CCR = Coverage Compressibility Ratio
+    # Measures fragmentation: n_intervals / (bases_covered / read_len)
+    # High CCR = many tiny scattered islands per "read's worth" of coverage = noise
+    # Low CCR = contiguous coverage = real signal
+    cdef double reads_worth = total_bases_covered / read_len_estimate if read_len_estimate > 0 else 1.0
+    if reads_worth > 0.0:
+        stats.coverage_compressibility_ratio = <double>n_intervals / reads_worth
+    else:
+        stats.coverage_compressibility_ratio = 0.0
+
+    # FSCS = Feature-Space Clustering Score
+    # Measures how tightly reads cluster in feature space (GC, complexity)
+    # HIGH FSCS = tight clustering in feature space = reads hitting conserved niche = NOISE
+    # LOW FSCS = reads sampling diverse genome regions = REAL signal
+    # Formula: FSCS = 1 / (1 + combined_cv) where cv = coefficient of variation
+    cdef double gc_cv = 0.0
+    cdef double dust_cv = 0.0
+    cdef double combined_cv = 0.0
+    if stats.read_gc_content_mean > 0.0:
+        gc_cv = stats.read_gc_content_std / stats.read_gc_content_mean
+    if stats.dust_mean > 0.0:
+        dust_cv = stats.dust_std / stats.dust_mean
+    combined_cv = sqrt(gc_cv * gc_cv + dust_cv * dust_cv)
+    stats.feature_space_clustering_score = 1.0 / (1.0 + combined_cv)
 
     # Calculate coverage standard deviation and variance for c_v and d_i (only covered positions)
     cdef double sum_cov = 0.0
@@ -1029,6 +1213,12 @@ cdef void calculate_rle_coverage_stats(RLECoverage* rle, RefStats* stats, int tr
         stats.site_density = 1000.0 * <double>total_bases_covered / <double>genome_length
     else:
         stats.site_density = 0.0
+
+    # Authenticity score = norm_spatial_entropy - norm_gini
+    # Higher score = more even coverage = more likely authentic
+    # P-value is computed post-hoc across all references (requires distribution)
+    stats.authenticity_score = stats.norm_spatial_entropy - stats.norm_gini
+    stats.authenticity_pvalue = 1.0  # Placeholder, computed after all refs processed
 
     # Calculate TAD
     clock_gettime(CLOCK_MONOTONIC, &ts_tad_start)

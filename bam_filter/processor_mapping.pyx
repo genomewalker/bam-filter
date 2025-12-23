@@ -22,7 +22,7 @@ from libc.stdlib cimport malloc, free, calloc
 from libc.string cimport strcat, strncat, strlen, strstr, strchr, strncmp
 from libc.stdio cimport sprintf
 
-from bam_filter.processor cimport MemoryPool
+from bam_filter.processor cimport MemoryPool, AlignmentCore
 from bam_filter.processor_mapping cimport ReferenceMapping
 from bam_filter.processor cimport sam_hdr_t
 
@@ -81,7 +81,7 @@ cdef ReferenceMapping* create_reference_mapping(MemoryPool* pool,
         mapping.old_to_new_tid[ref_id] = <uint32_t>(-1)
 
     for alignment_idx in range(pool.alignment_count):
-        ref_id = pool.alignments[alignment_idx].reference_index
+        ref_id = pool.alignment_cores[alignment_idx].reference_index
         if ref_id < mapping.n_original_refs and not ref_seen[ref_id]:
             ref_seen[ref_id] = 1
             mapping.n_retained_refs += 1
@@ -159,7 +159,7 @@ cdef int update_reference_mapping_after_filtering(ReferenceMapping* mapping,
         return -1
 
     for i in range(pool.alignment_count):
-        compact_ref = pool.alignments[i].reference_index
+        compact_ref = pool.alignment_cores[i].reference_index
         if compact_ref < mapping.n_retained_refs:
             ref_active[compact_ref] = 1
 
@@ -171,9 +171,9 @@ cdef int update_reference_mapping_after_filtering(ReferenceMapping* mapping,
             old_to_new_compact[i] = <uint32_t>(-1)
 
     for i in range(pool.alignment_count):
-        old_compact_ref = pool.alignments[i].reference_index
+        old_compact_ref = pool.alignment_cores[i].reference_index
         new_compact_ref = old_to_new_compact[old_compact_ref]
-        pool.alignments[i].reference_index = new_compact_ref
+        pool.alignment_cores[i].reference_index = new_compact_ref
 
     cdef uint32_t* new_new_to_old = <uint32_t*>malloc(new_compact_count * sizeof(uint32_t))
     if not new_new_to_old:
@@ -304,7 +304,7 @@ cdef sam_hdr_t* create_filtered_header_efficient(sam_hdr_t* original_header,
         ref_name = sam_hdr_tid2name(original_header, original_tid)
         ref_length = sam_hdr_tid2len(original_header, original_tid)
 
-        if ref_name and current_pos < sq_content_len - 100:
+        if ref_name and current_pos + 100 <= sq_content_len:
             bytes_written = sprintf(sq_content + current_pos,
                                    "@SQ\tSN:%s\tLN:%ld\n",
                                    ref_name, ref_length)
@@ -363,12 +363,12 @@ cdef int remap_alignment_reference_ids(MemoryPool* pool,
         return -1
 
     for alignment_idx in range(pool.alignment_count):
-        old_tid = pool.alignments[alignment_idx].reference_index
+        old_tid = pool.alignment_cores[alignment_idx].reference_index
 
         if old_tid < mapping.n_original_refs:
             new_tid = mapping.old_to_new_tid[old_tid]
             if new_tid != <uint32_t>(-1):
-                pool.alignments[alignment_idx].reference_index = new_tid
+                pool.alignment_cores[alignment_idx].reference_index = new_tid
                 remapped_count += 1
             else:
                 bf_nogil_logf_notime(

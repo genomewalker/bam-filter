@@ -222,6 +222,32 @@ cdef double get_column_value(RefStats* stats, int column_index) noexcept nogil:
         return stats.complexity_penalized_coverage
     elif column_index == 49:  # overlap_redundancy_index
         return stats.overlap_redundancy_index
+    elif column_index == 50:  # mega_genome_sparsity_index
+        return stats.mega_genome_sparsity_index
+    elif column_index == 51:  # coverage_compressibility_ratio
+        return stats.coverage_compressibility_ratio
+    elif column_index == 52:  # feature_space_clustering_score
+        return stats.feature_space_clustering_score
+    elif column_index == 53:  # authenticity_score
+        return stats.authenticity_score
+    elif column_index == 54:  # authenticity_pvalue
+        return stats.authenticity_pvalue
+    elif column_index == 55:  # read_ani_corrected_mean
+        return stats.ani_corrected_mean
+    elif column_index == 56:  # read_ani_corrected_std
+        return stats.ani_corrected_std
+    elif column_index == 57:  # zp_mean
+        return stats.zp_mean
+    elif column_index == 58:  # zp_std
+        return stats.zp_std
+    elif column_index == 59:  # zs_mean
+        return stats.zs_mean
+    elif column_index == 60:  # zs_std
+        return stats.zs_std
+    elif column_index == 61:  # zp_count
+        return <double>stats.zp_count
+    elif column_index == 62:  # zs_count
+        return <double>stats.zs_count
     else:
         return 0.0
 

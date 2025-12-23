@@ -33,27 +33,30 @@ Implementation notes
 from libc.stdlib cimport malloc, free, calloc, realloc, qsort
 from libc.string cimport memset, memcpy, strlen
 from libc.math cimport sqrt as libc_sqrt, log, fabs, exp, fmax, fmin, log2
-from libc.stdio cimport FILE, fopen, fclose
+from libc.stdio cimport FILE, fopen, fclose, printf
 from libc.stdint cimport uint32_t, uint64_t, int32_t, int64_t, uint8_t
 from cython.parallel cimport prange, threadid
-from bam_filter.processor cimport min_int32, max_int32, min_int64, max_int64
+from bam_filter.processor cimport min_int32, max_int32, min_int64, max_int64, MemoryPool, Alignment
 from bam_filter.processor_mapping cimport ReferenceMapping
+from bam_filter.stats cimport RefStats, RLECoverage
+from bam_filter.stats_rle cimport (
+    initialize_rle_from_length,
+    destroy_rle_coverage,
+    add_coverage_interval,
+    calculate_rle_coverage_stats
+)
 from bam_filter.processor_graph cimport ReadRefsIndex, MultPairExtended, RefReadPair, SparseConnectivity, GraphConfig
 from bam_filter.processor_graph_tsv cimport write_graph_tsv_c
 
 # Import graph operations from processor_graph_ops
 from bam_filter.processor_graph_ops cimport (
     WeightedGraph,
-    build_weighted_graph_from_alignments,
+    GraphNode,
     prune_low_weight_edges,
     calculate_graph_statistics,
-    destroy_weighted_graph
+    destroy_weighted_graph,
+    build_igraph_direct_from_read_index
 )
-
-# Import igraph functions for graph building and statistics
-
-from bam_filter.processor_graph_ops cimport build_igraph_from_read_index
-from bam_filter.processor_graph_ops cimport build_igraph_direct_from_read_index
 from bam_filter.processor_igraph cimport *
 from bam_filter.processor_graph_ops cimport create_weighted_graph
 
@@ -582,6 +585,628 @@ cdef void calculate_reference_stats(MemoryPool* pool, sam_hdr_t* bam_header,
                 )
 
     bf_nogil_log(b"GRAPH", b"reference_stats: read category tallies verified")
+
+
+cdef void calculate_reference_coverage(MemoryPool* pool, ReferenceStats* ref_stats) noexcept nogil:
+    """Compute coverage statistics from MemoryPool alignments using RLE compression.
+
+    This function iterates through all alignments in the MemoryPool and builds
+    RLE (run-length encoded) coverage representations for each reference. It then
+    computes coverage metrics (breadth, entropy, gini, WCB) and stores them in
+    the corresponding ReferenceStats entries.
+
+    Parameters
+    ----------
+    pool : MemoryPool*
+        Pointer to the memory pool containing alignment data. Must have valid
+        alignment_count, alignments array, reference_count, and reference_lengths.
+    ref_stats : ReferenceStats*
+        Pre-allocated array of ReferenceStats (length = pool.reference_count).
+        Coverage fields will be populated: bases_covered, n_intervals, breadth,
+        norm_spatial_entropy, norm_gini, weighted_contiguity_breadth.
+    """
+    cdef uint32_t ref_idx
+    cdef int64_t aln_idx
+    cdef uint32_t current_ref
+    cdef int64_t aln_start, aln_end, ref_len
+    cdef RLECoverage** rle_array = NULL
+    cdef RefStats temp_stats
+    cdef int ret
+
+    if pool == NULL or ref_stats == NULL or pool.reference_count == 0:
+        return
+
+    bf_nogil_log(b"GRAPH", b"calculate_reference_coverage: allocating RLE structures")
+
+    # Allocate array of RLECoverage pointers (initially NULL)
+    rle_array = <RLECoverage**>calloc(pool.reference_count, sizeof(RLECoverage*))
+    if rle_array == NULL:
+        bf_nogil_logf_notime(NULL, b"ERROR: Failed to allocate RLE pointer array for %u references\n",
+                            pool.reference_count)
+        return
+
+    # Initialize coverage fields in ref_stats to zero
+    for ref_idx in range(pool.reference_count):
+        ref_stats[ref_idx].bases_covered = 0
+        ref_stats[ref_idx].n_intervals = 0
+        ref_stats[ref_idx].breadth = 0.0
+        ref_stats[ref_idx].norm_spatial_entropy = 0.0
+        ref_stats[ref_idx].norm_gini = 0.0
+        ref_stats[ref_idx].weighted_contiguity_breadth = 0.0
+
+    # Pass 1: Add alignment intervals to RLE structures (lazy allocation)
+    # Only include alignments that pass ANI filter (corrected identity threshold)
+    for aln_idx in range(pool.alignment_count):
+        # Skip alignments that failed ANI filter
+        if pool.alignments[aln_idx].passes_ani_filter == 0:
+            continue
+
+        current_ref = pool.alignments[aln_idx].reference_index
+        if current_ref >= pool.reference_count:
+            continue
+
+        # Lazy-allocate RLE structure for this reference if not yet created
+        if rle_array[current_ref] == NULL:
+            ref_len = pool.reference_lengths[current_ref]
+            if ref_len <= 0:
+                continue
+            rle_array[current_ref] = initialize_rle_from_length(ref_len)
+            if rle_array[current_ref] == NULL:
+                continue
+
+        # Add this alignment's coverage interval
+        aln_start = <int64_t>pool.alignments[aln_idx].alignment_position
+        aln_end = aln_start + <int64_t>pool.alignments[aln_idx].aligned_length
+
+        # Clamp to reference bounds
+        if aln_start < 0:
+            aln_start = 0
+        if aln_end > pool.reference_lengths[current_ref]:
+            aln_end = pool.reference_lengths[current_ref]
+
+        if aln_end > aln_start:
+            ret = add_coverage_interval(rle_array[current_ref], aln_start, aln_end, 1)
+
+    bf_nogil_log(b"GRAPH", b"calculate_reference_coverage: computing coverage stats")
+
+    # Pass 2: Compute coverage statistics for each reference and copy to ReferenceStats
+    for ref_idx in range(pool.reference_count):
+        if rle_array[ref_idx] == NULL:
+            continue
+
+        # Initialize temp_stats for this reference
+        memset(&temp_stats, 0, sizeof(RefStats))
+        temp_stats.ref_length = pool.reference_lengths[ref_idx]
+        temp_stats.bam_ref_length = pool.reference_lengths[ref_idx]
+
+        # Calculate RLE coverage statistics (fills temp_stats with coverage metrics)
+        calculate_rle_coverage_stats(rle_array[ref_idx], &temp_stats, 0, 0)
+
+        # Copy coverage fields from RefStats to ReferenceStats
+        ref_stats[ref_idx].bases_covered = temp_stats.bases_covered
+        ref_stats[ref_idx].n_intervals = temp_stats.n_intervals
+        ref_stats[ref_idx].breadth = temp_stats.breadth
+        ref_stats[ref_idx].norm_spatial_entropy = temp_stats.norm_spatial_entropy
+        ref_stats[ref_idx].norm_gini = temp_stats.norm_gini
+        ref_stats[ref_idx].weighted_contiguity_breadth = temp_stats.weighted_contiguity_breadth
+
+        # Clean up this RLE structure
+        destroy_rle_coverage(rle_array[ref_idx])
+        rle_array[ref_idx] = NULL
+
+    # Free the pointer array
+    free(rle_array)
+
+    bf_nogil_log(b"GRAPH", b"calculate_reference_coverage: done")
+
+
+cdef void calculate_reference_coverage_batched(MemoryPool* pool, ReferenceStats* ref_stats) noexcept nogil:
+    """Compute coverage statistics using batched processing to control memory.
+
+    Instead of creating RLE structures for all references at once (which can
+    consume 100+GB for large datasets), this processes references in batches.
+    For each batch, it scans all alignments but only builds RLE structures
+    for references in the current batch, then computes stats and frees.
+
+    Memory usage: O(batch_size) RLE structures instead of O(n_refs).
+    Time: O(n_batches × n_alignments) which is slower but memory-bounded.
+    """
+    cdef uint32_t ref_idx, batch_start, batch_end, batch_size
+    cdef int64_t aln_idx
+    cdef uint32_t current_ref
+    cdef int64_t aln_start, aln_end, ref_len
+    cdef RLECoverage** rle_array = NULL
+    cdef RefStats temp_stats
+    cdef int ret
+    cdef uint32_t n_batches, batch_num
+    cdef uint32_t refs_processed = 0
+
+    if pool == NULL or ref_stats == NULL or pool.reference_count == 0:
+        return
+
+    # Batch size: 100k refs per batch balances memory vs iterations
+    # With 17.5M refs, this gives ~175 batches
+    batch_size = 100000
+    n_batches = (pool.reference_count + batch_size - 1) // batch_size
+
+    bf_nogil_logf_notime(NULL, b"calculate_reference_coverage: allocating RLE structures\n")
+    printf(b"[CWRP] Batched coverage: %u refs in %u batches of %u\n",
+           pool.reference_count, n_batches, batch_size)
+
+    # Initialize coverage fields in ref_stats to zero
+    for ref_idx in range(pool.reference_count):
+        ref_stats[ref_idx].bases_covered = 0
+        ref_stats[ref_idx].n_intervals = 0
+        ref_stats[ref_idx].breadth = 0.0
+        ref_stats[ref_idx].norm_spatial_entropy = 0.0
+        ref_stats[ref_idx].norm_gini = 0.0
+        ref_stats[ref_idx].weighted_contiguity_breadth = 0.0
+
+    # Allocate RLE pointer array for batch (reused across batches)
+    rle_array = <RLECoverage**>calloc(batch_size, sizeof(RLECoverage*))
+    if rle_array == NULL:
+        bf_nogil_logf_notime(NULL, b"ERROR: Failed to allocate RLE array for batch\n")
+        return
+
+    # Process refs in batches
+    for batch_num in range(n_batches):
+        batch_start = batch_num * batch_size
+        batch_end = batch_start + batch_size
+        if batch_end > pool.reference_count:
+            batch_end = pool.reference_count
+
+        # Clear RLE pointers for this batch
+        for ref_idx in range(batch_end - batch_start):
+            rle_array[ref_idx] = NULL
+
+        # Pass 1: Scan all alignments, build RLE only for refs in this batch
+        # Only include alignments that pass ANI filter (corrected identity threshold)
+        for aln_idx in range(pool.alignment_count):
+            # Skip alignments that failed ANI filter
+            if pool.alignments[aln_idx].passes_ani_filter == 0:
+                continue
+
+            current_ref = pool.alignments[aln_idx].reference_index
+            if current_ref < batch_start or current_ref >= batch_end:
+                continue  # Skip refs not in this batch
+
+            # Index within batch
+            ref_idx = current_ref - batch_start
+
+            # Lazy-allocate RLE for this ref
+            if rle_array[ref_idx] == NULL:
+                ref_len = pool.reference_lengths[current_ref]
+                if ref_len <= 0:
+                    continue
+                rle_array[ref_idx] = initialize_rle_from_length(ref_len)
+                if rle_array[ref_idx] == NULL:
+                    continue
+
+            # Add coverage interval
+            aln_start = <int64_t>pool.alignments[aln_idx].alignment_position
+            aln_end = aln_start + <int64_t>pool.alignments[aln_idx].aligned_length
+
+            if aln_start < 0:
+                aln_start = 0
+            if aln_end > pool.reference_lengths[current_ref]:
+                aln_end = pool.reference_lengths[current_ref]
+
+            if aln_end > aln_start:
+                ret = add_coverage_interval(rle_array[ref_idx], aln_start, aln_end, 1)
+
+        # Pass 2: Compute stats and free RLE for this batch
+        for ref_idx in range(batch_end - batch_start):
+            current_ref = batch_start + ref_idx
+            if rle_array[ref_idx] == NULL:
+                continue
+
+            memset(&temp_stats, 0, sizeof(RefStats))
+            temp_stats.ref_length = pool.reference_lengths[current_ref]
+            temp_stats.bam_ref_length = pool.reference_lengths[current_ref]
+
+            calculate_rle_coverage_stats(rle_array[ref_idx], &temp_stats, 0, 0)
+
+            ref_stats[current_ref].bases_covered = temp_stats.bases_covered
+            ref_stats[current_ref].n_intervals = temp_stats.n_intervals
+            ref_stats[current_ref].breadth = temp_stats.breadth
+            ref_stats[current_ref].norm_spatial_entropy = temp_stats.norm_spatial_entropy
+            ref_stats[current_ref].norm_gini = temp_stats.norm_gini
+            ref_stats[current_ref].weighted_contiguity_breadth = temp_stats.weighted_contiguity_breadth
+
+            # Free RLE immediately after computing stats
+            destroy_rle_coverage(rle_array[ref_idx])
+            rle_array[ref_idx] = NULL
+            refs_processed += 1
+
+        # Progress every 10 batches
+        if batch_num % 10 == 0 or batch_num == n_batches - 1:
+            printf(b"[CWRP] Batch %u/%u complete (%u refs processed)\n",
+                   batch_num + 1, n_batches, refs_processed)
+
+    free(rle_array)
+    bf_nogil_log(b"GRAPH", b"calculate_reference_coverage_batched: done")
+
+
+cdef void compute_authenticity_scores(MemoryPool* pool, ReferenceStats* ref_stats) noexcept nogil:
+    """Compute authenticity scores from coverage metrics and store in pool.
+
+    Authenticity = sigmoid(scale * (norm_spatial_entropy - norm_gini))
+
+    Higher authenticity indicates more uniform, well-distributed coverage
+    (characteristic of true ancient DNA reads vs contamination).
+
+    The result is stored in pool.authenticity_scores which must be pre-allocated.
+    """
+    cdef uint32_t ref_idx
+    cdef double entropy, gini, raw_score, score
+    cdef double scale = 4.0  # Sigmoid scaling factor
+
+    if pool == NULL or ref_stats == NULL or pool.authenticity_scores == NULL:
+        return
+
+    for ref_idx in range(pool.reference_count):
+        entropy = ref_stats[ref_idx].norm_spatial_entropy
+        gini = ref_stats[ref_idx].norm_gini
+
+        # Raw authenticity: entropy measures uniformity, gini measures inequality
+        # High entropy + low gini = authentic coverage
+        raw_score = entropy - gini
+
+        # Map to [0, 1] via sigmoid
+        # sigmoid(scale * x) where x in [-1, 1] gives good spread
+        score = 1.0 / (1.0 + exp(-scale * raw_score))
+
+        pool.authenticity_scores[ref_idx] = score
+
+
+# =============================================================================
+# Iterative Ancientness Field Functions (Full Fix)
+# =============================================================================
+
+cdef int init_ancientness_arrays(MemoryPool* pool) noexcept nogil:
+    """Initialize ancientness feature arrays in MemoryPool.
+
+    Returns 0 on success, -1 on allocation failure.
+    """
+    cdef uint32_t n_refs = pool.reference_count
+
+    if pool == NULL or n_refs == 0:
+        return -1
+
+    # Allocate all ancientness arrays
+    pool.eta_ancientness = <double*>calloc(n_refs, sizeof(double))
+    pool.anc_feat_entropy = <double*>calloc(n_refs, sizeof(double))
+    pool.anc_feat_gini = <double*>calloc(n_refs, sizeof(double))
+    pool.anc_feat_damage_5p = <double*>calloc(n_refs, sizeof(double))
+    pool.anc_feat_damage_3p = <double*>calloc(n_refs, sizeof(double))
+    pool.anc_feat_short_frac = <double*>calloc(n_refs, sizeof(double))
+    pool.anc_feat_mean_length = <double*>calloc(n_refs, sizeof(double))
+    pool.anc_feat_read_count = <double*>calloc(n_refs, sizeof(double))
+
+    if (pool.eta_ancientness == NULL or pool.anc_feat_entropy == NULL or
+        pool.anc_feat_gini == NULL or pool.anc_feat_damage_5p == NULL or
+        pool.anc_feat_damage_3p == NULL or pool.anc_feat_short_frac == NULL or
+        pool.anc_feat_mean_length == NULL or pool.anc_feat_read_count == NULL):
+        # Cleanup on partial failure
+        if pool.eta_ancientness != NULL: free(pool.eta_ancientness)
+        if pool.anc_feat_entropy != NULL: free(pool.anc_feat_entropy)
+        if pool.anc_feat_gini != NULL: free(pool.anc_feat_gini)
+        if pool.anc_feat_damage_5p != NULL: free(pool.anc_feat_damage_5p)
+        if pool.anc_feat_damage_3p != NULL: free(pool.anc_feat_damage_3p)
+        if pool.anc_feat_short_frac != NULL: free(pool.anc_feat_short_frac)
+        if pool.anc_feat_mean_length != NULL: free(pool.anc_feat_mean_length)
+        if pool.anc_feat_read_count != NULL: free(pool.anc_feat_read_count)
+        pool.eta_ancientness = NULL
+        pool.anc_feat_entropy = NULL
+        pool.anc_feat_gini = NULL
+        pool.anc_feat_damage_5p = NULL
+        pool.anc_feat_damage_3p = NULL
+        pool.anc_feat_short_frac = NULL
+        pool.anc_feat_mean_length = NULL
+        pool.anc_feat_read_count = NULL
+        return -1
+
+    # Initialize eta to 0 (neutral ancientness)
+    cdef uint32_t j
+    for j in range(n_refs):
+        pool.eta_ancientness[j] = 0.0
+
+    return 0
+
+
+cdef void accumulate_posterior_weighted_features(
+    MemoryPool* pool, double* phi_weights, ReferenceStats* ref_stats
+) noexcept nogil:
+    """Accumulate damage and coverage features using posterior weights from EM.
+
+    For each reference, computes:
+    - damage_5p: Weighted average C->T damage at 5' end
+    - damage_3p: Weighted average G->A damage at 3' end
+    - short_frac: Fraction of short fragments (< 60bp)
+    - mean_length: Mean fragment length
+    - read_count: Posterior-weighted read count
+
+    Uses phi_weights[ref_idx] as the posterior weight for each reference.
+    Coverage metrics (entropy, gini) come from ref_stats.
+    """
+    cdef uint32_t n_refs = pool.reference_count
+    cdef uint32_t ref_idx, read_idx
+    cdef uint64_t aln_idx, start_pos, end_pos
+    cdef uint32_t aln_count
+    cdef Alignment* aln
+    cdef double phi_j, weight
+    cdef double damage_5p, damage_3p
+
+    if pool == NULL or phi_weights == NULL or ref_stats == NULL:
+        return
+
+    # Reset feature accumulators
+    for ref_idx in range(n_refs):
+        pool.anc_feat_damage_5p[ref_idx] = 0.0
+        pool.anc_feat_damage_3p[ref_idx] = 0.0
+        pool.anc_feat_short_frac[ref_idx] = 0.0
+        pool.anc_feat_mean_length[ref_idx] = 0.0
+        pool.anc_feat_read_count[ref_idx] = 0.0
+
+    # Per-reference accumulators (temporary, use arrays to avoid stack overflow)
+    cdef double* ct_sums = <double*>calloc(n_refs, sizeof(double))
+    cdef double* ga_sums = <double*>calloc(n_refs, sizeof(double))
+    cdef double* ct_opp_sums = <double*>calloc(n_refs, sizeof(double))
+    cdef double* ga_opp_sums = <double*>calloc(n_refs, sizeof(double))
+    cdef double* len_sums = <double*>calloc(n_refs, sizeof(double))
+    cdef double* short_counts = <double*>calloc(n_refs, sizeof(double))
+    cdef double* total_counts = <double*>calloc(n_refs, sizeof(double))
+
+    if ct_sums == NULL or ga_sums == NULL or ct_opp_sums == NULL or ga_opp_sums == NULL:
+        if ct_sums != NULL: free(ct_sums)
+        if ga_sums != NULL: free(ga_sums)
+        if ct_opp_sums != NULL: free(ct_opp_sums)
+        if ga_opp_sums != NULL: free(ga_opp_sums)
+        if len_sums != NULL: free(len_sums)
+        if short_counts != NULL: free(short_counts)
+        if total_counts != NULL: free(total_counts)
+        return
+
+    # Iterate over all reads and their alignments
+    for read_idx in range(pool.unique_read_count):
+        aln_count = pool.read_alignment_counts[read_idx]
+        if aln_count == 0:
+            continue
+
+        start_pos = pool.read_alignment_starts[read_idx]
+        end_pos = start_pos + aln_count
+
+        for aln_idx in range(start_pos, end_pos):
+            aln = &pool.alignments[aln_idx]
+            ref_idx = aln.reference_index
+            if ref_idx >= n_refs:
+                continue
+
+            phi_j = phi_weights[ref_idx]
+            if phi_j < 1e-15:
+                continue
+
+            # Weight by posterior probability
+            weight = phi_j
+
+            # Accumulate damage counts (C->T at 5', G->A at 3')
+            ct_sums[ref_idx] += weight * <double>aln.ct_5p_count
+            ga_sums[ref_idx] += weight * <double>aln.ga_3p_count
+            ct_opp_sums[ref_idx] += weight * <double>aln.c_at_5p_count
+            ga_opp_sums[ref_idx] += weight * <double>aln.g_at_3p_count
+
+            # Accumulate length statistics
+            len_sums[ref_idx] += weight * <double>aln.aligned_length
+            if aln.aligned_length < 60:
+                short_counts[ref_idx] += weight
+            total_counts[ref_idx] += weight
+
+    # Compute final features per reference
+    cdef double total_weight
+    for ref_idx in range(n_refs):
+        total_weight = total_counts[ref_idx]
+
+        # Copy coverage metrics from ref_stats
+        pool.anc_feat_entropy[ref_idx] = ref_stats[ref_idx].norm_spatial_entropy
+        pool.anc_feat_gini[ref_idx] = ref_stats[ref_idx].norm_gini
+
+        if total_weight > 0.01:
+            # Damage rates: mismatches / opportunities
+            if ct_opp_sums[ref_idx] > 0:
+                damage_5p = ct_sums[ref_idx] / ct_opp_sums[ref_idx]
+                pool.anc_feat_damage_5p[ref_idx] = fmin(1.0, fmax(0.0, damage_5p))
+            else:
+                pool.anc_feat_damage_5p[ref_idx] = 0.0
+
+            if ga_opp_sums[ref_idx] > 0:
+                damage_3p = ga_sums[ref_idx] / ga_opp_sums[ref_idx]
+                pool.anc_feat_damage_3p[ref_idx] = fmin(1.0, fmax(0.0, damage_3p))
+            else:
+                pool.anc_feat_damage_3p[ref_idx] = 0.0
+
+            # Fragment length features
+            pool.anc_feat_short_frac[ref_idx] = short_counts[ref_idx] / total_weight
+            pool.anc_feat_mean_length[ref_idx] = len_sums[ref_idx] / total_weight
+
+            # Posterior-weighted read count
+            pool.anc_feat_read_count[ref_idx] = total_weight
+        else:
+            # No data - set neutral values
+            pool.anc_feat_damage_5p[ref_idx] = 0.0
+            pool.anc_feat_damage_3p[ref_idx] = 0.0
+            pool.anc_feat_short_frac[ref_idx] = 0.0
+            pool.anc_feat_mean_length[ref_idx] = 100.0  # Neutral length
+            pool.anc_feat_read_count[ref_idx] = 0.0
+
+    # Cleanup
+    free(ct_sums)
+    free(ga_sums)
+    free(ct_opp_sums)
+    free(ga_opp_sums)
+    free(len_sums)
+    free(short_counts)
+    free(total_counts)
+
+
+cdef double compute_eta_from_features(
+    double entropy, double gini, double damage_5p, double damage_3p,
+    double short_frac, double mean_length, double damage_weight
+) noexcept nogil:
+    """Compute latent ancientness eta from damage-aware features.
+
+    Combines coverage, damage, and fragment length into a single ancientness score.
+
+    The formula:
+      eta = cov_score + damage_weight * dmg_score + len_score + interactions
+
+    Where:
+      cov_score = entropy - gini (uniform coverage = positive)
+      dmg_score = (damage_5p + damage_3p) / 2 (ancient damage = positive)
+      len_score = short_frac - mean_length / (mean_length + 50) (short = positive)
+
+    Interactions add cross-signal validation:
+      - High coverage uniformity + high damage -> stronger signal
+      - High damage + short fragments -> stronger signal
+    """
+    cdef double cov_score, dmg_score, len_score, eta
+
+    # Coverage: high entropy, low gini -> positive
+    cov_score = entropy - gini
+
+    # Damage: high deamination -> positive (scale by 2 to give similar range to cov_score)
+    dmg_score = 2.0 * (damage_5p + damage_3p) / 2.0
+
+    # Length: short fragments -> positive
+    # len_score in [-1, 1] approximately
+    len_score = short_frac - (mean_length / (mean_length + 50.0))
+
+    # Combine with interactions
+    eta = (cov_score
+           + damage_weight * dmg_score
+           + 0.5 * len_score
+           + 0.3 * cov_score * dmg_score    # Coverage-damage interaction
+           + 0.2 * dmg_score * len_score)   # Damage-length interaction
+
+    return eta
+
+
+cdef double compute_authenticity_from_eta(double eta) noexcept nogil:
+    """Map latent ancientness eta to authenticity score in [0,1].
+
+    Uses sigmoid(eta) to map real-valued eta to bounded authenticity.
+    """
+    if eta > 20.0:
+        return 0.999
+    elif eta < -20.0:
+        return 0.001
+    return 1.0 / (1.0 + exp(-eta))
+
+
+cdef double compute_gamma_from_eta(double eta) noexcept nogil:
+    """Map latent ancientness eta to gamma (ancient fraction) in [0,1].
+
+    Uses sigmoid(a * eta + b) where:
+      - a = 1.5 (steeper slope than authenticity)
+      - b = 0.0 (centered at eta=0 -> gamma=0.5)
+
+    The steeper slope means gamma is more sensitive to ancientness signal
+    than authenticity, reflecting that gamma needs clearer evidence.
+    """
+    cdef double a = 1.5
+    cdef double b = 0.0
+    cdef double x = a * eta + b
+
+    if x > 20.0:
+        return 0.999
+    elif x < -20.0:
+        return 0.001
+    return 1.0 / (1.0 + exp(-x))
+
+
+cdef void apply_low_coverage_shrinkage(
+    MemoryPool* pool, int32_t low_cov_floor, double shrink_tau
+) noexcept nogil:
+    """Apply shrinkage to eta for low-coverage references.
+
+    For references with fewer than low_cov_floor reads, shrink eta toward 0 (neutral).
+    This prevents stochastic coverage patterns from being misinterpreted as
+    "inauthentic" when there's simply insufficient data.
+
+    Formula:
+      eta_shrunk = eta * n_reads / (n_reads + shrink_tau)
+
+    When n_reads << shrink_tau: eta -> 0 (neutral)
+    When n_reads >> shrink_tau: eta -> eta (data-driven)
+    """
+    cdef uint32_t ref_idx, n_refs = pool.reference_count
+    cdef double n_reads, shrink_factor
+
+    if pool == NULL or pool.eta_ancientness == NULL:
+        return
+
+    for ref_idx in range(n_refs):
+        n_reads = pool.anc_feat_read_count[ref_idx]
+
+        if n_reads < <double>low_cov_floor:
+            # Shrink toward neutral (0)
+            shrink_factor = n_reads / (n_reads + shrink_tau)
+            pool.eta_ancientness[ref_idx] = pool.eta_ancientness[ref_idx] * shrink_factor
+
+
+cdef void update_ancientness_field(
+    MemoryPool* pool, double* phi_weights, ReferenceStats* ref_stats,
+    double damage_weight, int32_t low_cov_floor, double shrink_tau
+) noexcept nogil:
+    """Main function to update the ancientness field from posterior-weighted features.
+
+    Steps:
+    1. Accumulate posterior-weighted features (damage, coverage, length)
+    2. Compute eta from features for each reference
+    3. Apply low-coverage shrinkage
+    4. Derive authenticity and gamma from eta
+
+    This function should be called periodically during EM iterations
+    when iterative_auth is enabled.
+    """
+    cdef uint32_t ref_idx, n_refs = pool.reference_count
+    cdef double eta, entropy, gini, damage_5p, damage_3p, short_frac, mean_length
+
+    if pool == NULL or phi_weights == NULL or ref_stats == NULL:
+        return
+
+    if pool.eta_ancientness == NULL:
+        return
+
+    # Step 1: Accumulate posterior-weighted features
+    accumulate_posterior_weighted_features(pool, phi_weights, ref_stats)
+
+    # Step 2: Compute eta from features
+    for ref_idx in range(n_refs):
+        entropy = pool.anc_feat_entropy[ref_idx]
+        gini = pool.anc_feat_gini[ref_idx]
+        damage_5p = pool.anc_feat_damage_5p[ref_idx]
+        damage_3p = pool.anc_feat_damage_3p[ref_idx]
+        short_frac = pool.anc_feat_short_frac[ref_idx]
+        mean_length = pool.anc_feat_mean_length[ref_idx]
+
+        eta = compute_eta_from_features(
+            entropy, gini, damage_5p, damage_3p,
+            short_frac, mean_length, damage_weight
+        )
+        pool.eta_ancientness[ref_idx] = eta
+
+    # Step 3: Apply low-coverage shrinkage
+    apply_low_coverage_shrinkage(pool, low_cov_floor, shrink_tau)
+
+    # Step 4: Derive authenticity and gamma from eta
+    for ref_idx in range(n_refs):
+        eta = pool.eta_ancientness[ref_idx]
+        pool.authenticity_scores[ref_idx] = compute_authenticity_from_eta(eta)
+
+        # Update gamma values if hierarchical model is enabled
+        if pool.gamma_values != NULL:
+            pool.gamma_values[ref_idx] = compute_gamma_from_eta(eta)
+
 
 cdef int _multpair_extended_cmp(const void* a, const void* b) noexcept nogil:
     # Comparison for MultPairExtended used for sorting by neighbor_count, then read_count
@@ -1959,6 +2584,10 @@ cdef WeightedGraph* analyze_reference_graph(MemoryPool* pool, ReferencePattern* 
     cdef igraph_integer_t node_degree
     cdef int degree_ret
     cdef int build_result
+    # GMRF adjacency building from igraph
+    cdef igraph_vector_int_t neis_vec
+    cdef igraph_integer_t eid_tmp, neighbor_v, n_neis
+    cdef int neis_init_ret
     # igraph component vectors (declare at function scope to satisfy Cython)
     cdef igraph_vector_int_t comp_membership
     cdef igraph_vector_int_t comp_sizes
@@ -2333,7 +2962,10 @@ cdef WeightedGraph* analyze_reference_graph(MemoryPool* pool, ReferencePattern* 
         else:
             # Calculate all reference statistics including read categories and score stats
             calculate_reference_stats(pool, bam_header, ref_stats)
-            
+
+            # Calculate coverage statistics (breadth, entropy, gini, WCB) from MemoryPool
+            calculate_reference_coverage(pool, ref_stats)
+
             # Populate pattern_data[].unique_read_count from ref_stats for filtering logic
             # This ensures consistency between TSV output and filtering decisions
             for ref_idx in range(pool.reference_count):
@@ -2439,6 +3071,43 @@ cdef WeightedGraph* analyze_reference_graph(MemoryPool* pool, ReferencePattern* 
                 if verbose:
                     bf_nogil_logf_notime(NULL, "Graph connectivity: %u connected nodes, %u isolated nodes\n",
                                         n_connected, n_isolated)
+
+                # Build nodes array for GMRF (adjacency lists from igraph)
+                filtered_graph.nodes = <GraphNode*>calloc(array_size, sizeof(GraphNode))
+                if filtered_graph.nodes != NULL:
+                    neis_init_ret = igraph_vector_int_init(&neis_vec, 0)
+                    if neis_init_ret == IGRAPH_SUCCESS:
+                        for ref_idx in range(array_size):
+                            node_degree = get_vector_int_element(&degree_vec, ref_idx)
+                            filtered_graph.nodes[ref_idx].degree = <uint32_t>node_degree
+                            if node_degree > 0:
+                                # Allocate arrays for this node
+                                filtered_graph.nodes[ref_idx].neighbors = <uint32_t*>malloc(node_degree * sizeof(uint32_t))
+                                filtered_graph.nodes[ref_idx].weights = <uint32_t*>malloc(node_degree * sizeof(uint32_t))
+                                if filtered_graph.nodes[ref_idx].neighbors != NULL and filtered_graph.nodes[ref_idx].weights != NULL:
+                                    # Get neighbors from igraph
+                                    igraph_neighbors(igraph_ptr, &neis_vec, <igraph_integer_t>ref_idx, IGRAPH_ALL, IGRAPH_NO_LOOPS, 0)
+                                    n_neis = igraph_vector_int_size(&neis_vec)
+                                    for i in range(<uint32_t>n_neis):
+                                        neighbor_v = get_vector_int_element(&neis_vec, i)
+                                        filtered_graph.nodes[ref_idx].neighbors[i] = <uint32_t>neighbor_v
+                                        # Get edge weight
+                                        igraph_get_eid(igraph_ptr, &eid_tmp, <igraph_integer_t>ref_idx, neighbor_v, 0, 0)
+                                        if weights_ptr != NULL and eid_tmp >= 0:
+                                            filtered_graph.nodes[ref_idx].weights[i] = <uint32_t>get_vector_element(weights_ptr, eid_tmp)
+                                        else:
+                                            filtered_graph.nodes[ref_idx].weights[i] = 1
+                                else:
+                                    if filtered_graph.nodes[ref_idx].neighbors != NULL:
+                                        free(filtered_graph.nodes[ref_idx].neighbors)
+                                    if filtered_graph.nodes[ref_idx].weights != NULL:
+                                        free(filtered_graph.nodes[ref_idx].weights)
+                                    filtered_graph.nodes[ref_idx].neighbors = NULL
+                                    filtered_graph.nodes[ref_idx].weights = NULL
+                                    filtered_graph.nodes[ref_idx].degree = 0
+                        igraph_vector_int_destroy(&neis_vec)
+                        if verbose:
+                            bf_nogil_logf_notime(NULL, "Built adjacency lists for GMRF (%u connected nodes)\n", n_connected)
 
                 # Allocate and fill connected node list
                 if n_connected > 0:
@@ -2785,6 +3454,61 @@ cdef int _uint32_compare(const void* a, const void* b) noexcept nogil:
         return 1
     else:
         return 0
+
+
+cdef int init_cwrp(MemoryPool* pool, double cwrp_lambda, bint iterative_auth,
+                   int32_t auth_update_interval, double damage_weight,
+                   int32_t low_cov_floor, double low_cov_shrink_tau) noexcept nogil:
+    """Initialize Coverage-Weighted Reference Priors (CWRP) for EM.
+
+    Computes authenticity scores from coverage patterns and stores them
+    in the MemoryPool. When enabled, EM will use these as per-reference
+    Dirichlet prior weights.
+
+    When iterative_auth is enabled, ancientness arrays are also initialized
+    for updates during EM iterations.
+
+    Returns 0 on success, -1 on error.
+    """
+    cdef uint32_t n_refs = pool.reference_count
+    cdef ReferenceStats* ref_stats = NULL
+
+    if pool == NULL or n_refs == 0:
+        return -1
+
+    # Allocate ReferenceStats array for coverage computation
+    ref_stats = <ReferenceStats*>calloc(n_refs, sizeof(ReferenceStats))
+    if ref_stats == NULL:
+        return -1
+
+    # Allocate authenticity_scores in pool
+    pool.authenticity_scores = <double*>calloc(n_refs, sizeof(double))
+    if pool.authenticity_scores == NULL:
+        free(ref_stats)
+        return -1
+
+    # Compute coverage metrics from alignments (batched to control memory)
+    calculate_reference_coverage_batched(pool, ref_stats)
+    compute_authenticity_scores(pool, ref_stats)
+
+    # Set CWRP parameters
+    pool.cwrp_enabled = True
+    pool.cwrp_lambda = cwrp_lambda
+
+    # Set iterative ancientness parameters
+    pool.iterative_auth_enabled = iterative_auth
+    pool.auth_update_interval = auth_update_interval
+    pool.damage_weight = damage_weight
+    pool.low_cov_floor_reads = low_cov_floor
+    pool.low_cov_shrink_tau = low_cov_shrink_tau
+
+    printf(b"[CWRP] Initialized: n_refs=%u lambda=%.3f iterative=%d\n",
+           n_refs, cwrp_lambda, <int>iterative_auth)
+
+    # Cleanup ref_stats (authenticity_scores remain in pool)
+    free(ref_stats)
+
+    return 0
 
 
 cdef int write_graph_tsv(MemoryPool* pool, sam_hdr_t* bam_header,

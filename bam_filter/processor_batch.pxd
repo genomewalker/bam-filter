@@ -3,7 +3,10 @@ from libc.stdint cimport uint32_t, uint64_t, int32_t, int64_t, uint8_t, uint16_t
 from libc.stddef cimport size_t
 
 # Import shared types and HTSlib typedefs (use relative cimports so sibling pxds are found)
-from .processor cimport Alignment, MemoryPool, AlignmentScoringConfig, INVALID_SEQUENTIAL_ID
+from .processor cimport (
+    Alignment, MemoryPool, AlignmentScoringConfig, INVALID_SEQUENTIAL_ID,
+    AlignmentCore, HierarchicalData, DamageCounts, BAMWriterAux,
+)
 from .processor_sort cimport radix_sort_uint64, radix_sort_alignments_by_read_id, radix_sort_compact_by_position
 from .processor cimport hts_idx_t, hts_itr_t, samFile, sam_hdr_t
 from .processor_types cimport CompactAlignment
@@ -42,6 +45,8 @@ cdef struct BatchAlignment:
     # Damage opportunity counts (for hierarchical EM)
     uint8_t  c_at_5p_count        # C bases in reference at first 8bp (5' damage zone)
     uint8_t  g_at_3p_count        # G bases in reference at last 8bp (3' damage zone)
+    # Position-specific damage log-likelihood ratio for hierarchical EM
+    float    damage_llr           # log(L_ancient/L_modern) using position-specific D(z)
 
 cdef struct ProcessingBatch:
     int64_t batch_identifier
@@ -110,3 +115,33 @@ cdef extern from "sys/mman.h" nogil:
     int MADV_SEQUENTIAL
 
 cdef int64_t count_unique_reads_from_thread_maps(ThreadLocalHashMap** thread_maps, int num_threads) noexcept nogil
+
+# Import PMD structures for filtered population
+from .processor_pmd cimport PMDCurve, ANISnapshot
+
+# Filtered population: count passing alignments before creating pool
+cdef int64_t count_alignments_passing_ani_filter(ProcessingBatch** batches,
+                                                  int64_t batch_count,
+                                                  PMDCurve* curve,
+                                                  float min_ani_threshold,
+                                                  float epsilon) noexcept nogil
+
+# Filtered population: transfer only passing alignments + compute authenticity per batch
+cdef int populate_memory_pool_filtered(MemoryPool* pool,
+                                        ProcessingBatch** batches,
+                                        int64_t batch_count,
+                                        sam_hdr_t* header,
+                                        PMDCurve* curve,
+                                        float min_ani_threshold,
+                                        float epsilon,
+                                        int num_threads) except -1 nogil
+
+# Split array version for memory-optimized storage
+cdef int populate_memory_pool_filtered_split(MemoryPool* pool,
+                                              ProcessingBatch** batches,
+                                              int64_t batch_count,
+                                              sam_hdr_t* header,
+                                              PMDCurve* curve,
+                                              float min_ani_threshold,
+                                              float epsilon,
+                                              int num_threads) except -1 nogil

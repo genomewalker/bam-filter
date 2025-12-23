@@ -85,6 +85,9 @@ COLUMN_SPECS = {
     'read_ani_mean': ColumnSpec('read_ani_mean', 'read_ani_mean', ColumnType.FLOAT, 0, 100),
     'read_ani_std': ColumnSpec('read_ani_std', 'read_ani_std', ColumnType.FLOAT, 0, 100),
     'read_ani_median': ColumnSpec('read_ani_median', 'read_ani_median', ColumnType.FLOAT, 0, 100),
+    # Damage-corrected ANI (from reassign output DA tag)
+    'read_ani_corrected_mean': ColumnSpec('read_ani_corrected_mean', 'read_ani_corrected_mean', ColumnType.FLOAT, 0, 100),
+    'read_ani_corrected_std': ColumnSpec('read_ani_corrected_std', 'read_ani_corrected_std', ColumnType.FLOAT, 0, 100),
 
     # Coverage Metrics
     'bases_covered': ColumnSpec('bases_covered', 'bases_covered', ColumnType.INT, 0, None),
@@ -124,6 +127,21 @@ COLUMN_SPECS = {
     'weighted_contiguity_breadth': ColumnSpec('weighted_contiguity_breadth', 'weighted_contiguity_breadth', ColumnType.FLOAT, 0, None),
     'complexity_penalized_coverage': ColumnSpec('complexity_penalized_coverage', 'complexity_penalized_coverage', ColumnType.FLOAT, 0, 1),
     'overlap_redundancy_index': ColumnSpec('overlap_redundancy_index', 'overlap_redundancy_index', ColumnType.FLOAT, 0, None),
+    'mega_genome_sparsity_index': ColumnSpec('mega_genome_sparsity_index', 'mega_genome_sparsity_index', ColumnType.FLOAT, None, None),
+    'coverage_compressibility_ratio': ColumnSpec('coverage_compressibility_ratio', 'coverage_compressibility_ratio', ColumnType.FLOAT, 0, None),
+    'feature_space_clustering_score': ColumnSpec('feature_space_clustering_score', 'feature_space_clustering_score', ColumnType.FLOAT, 0, None),
+
+    # Authenticity Metrics
+    'authenticity_score': ColumnSpec('authenticity_score', 'authenticity_score', ColumnType.FLOAT, None, None),
+    'authenticity_pvalue': ColumnSpec('authenticity_pvalue', 'authenticity_pvalue', ColumnType.FLOAT, 0, 1),
+
+    # ZP/ZS Tag Statistics (from reassign/EM output)
+    'zp_mean': ColumnSpec('zp_mean', 'zp_mean', ColumnType.FLOAT, 0, 1),
+    'zp_std': ColumnSpec('zp_std', 'zp_std', ColumnType.FLOAT, 0, 1),
+    'zs_mean': ColumnSpec('zs_mean', 'zs_mean', ColumnType.FLOAT, None, None),
+    'zs_std': ColumnSpec('zs_std', 'zs_std', ColumnType.FLOAT, 0, None),
+    'zp_count': ColumnSpec('zp_count', 'zp_count', ColumnType.INT, 0, None),
+    'zs_count': ColumnSpec('zs_count', 'zs_count', ColumnType.INT, 0, None),
 }
 
 # Build reverse mapping: new_name -> old_name
@@ -191,8 +209,15 @@ def get_column_index(column_name: str) -> int:
         'n_bins', 'site_density', 'spatial_entropy', 'norm_spatial_entropy', 'gini', 'norm_gini',
         'c_v', 'd_i', 'cov_evenness',
         'tax_abund_read', 'tax_abund_aln', 'tax_abund_tad', 'n_reads_tad',
-        # Contamination detection metrics (indices 46-49)
-        'n_intervals', 'weighted_contiguity_breadth', 'complexity_penalized_coverage', 'overlap_redundancy_index'
+        # Contamination detection metrics (indices 46-52)
+        'n_intervals', 'weighted_contiguity_breadth', 'complexity_penalized_coverage', 'overlap_redundancy_index',
+        'mega_genome_sparsity_index', 'coverage_compressibility_ratio', 'feature_space_clustering_score',
+        # Authenticity metrics (indices 53-54)
+        'authenticity_score', 'authenticity_pvalue',
+        # Damage-corrected ANI (indices 55-56)
+        'read_ani_corrected_mean', 'read_ani_corrected_std',
+        # ZP/ZS tag statistics (indices 57-62)
+        'zp_mean', 'zp_std', 'zs_mean', 'zs_std', 'zp_count', 'zs_count'
     ]
 
     if old_name not in STRUCT_COLUMN_ORDER:

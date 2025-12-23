@@ -20,9 +20,13 @@ from libc.stdint cimport int32_t, int64_t, uint32_t, uint64_t, uint8_t, uint16_t
 from libc.stdlib cimport malloc, free, realloc
 from libc.string cimport memcpy, memset
 from libc.stddef cimport size_t
+from libc.math cimport log, fmax
 
 from bam_filter.processor_batch cimport *
-from bam_filter.processor cimport Alignment, MemoryPool, AlignmentScoringConfig
+from bam_filter.processor cimport (
+    Alignment, MemoryPool, AlignmentScoringConfig,
+    AlignmentCore, HierarchicalData, DamageCounts, BAMWriterAux,
+)
 from bam_filter.processor cimport min_int64, max_int64, INVALID_SEQUENTIAL_ID
 from bam_filter.processor_sort cimport radix_sort_alignments_by_read_id, radix_sort_uint64, radix_sort_compact_by_position
 from bam_filter.processor_hash cimport ThreadLocalHashMap, extract_read_hash_identifier
@@ -34,10 +38,13 @@ from bam_filter.processor_md_quality cimport (
 )
 from bam_filter.processor_types cimport ProcessingError, PROCESSING_SUCCESS, PROCESSING_ERROR_MEMORY_ALLOCATION
 
-# Import PMD context and thread accumulator
+# Import PMD context, thread accumulator, and corrected ANI computation
 from bam_filter.processor_pmd cimport (
     PMDGlobalContext,
     PMDStatsAccumulator,
+    PMDCurve,
+    ANISnapshot,
+    compute_corrected_ani,
 )
 from cython.parallel cimport prange, threadid
 from .processor_types cimport (
@@ -476,6 +483,7 @@ cdef int process_batch_alignments_with_pmd(samFile* bam_file, sam_hdr_t* header,
                     ani_stats.other_mm_count = 0
                     ani_stats.c_at_5p_count = 0
                     ani_stats.g_at_3p_count = 0
+                    ani_stats.damage_llr = 0.0
 
                 raw_score = calculate_md_quality_score_with_stats(
                     bam_record, header, scoring_config, pmd_ptr, ani_ptr, pmd_acc
@@ -489,6 +497,7 @@ cdef int process_batch_alignments_with_pmd(samFile* bam_file, sam_hdr_t* header,
                     temp_alignment.ga_3p_count = ani_stats.ga_3p_count
                     temp_alignment.c_at_5p_count = ani_stats.c_at_5p_count
                     temp_alignment.g_at_3p_count = ani_stats.g_at_3p_count
+                    temp_alignment.damage_llr = ani_stats.damage_llr
                 else:
                     temp_alignment.aligned_length = 0
                     temp_alignment.match_count = 0
@@ -496,6 +505,7 @@ cdef int process_batch_alignments_with_pmd(samFile* bam_file, sam_hdr_t* header,
                     temp_alignment.ga_3p_count = 0
                     temp_alignment.c_at_5p_count = 0
                     temp_alignment.g_at_3p_count = 0
+                    temp_alignment.damage_llr = 0.0
             else:
                 # Fall back to original function when PMD stats not needed
                 raw_score = calculate_md_quality_score(bam_record, header, scoring_config, pmd_ptr)
@@ -505,6 +515,7 @@ cdef int process_batch_alignments_with_pmd(samFile* bam_file, sam_hdr_t* header,
                 temp_alignment.ga_3p_count = 0
                 temp_alignment.c_at_5p_count = 0
                 temp_alignment.g_at_3p_count = 0
+                temp_alignment.damage_llr = 0.0
 
             temp_alignment.alignment_score = raw_score
             temp_alignment.pmd_score = temp_pmd_score if scoring_config.calculate_pmd else 0.0
@@ -930,6 +941,7 @@ cdef int populate_memory_pool_direct(MemoryPool* pool,
                 dst.ga_3p_count = src.ga_3p_count
                 dst.c_at_5p_count = src.c_at_5p_count
                 dst.g_at_3p_count = src.g_at_3p_count
+                dst.damage_llr = src.damage_llr
                 # Initialize PMD correction fields (computed after PMD fitting)
                 dst.corrected_ani = 0.0
                 dst.passes_ani_filter = 1  # Assume passes until corrected
@@ -985,6 +997,7 @@ cdef int populate_memory_pool_direct(MemoryPool* pool,
                 dst[local_idx].ga_3p_count = src[local_idx].ga_3p_count
                 dst[local_idx].c_at_5p_count = src[local_idx].c_at_5p_count
                 dst[local_idx].g_at_3p_count = src[local_idx].g_at_3p_count
+                dst[local_idx].damage_llr = src[local_idx].damage_llr
                 # Initialize PMD correction fields (computed after PMD fitting)
                 dst[local_idx].corrected_ani = 0.0
                 dst[local_idx].passes_ani_filter = 1  # Assume passes until corrected
@@ -1061,3 +1074,525 @@ cdef int64_t count_unique_reads_from_thread_maps(ThreadLocalHashMap** thread_map
         unique_count,
     )
     return unique_count
+
+
+cdef int64_t count_alignments_passing_ani_filter(ProcessingBatch** batches,
+                                                  int64_t batch_count,
+                                                  PMDCurve* curve,
+                                                  float min_ani_threshold,
+                                                  float epsilon) noexcept nogil:
+    """Count alignments that pass the corrected ANI filter.
+
+    Iterates through all batches and computes corrected ANI for each alignment
+    using the fitted PMD curve. Returns count of alignments meeting threshold.
+
+    Parameters
+    ----------
+    batches : ProcessingBatch**
+        Array of processing batches with alignments
+    batch_count : int64_t
+        Number of batches
+    curve : PMDCurve*
+        Fitted PMD damage curve (or NULL for raw ANI)
+    min_ani_threshold : float
+        Minimum ANI percentage (0-100) to pass filter
+    epsilon : float
+        Baseline sequencing error rate
+
+    Returns
+    -------
+    int64_t
+        Number of alignments passing the filter
+    """
+    cdef int64_t total_passing = 0
+    cdef int64_t batch_idx, aln_idx
+    cdef ProcessingBatch* batch
+    cdef BatchAlignment* src
+    cdef ANISnapshot snapshot
+    cdef float corrected_ani, raw_ani
+
+    for batch_idx in range(batch_count):
+        batch = batches[batch_idx]
+        if not batch:
+            continue
+
+        for aln_idx in range(batch.actual_alignment_count):
+            src = &batch.batch_alignments[aln_idx]
+
+            if curve != NULL:
+                # Compute corrected ANI using PMD curve
+                snapshot.aligned_length = src.aligned_length
+                snapshot.match_count = src.match_count
+                snapshot.ct_5p_count = src.ct_5p_count
+                snapshot.ga_3p_count = src.ga_3p_count
+                snapshot.c_at_5p_count = src.c_at_5p_count
+                snapshot.g_at_3p_count = src.g_at_3p_count
+                snapshot.other_mm_count = 0
+                snapshot.flags = 0
+
+                corrected_ani = compute_corrected_ani(&snapshot, curve, epsilon)
+            else:
+                # No PMD curve - use raw ANI
+                if src.aligned_length > 0:
+                    raw_ani = (<float>src.match_count / <float>src.aligned_length) * 100.0
+                else:
+                    raw_ani = 0.0
+                corrected_ani = raw_ani
+
+            if corrected_ani >= min_ani_threshold:
+                total_passing += 1
+
+    return total_passing
+
+
+cdef int populate_memory_pool_filtered(MemoryPool* pool,
+                                        ProcessingBatch** batches,
+                                        int64_t batch_count,
+                                        sam_hdr_t* header,
+                                        PMDCurve* curve,
+                                        float min_ani_threshold,
+                                        float epsilon,
+                                        int num_threads) except -1 nogil:
+    """Transfer only ANI-filtered alignments to memory pool.
+
+    Computes corrected ANI for each alignment using the fitted PMD curve,
+    and only transfers alignments that pass the threshold. This reduces
+    memory pool size compared to transferring all then filtering.
+
+    Parameters
+    ----------
+    pool : MemoryPool*
+        Target memory pool (must be sized for filtered count)
+    batches : ProcessingBatch**
+        Array of processing batches (will be destroyed)
+    batch_count : int64_t
+        Number of batches
+    header : sam_hdr_t*
+        BAM header (unused, retained for API compatibility)
+    curve : PMDCurve*
+        Fitted PMD damage curve (or NULL for raw ANI)
+    min_ani_threshold : float
+        Minimum ANI percentage (0-100) to pass filter
+    epsilon : float
+        Baseline sequencing error rate
+    num_threads : int
+        Number of threads (unused, retained for API compatibility)
+
+    Returns
+    -------
+    int
+        0 on success, -1 on error
+    """
+    bf_nogil_logf_notime(b"BATCH", "memory_pool: strategy=filtered_copy_sort (ANI>=%.1f%%)",
+                         min_ani_threshold)
+
+    cdef int64_t batch_idx, aln_idx
+    cdef int64_t write_idx = 0
+    cdef ProcessingBatch* batch
+    cdef BatchAlignment* src
+    cdef Alignment* dst
+    cdef ANISnapshot snapshot
+    cdef float corrected_ani, raw_ani
+    cdef int64_t passed_count = 0
+    cdef int64_t total_count = 0
+
+    # Single pass: compute ANI and copy passing alignments
+    for batch_idx in range(batch_count):
+        batch = batches[batch_idx]
+        if not batch:
+            continue
+
+        for aln_idx in range(batch.actual_alignment_count):
+            total_count += 1
+            src = &batch.batch_alignments[aln_idx]
+
+            if curve != NULL:
+                # Compute corrected ANI using PMD curve
+                snapshot.aligned_length = src.aligned_length
+                snapshot.match_count = src.match_count
+                snapshot.ct_5p_count = src.ct_5p_count
+                snapshot.ga_3p_count = src.ga_3p_count
+                snapshot.c_at_5p_count = src.c_at_5p_count
+                snapshot.g_at_3p_count = src.g_at_3p_count
+                snapshot.other_mm_count = 0
+                snapshot.flags = 0
+
+                corrected_ani = compute_corrected_ani(&snapshot, curve, epsilon)
+            else:
+                # No PMD curve - use raw ANI
+                if src.aligned_length > 0:
+                    raw_ani = (<float>src.match_count / <float>src.aligned_length) * 100.0
+                else:
+                    raw_ani = 0.0
+                corrected_ani = raw_ani
+
+            # Skip alignments below threshold
+            if corrected_ani < min_ani_threshold:
+                continue
+
+            # Check capacity
+            if write_idx >= pool.alignment_capacity:
+                bf_nogil_logf_notime(b"ERROR",
+                    "Filtered pool overflow: write_idx=%lld capacity=%lld",
+                    <long long>write_idx, <long long>pool.alignment_capacity)
+                return -1
+
+            # Copy alignment to pool
+            dst = &pool.alignments[write_idx]
+            dst.read_index = src.read_index
+            dst.reference_index = src.reference_index
+            dst.alignment_position = src.alignment_position
+            dst.alignment_score = src.alignment_score
+            dst.pmd_score = src.pmd_score
+            dst.aligned_length = src.aligned_length
+            dst.match_count = src.match_count
+            dst.ct_5p_count = src.ct_5p_count
+            dst.ga_3p_count = src.ga_3p_count
+            dst.c_at_5p_count = src.c_at_5p_count
+            dst.g_at_3p_count = src.g_at_3p_count
+            dst.damage_llr = src.damage_llr
+            # Store computed ANI values
+            dst.corrected_ani = corrected_ani
+            dst.passes_ani_filter = 1  # All transferred alignments pass
+
+            write_idx += 1
+            passed_count += 1
+
+        # Destroy batch after processing
+        destroy_processing_batch(batch)
+        batches[batch_idx] = NULL
+
+    pool.alignment_count = write_idx
+
+    bf_nogil_logf_notime(b"BATCH",
+        "memory_pool: filtered %lld/%lld alignments (%.1f%% passed)",
+        <long long>passed_count, <long long>total_count,
+        100.0 * <double>passed_count / <double>total_count if total_count > 0 else 0.0)
+
+    # Sort by read ID for efficient indexing
+    radix_sort_alignments_by_read_id(pool.alignments, pool.alignment_count)
+
+    # Rebuild read indexing structures
+    memset(pool.read_alignment_counts, 0, pool.unique_read_count * sizeof(uint32_t))
+    cdef uint32_t read_id
+    cdef int64_t i
+    for i in range(pool.alignment_count):
+        read_id = pool.alignments[i].read_index
+        if read_id < pool.unique_read_count:
+            pool.read_alignment_counts[read_id] += 1
+        else:
+            bf_nogil_logf_notime(b"ERROR", "Invalid read_index %u >= unique_read_count %u",
+                                 read_id, pool.unique_read_count)
+            return -1
+
+    pool.read_alignment_starts[0] = 0
+    for i in range(1, pool.unique_read_count):
+        pool.read_alignment_starts[i] = pool.read_alignment_starts[i-1] + pool.read_alignment_counts[i-1]
+
+    # Count unique reads with alignments after filtering
+    pool.final_unique_reads = 0
+    for i in range(pool.unique_read_count):
+        if pool.read_alignment_counts[i] > 0:
+            pool.final_unique_reads += 1
+
+    bf_nogil_logf_notime(b"BATCH", "memory_pool: %lld unique reads with filtered alignments",
+                         <long long>pool.final_unique_reads)
+
+    return 0
+
+
+cdef int populate_memory_pool_filtered_split(MemoryPool* pool,
+                                              ProcessingBatch** batches,
+                                              int64_t batch_count,
+                                              sam_hdr_t* header,
+                                              PMDCurve* curve,
+                                              float min_ani_threshold,
+                                              float epsilon,
+                                              int num_threads) except -1 nogil:
+    """Transfer ANI-filtered alignments to memory pool using split array storage.
+
+    Memory-optimized version that populates split arrays (AlignmentCore, read_indices,
+    optional HierarchicalData, DamageCounts, BAMWriterAux) instead of the legacy
+    monolithic Alignment array.
+
+    Parameters
+    ----------
+    pool : MemoryPool*
+        Target memory pool with split arrays allocated (use_split_arrays=True)
+    batches : ProcessingBatch**
+        Array of processing batches (will be destroyed)
+    batch_count : int64_t
+        Number of batches
+    header : sam_hdr_t*
+        BAM header (unused, retained for API compatibility)
+    curve : PMDCurve*
+        Fitted PMD damage curve (or NULL for raw ANI)
+    min_ani_threshold : float
+        Minimum ANI percentage (0-100) to pass filter
+    epsilon : float
+        Baseline sequencing error rate
+    num_threads : int
+        Number of threads (unused, retained for API compatibility)
+
+    Returns
+    -------
+    int
+        0 on success, -1 on error
+    """
+    bf_nogil_logf_notime(b"BATCH", "memory_pool: strategy=split_filtered (ANI>=%.1f%%)",
+                         min_ani_threshold)
+
+    cdef int64_t batch_idx, aln_idx
+    cdef int64_t write_idx = 0
+    cdef ProcessingBatch* batch
+    cdef BatchAlignment* src
+    cdef AlignmentCore* core
+    cdef HierarchicalData* hier
+    cdef DamageCounts* dmg
+    cdef BAMWriterAux* aux
+    cdef ANISnapshot snapshot
+    cdef float corrected_ani, raw_ani
+    cdef int64_t passed_count = 0
+    cdef int64_t total_count = 0
+
+    # Precompute log factors for hierarchical EM log-likelihoods
+    # Uses D_avg from PMD curve (average of positions 1-8) for sample-fitted model
+    cdef double D_avg = 0.1
+    cdef double log_p_damage_anc, log_p_survive_anc, log_1m_eps, log_eps_over_3
+    cdef double observed_damage, survived, other_mm, actual_opp
+    cdef int pmd_pos
+
+    if curve != NULL:
+        D_avg = 0.0
+        for pmd_pos in range(8):
+            D_avg += curve.D_5p_noncpg[pmd_pos] + curve.D_3p_noncpg[pmd_pos]
+        D_avg /= 16.0
+
+    log_p_damage_anc = log(fmax(D_avg + (1.0 - D_avg) * epsilon / 3.0, 1e-15))
+    log_p_survive_anc = log(fmax((1.0 - D_avg) * (1.0 - epsilon / 3.0), 1e-15))
+    log_1m_eps = log(fmax(1.0 - epsilon, 1e-15))
+    log_eps_over_3 = log(fmax(epsilon / 3.0, 1e-15))
+
+    if pool.hierarchical != NULL:
+        bf_nogil_logf_notime(b"BATCH",
+            "log_L precompute: D_avg=%.4f log_dmg=%.3f log_surv=%.3f log_1m_eps=%.3f",
+            D_avg, log_p_damage_anc, log_p_survive_anc, log_1m_eps)
+
+    # Phase 1: Filter and populate split arrays
+    for batch_idx in range(batch_count):
+        batch = batches[batch_idx]
+        if not batch:
+            continue
+
+        for aln_idx in range(batch.actual_alignment_count):
+            total_count += 1
+            src = &batch.batch_alignments[aln_idx]
+
+            if curve != NULL:
+                snapshot.aligned_length = src.aligned_length
+                snapshot.match_count = src.match_count
+                snapshot.ct_5p_count = src.ct_5p_count
+                snapshot.ga_3p_count = src.ga_3p_count
+                snapshot.c_at_5p_count = src.c_at_5p_count
+                snapshot.g_at_3p_count = src.g_at_3p_count
+                snapshot.other_mm_count = 0
+                snapshot.flags = 0
+                corrected_ani = compute_corrected_ani(&snapshot, curve, epsilon)
+            else:
+                if src.aligned_length > 0:
+                    raw_ani = (<float>src.match_count / <float>src.aligned_length) * 100.0
+                else:
+                    raw_ani = 0.0
+                corrected_ani = raw_ani
+
+            if corrected_ani < min_ani_threshold:
+                continue
+
+            if write_idx >= pool.alignment_capacity:
+                bf_nogil_logf_notime(b"ERROR",
+                    "Split pool overflow: write_idx=%lld capacity=%lld",
+                    <long long>write_idx, <long long>pool.alignment_capacity)
+                return -1
+
+            # Populate AlignmentCore (always)
+            core = &pool.alignment_cores[write_idx]
+            core.reference_index = src.reference_index
+            core.alignment_score = src.alignment_score
+            core.alignment_position = src.alignment_position
+            core.aligned_length = src.aligned_length
+            core.match_count = src.match_count
+
+            # Populate read_indices (always)
+            pool.read_indices[write_idx] = src.read_index
+
+            # Populate HierarchicalData (optional)
+            if pool.hierarchical != NULL:
+                hier = &pool.hierarchical[write_idx]
+                hier.damage_llr = src.damage_llr
+
+                # Compute log-likelihoods using sample-fitted D_avg (not hardcoded)
+                # log_L_anc = obs_damage * log_p_damage + survived * log_p_survive
+                #           + matches * log(1-eps) + other_mm * log(eps/3)
+                observed_damage = <double>(src.ct_5p_count + src.ga_3p_count)
+                actual_opp = <double>(src.c_at_5p_count + src.g_at_3p_count)
+                survived = fmax(0.0, actual_opp - observed_damage)
+                other_mm = <double>(src.aligned_length - src.match_count) - observed_damage
+                if other_mm < 0.0:
+                    other_mm = 0.0
+
+                hier.log_L_anc = <float>(
+                    observed_damage * log_p_damage_anc +
+                    survived * log_p_survive_anc +
+                    <double>src.match_count * log_1m_eps +
+                    other_mm * log_eps_over_3
+                )
+
+                # log_L_mod = matches * log(1-eps) + all_mm * log(eps/3)
+                hier.log_L_mod = <float>(
+                    <double>src.match_count * log_1m_eps +
+                    <double>(src.aligned_length - src.match_count) * log_eps_over_3
+                )
+
+            # Populate DamageCounts (optional)
+            if pool.damage_counts != NULL:
+                dmg = &pool.damage_counts[write_idx]
+                dmg.ct_5p_count = src.ct_5p_count
+                dmg.ga_3p_count = src.ga_3p_count
+                dmg.c_at_5p_count = src.c_at_5p_count
+                dmg.g_at_3p_count = src.g_at_3p_count
+
+            # Populate BAMWriterAux (optional)
+            if pool.bam_aux != NULL:
+                aux = &pool.bam_aux[write_idx]
+                aux.pmd_score = src.pmd_score
+                aux.corrected_ani = corrected_ani
+
+            write_idx += 1
+            passed_count += 1
+
+        destroy_processing_batch(batch)
+        batches[batch_idx] = NULL
+
+    pool.alignment_count = write_idx
+
+    bf_nogil_logf_notime(b"BATCH",
+        "split_pool: filtered %lld/%lld alignments (%.1f%% passed)",
+        <long long>passed_count, <long long>total_count,
+        100.0 * <double>passed_count / <double>total_count if total_count > 0 else 0.0)
+
+    # Phase 2: Sort by read_index using packed sort keys
+    cdef uint64_t* sort_keys = NULL
+    cdef int64_t i, j
+    cdef uint32_t read_id, orig_idx
+    cdef AlignmentCore temp_core
+    cdef HierarchicalData temp_hier
+    cdef DamageCounts temp_dmg
+    cdef BAMWriterAux temp_aux
+    cdef uint32_t temp_read_idx
+    cdef uint64_t current_key
+    cdef int64_t cycle_start, current, next_pos
+
+    if pool.alignment_count > 1:
+        sort_keys = <uint64_t*>malloc(pool.alignment_count * sizeof(uint64_t))
+        if not sort_keys:
+            bf_nogil_logf_notime(b"ERROR", "Failed to allocate sort keys")
+            return -1
+
+        for i in range(pool.alignment_count):
+            sort_keys[i] = (<uint64_t>pool.read_indices[i] << 32) | <uint32_t>i
+
+        radix_sort_uint64(sort_keys, pool.alignment_count)
+
+        # Apply permutation using cycle-following for in-place reordering
+
+        # Mark processed entries by setting high bit of original index
+        for cycle_start in range(pool.alignment_count):
+            orig_idx = <uint32_t>(sort_keys[cycle_start] & <uint64_t>0xFFFFFFFF)
+            if orig_idx == cycle_start or (sort_keys[cycle_start] & <uint64_t>0x80000000):
+                continue
+
+            # Save starting element
+            temp_core = pool.alignment_cores[cycle_start]
+            temp_read_idx = pool.read_indices[cycle_start]
+            if pool.hierarchical != NULL:
+                temp_hier = pool.hierarchical[cycle_start]
+            if pool.damage_counts != NULL:
+                temp_dmg = pool.damage_counts[cycle_start]
+            if pool.bam_aux != NULL:
+                temp_aux = pool.bam_aux[cycle_start]
+
+            current = cycle_start
+            while True:
+                next_pos = <int64_t>(sort_keys[current] & <uint64_t>0x7FFFFFFF)
+                sort_keys[current] = sort_keys[current] | <uint64_t>0x80000000  # Mark as processed
+
+                if next_pos == cycle_start:
+                    pool.alignment_cores[current] = temp_core
+                    pool.read_indices[current] = temp_read_idx
+                    if pool.hierarchical != NULL:
+                        pool.hierarchical[current] = temp_hier
+                    if pool.damage_counts != NULL:
+                        pool.damage_counts[current] = temp_dmg
+                    if pool.bam_aux != NULL:
+                        pool.bam_aux[current] = temp_aux
+                    break
+
+                pool.alignment_cores[current] = pool.alignment_cores[next_pos]
+                pool.read_indices[current] = pool.read_indices[next_pos]
+                if pool.hierarchical != NULL:
+                    pool.hierarchical[current] = pool.hierarchical[next_pos]
+                if pool.damage_counts != NULL:
+                    pool.damage_counts[current] = pool.damage_counts[next_pos]
+                if pool.bam_aux != NULL:
+                    pool.bam_aux[current] = pool.bam_aux[next_pos]
+
+                current = next_pos
+
+        free(sort_keys)
+
+    # Phase 3: Rebuild read indexing structures
+    memset(pool.read_alignment_counts, 0, pool.unique_read_count * sizeof(uint32_t))
+    for i in range(pool.alignment_count):
+        read_id = pool.read_indices[i]
+        if read_id < pool.unique_read_count:
+            pool.read_alignment_counts[read_id] += 1
+        else:
+            bf_nogil_logf_notime(b"ERROR", "Invalid read_index %u >= unique_read_count %u",
+                                 read_id, pool.unique_read_count)
+            return -1
+
+    pool.read_alignment_starts[0] = 0
+    for i in range(1, pool.unique_read_count):
+        pool.read_alignment_starts[i] = pool.read_alignment_starts[i-1] + pool.read_alignment_counts[i-1]
+
+    pool.final_unique_reads = 0
+    cdef int64_t total_counts = 0
+    cdef uint32_t min_read_id = 0xFFFFFFFF
+    cdef uint32_t max_read_id = 0
+    for i in range(pool.unique_read_count):
+        if pool.read_alignment_counts[i] > 0:
+            pool.final_unique_reads += 1
+        total_counts += pool.read_alignment_counts[i]
+
+    cdef uint32_t min_ref_id = 0xFFFFFFFF
+    cdef uint32_t max_ref_id = 0
+    for i in range(pool.alignment_count):
+        if pool.read_indices[i] < min_read_id:
+            min_read_id = pool.read_indices[i]
+        if pool.read_indices[i] > max_read_id:
+            max_read_id = pool.read_indices[i]
+        if pool.alignment_cores[i].reference_index < min_ref_id:
+            min_ref_id = pool.alignment_cores[i].reference_index
+        if pool.alignment_cores[i].reference_index > max_ref_id:
+            max_ref_id = pool.alignment_cores[i].reference_index
+
+    cdef uint64_t last_end = pool.read_alignment_starts[pool.unique_read_count - 1] + pool.read_alignment_counts[pool.unique_read_count - 1]
+
+    bf_nogil_logf_notime(b"BATCH", "split_pool: %lld unique reads with filtered alignments",
+                         <long long>pool.final_unique_reads)
+    bf_nogil_logf_notime(b"BATCH",
+        "split_pool VERIFY: sum_counts=%lld aln_count=%lld read_id_range=[%u,%u] ref_id_range=[%u,%u] unique_read_count=%u ref_count=%u last_end=%llu",
+        <long long>total_counts, <long long>pool.alignment_count,
+        min_read_id, max_read_id, min_ref_id, max_ref_id, pool.unique_read_count, pool.reference_count, <unsigned long long>last_end)
+
+    return 0

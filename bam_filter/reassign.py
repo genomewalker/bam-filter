@@ -15,6 +15,7 @@ from bam_filter.utils import (
     create_output_files,
     handle_warning,
     is_debug,
+    defaults,
 )
 from bam_filter.processor import process_bam_with_em
 from bam_filter import logging as bf_logging
@@ -144,6 +145,20 @@ def reassign_reads(
     entropy_mixed_threshold: float = 2.0,
     entropy_highly_mixed_threshold: float = 3.0,
     tax_ambiguity_removal_level: int = 2,
+    # Coverage-Weighted Reference Priors
+    cwrp_lambda: float = 0.0,
+    iterative_auth: bool = False,
+    auth_update_interval: int = 5,
+    damage_weight: float = 1.0,
+    low_cov_floor: int = 10,
+    low_cov_shrink_tau: float = 50.0,
+    # Posterior-Weighted Coverage Authenticity (Path B)
+    auth_post_enabled: bool = False,
+    auth_update_interval_post: int = 3,
+    auth_scale_post: float = 4.0,
+    auth_lambda_ramp_iters: int = 5,
+    # Sample-level P(ancient) gate
+    sample_pi_override: float = 0.0,
 ) -> Dict[str, Any]:
     # Handle --remove-cross-domain-all as shorthand for both
     if remove_cross_domain_all:
@@ -388,6 +403,20 @@ def reassign_reads(
             entropy_mixed_threshold=entropy_mixed_threshold,
             entropy_highly_mixed_threshold=entropy_highly_mixed_threshold,
             tax_ambiguity_removal_level=tax_ambiguity_removal_level,
+            # Coverage-Weighted Reference Priors
+            cwrp_lambda=cwrp_lambda,
+            iterative_auth=iterative_auth,
+            auth_update_interval=auth_update_interval,
+            damage_weight=damage_weight,
+            low_cov_floor=low_cov_floor,
+            low_cov_shrink_tau=low_cov_shrink_tau,
+            # Posterior-Weighted Coverage Authenticity (Path B)
+            auth_post_enabled=auth_post_enabled,
+            auth_update_interval_post=auth_update_interval_post,
+            auth_scale_post=auth_scale_post,
+            auth_lambda_ramp_iters=auth_lambda_ramp_iters,
+            # Sample-level P(ancient) gate
+            sample_pi_override=sample_pi_override,
         )
         processing_duration = perf_counter() - processing_start
         _info("Core processing completed in %.2f seconds", processing_duration)
@@ -630,10 +659,10 @@ def reassign(args):
         em_tolerance = 1e-6
 
     # Allow explicit overrides from command line to take precedence
-    # If user explicitly passed --max-em-iterations, use that instead
-    if getattr(args, "max_em_iterations", None) != 50:  # 50 is default
+    # If user explicitly passed --max-em-iterations, use that instead of preset
+    if getattr(args, "max_em_iterations", None) != defaults["max_em_iterations"]:
         em_max_iterations = getattr(args, "max_em_iterations", em_max_iterations)
-    if getattr(args, "em_tolerance", None) != 1e-6:  # 1e-6 is default
+    if getattr(args, "em_tolerance", None) != defaults["em_tolerance"]:
         em_tolerance = getattr(args, "em_tolerance", em_tolerance)
 
     # Log simplified option usage
@@ -728,6 +757,20 @@ def reassign(args):
         "entropy_mixed_threshold": entropy_mixed_threshold,
         "entropy_highly_mixed_threshold": entropy_highly_mixed_threshold,
         "tax_ambiguity_removal_level": getattr(args, "tax_ambiguity_removal_level", 2),
+        # Coverage-Weighted Reference Priors
+        "cwrp_lambda": getattr(args, "cwrp_lambda", 0.0),
+        "iterative_auth": getattr(args, "iterative_auth", False),
+        "auth_update_interval": getattr(args, "auth_update_interval", 5),
+        "damage_weight": getattr(args, "damage_weight", 1.0),
+        "low_cov_floor": getattr(args, "low_cov_floor", 10),
+        "low_cov_shrink_tau": getattr(args, "low_cov_shrink_tau", 50.0),
+        # Posterior-Weighted Coverage Authenticity (Path B)
+        "auth_post_enabled": getattr(args, "auth_post_enabled", False),
+        "auth_update_interval_post": getattr(args, "auth_update_interval_post", 3),
+        "auth_scale_post": getattr(args, "auth_scale_post", 4.0),
+        "auth_lambda_ramp_iters": getattr(args, "auth_lambda_ramp_iters", 5),
+        # Sample-level P(ancient) gate
+        "sample_pi_override": getattr(args, "sample_pi_override", 0.0),
     }
 
     try:

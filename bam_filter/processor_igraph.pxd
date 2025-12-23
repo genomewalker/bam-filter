@@ -43,7 +43,9 @@ cdef extern from "igraph.h":
     igraph_error_t igraph_vector_int_init(igraph_vector_int_t *v, igraph_integer_t size) nogil
     void igraph_vector_int_destroy(igraph_vector_int_t *v) nogil
     igraph_integer_t igraph_vector_int_size(const igraph_vector_int_t *v) nogil
+    igraph_integer_t igraph_vector_int_get(const igraph_vector_int_t *v, igraph_integer_t pos) nogil
     void igraph_vector_int_set(igraph_vector_int_t *v, igraph_integer_t pos, igraph_integer_t value) nogil
+    igraph_real_t igraph_vector_get(const igraph_vector_t *v, igraph_integer_t pos) nogil
     
     int igraph_vector_long_init(igraph_vector_long_t *v, long int size) nogil
     int igraph_vector_long_destroy(igraph_vector_long_t *v) nogil
@@ -157,7 +159,12 @@ cdef extern from "igraph.h":
                                     igraph_neimode_t mode,
                                     igraph_loops_t loops,
                                     igraph_bool_t sorted) nogil
-    
+
+    igraph_error_t igraph_incident(const igraph_t *graph,
+                                   igraph_vector_int_t *eids,
+                                   igraph_integer_t vid,
+                                   igraph_neimode_t mode) nogil
+
     igraph_error_t igraph_get_eid(const igraph_t *graph,
                                   igraph_integer_t *eid,
                                   igraph_integer_t from_,

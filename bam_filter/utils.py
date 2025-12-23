@@ -681,6 +681,7 @@ defaults = {
     "em_unknown_score": -50.0,
     "em_length_init": False,
     "hierarchical_pmd": True,  # Default ON for ancient DNA (ancient/modern classification)
+    "sample_pi_override": 0.0,  # Sample-level P(ancient) gate; 0.0 = auto from PMD curve
     # === UNIFIED φ-SPACE EM PARAMETERS ===
     "em_mode": "phi",  # "standard" (rho=1.0) or "phi" (rho=0.7, recommended for metagenomics)
     "em_power_rho": 0.7,  # φ-space EM, reduces rich-get-richer bias
@@ -691,6 +692,16 @@ defaults = {
     "min_probability": 1e-6,
     "prob_fraction": 0,
     "prior_weight": 0.01,
+    "cwrp_lambda": 0.0,
+    "iterative_auth": False,
+    "auth_update_interval": 5,
+    "damage_weight": 1.0,
+    "low_cov_floor": 10,
+    "low_cov_shrink_tau": 50.0,
+    "auth_post_enabled": False,
+    "auth_update_interval_post": 3,
+    "auth_scale_post": 4.0,
+    "auth_lambda_ramp_iters": 5,
     "use_squarem_acceleration": True,
     "enable_globalization": True,
     "squarem_start_iter": 2,
@@ -789,6 +800,16 @@ help_msg = {
     "min_probability": "Minimum probability threshold for keeping alignments",
     "prob_fraction": "Relative probability threshold for post-EM filtering",
     "prior_weight": "Prior weight (regularization) for EM algorithm",
+    "cwrp_lambda": "Coverage-Weighted Reference Priors: weight for authenticity-based Dirichlet priors (0=disabled)",
+    "iterative_auth": "Enable iterative ancientness updates during EM (requires --cwrp-lambda > 0)",
+    "auth_update_interval": "Update ancientness field every N EM iterations",
+    "damage_weight": "Weight for damage signal in ancientness computation (0-2)",
+    "low_cov_floor": "Shrink ancientness toward neutral below this read count",
+    "low_cov_shrink_tau": "Shrinkage strength for low-coverage references (higher = more shrinkage)",
+    "auth_post_enabled": "Enable posterior-weighted coverage authenticity (Path B) inside EM",
+    "auth_update_interval_post": "Update posterior-weighted authenticity every N EM iterations",
+    "auth_scale_post": "Sigmoid scale for posterior authenticity score mapping",
+    "auth_lambda_ramp_iters": "Ramp CWRP lambda from 0 to target over N initial iterations",
     "use_squarem_acceleration": "Enable SQUAREM acceleration for EM algorithm",
     # ✓ NEW: PAPER-SPECIFIC SQUAREM help messages
     "enable_globalization": "Enable gSQUAREM with likelihood monotonicity (backtracking)",
@@ -1040,6 +1061,15 @@ def get_arguments(argv=None):
         allow_abbrev=False,
     )
 
+    # Create the parser for the profiler command
+    parser_profiler = sub_parsers.add_parser(
+        "profiler",
+        help="Compute probabilistic taxonomic profile with Bayesian hierarchical model",
+        parents=[parent_parser, common_required, common_optional],
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        allow_abbrev=False,
+    )
+
     # Create the parser for the to-parquet command with all parent parsers
     parser_to_parquet = sub_parsers.add_parser(
         "to-parquet",
@@ -1148,6 +1178,11 @@ def get_arguments(argv=None):
         lca_required_args = parser_lca.add_argument_group("required arguments")
 
     lca_optional_args = parser_lca.add_argument_group("LCA optional arguments")
+
+    # Profiler argument groups
+    profiler_input_args = parser_profiler.add_argument_group("Input arguments")
+    profiler_output_args = parser_profiler.add_argument_group("Output arguments")
+    profiler_model_args = parser_profiler.add_argument_group("Model hyperparameters")
 
     # To-parquet argument groups
     parquet_required_args = parser_to_parquet.add_argument_group("required arguments")
@@ -1437,6 +1472,126 @@ def get_arguments(argv=None):
         help=argparse.SUPPRESS,  # Hidden, advanced option
     )
 
+    reassign_em_args.add_argument(
+        "--cwrp-lambda",
+        type=lambda x: float(
+            check_values(
+                x, minval=0.0, maxval=10.0, parser=parser, var="--cwrp-lambda"
+            )
+        ),
+        metavar="FLOAT",
+        default=defaults["cwrp_lambda"],
+        dest="cwrp_lambda",
+        help=help_msg["cwrp_lambda"],
+    )
+
+    reassign_em_args.add_argument(
+        "--iterative-auth",
+        action="store_true",
+        default=defaults["iterative_auth"],
+        dest="iterative_auth",
+        help=help_msg["iterative_auth"],
+    )
+
+    reassign_em_args.add_argument(
+        "--auth-update-interval",
+        type=lambda x: int(
+            check_values(
+                x, minval=1, maxval=100, parser=parser, var="--auth-update-interval"
+            )
+        ),
+        metavar="INT",
+        default=defaults["auth_update_interval"],
+        dest="auth_update_interval",
+        help=help_msg["auth_update_interval"],
+    )
+
+    reassign_em_args.add_argument(
+        "--damage-weight",
+        type=lambda x: float(
+            check_values(
+                x, minval=0.0, maxval=2.0, parser=parser, var="--damage-weight"
+            )
+        ),
+        metavar="FLOAT",
+        default=defaults["damage_weight"],
+        dest="damage_weight",
+        help=help_msg["damage_weight"],
+    )
+
+    reassign_em_args.add_argument(
+        "--low-cov-floor",
+        type=lambda x: int(
+            check_values(
+                x, minval=1, maxval=1000, parser=parser, var="--low-cov-floor"
+            )
+        ),
+        metavar="INT",
+        default=defaults["low_cov_floor"],
+        dest="low_cov_floor",
+        help=help_msg["low_cov_floor"],
+    )
+
+    reassign_em_args.add_argument(
+        "--low-cov-shrink-tau",
+        type=lambda x: float(
+            check_values(
+                x, minval=1.0, maxval=1000.0, parser=parser, var="--low-cov-shrink-tau"
+            )
+        ),
+        metavar="FLOAT",
+        default=defaults["low_cov_shrink_tau"],
+        dest="low_cov_shrink_tau",
+        help=help_msg["low_cov_shrink_tau"],
+    )
+
+    reassign_em_args.add_argument(
+        "--auth-post-enabled",
+        action="store_true",
+        default=defaults["auth_post_enabled"],
+        dest="auth_post_enabled",
+        help=help_msg["auth_post_enabled"],
+    )
+
+    reassign_em_args.add_argument(
+        "--auth-update-interval-post",
+        type=lambda x: int(
+            check_values(
+                x, minval=1, maxval=50, parser=parser, var="--auth-update-interval-post"
+            )
+        ),
+        metavar="INT",
+        default=defaults["auth_update_interval_post"],
+        dest="auth_update_interval_post",
+        help=help_msg["auth_update_interval_post"],
+    )
+
+    reassign_em_args.add_argument(
+        "--auth-scale-post",
+        type=lambda x: float(
+            check_values(
+                x, minval=0.1, maxval=20.0, parser=parser, var="--auth-scale-post"
+            )
+        ),
+        metavar="FLOAT",
+        default=defaults["auth_scale_post"],
+        dest="auth_scale_post",
+        help=help_msg["auth_scale_post"],
+    )
+
+    reassign_em_args.add_argument(
+        "--auth-lambda-ramp-iters",
+        type=lambda x: int(
+            check_values(
+                x, minval=0, maxval=100, parser=parser, var="--auth-lambda-ramp-iters"
+            )
+        ),
+        metavar="INT",
+        default=defaults["auth_lambda_ramp_iters"],
+        dest="auth_lambda_ramp_iters",
+        help=help_msg["auth_lambda_ramp_iters"],
+    )
+
     # ✓ SYNCED: Read Filtering Parameters
     reassign_filter_args.add_argument(
         "-A",
@@ -1649,6 +1804,18 @@ def get_arguments(argv=None):
              "for each reference, helping distinguish truly ancient sequences from "
              "modern contaminants based on characteristic damage signatures.",
     )
+    reassign_pmd_args.add_argument(
+        "--sample-pi",
+        dest="sample_pi_override",
+        type=float,
+        default=defaults["sample_pi_override"],
+        metavar="FLOAT",
+        help="Override sample-level P(ancient) gate for hierarchical EM. "
+             "When 0.0 (default), π is computed automatically from PMD curve: "
+             "π = omega × D1/(D1+baseline). Set to 0.01-0.99 to force a specific "
+             "prior probability that this sample contains ancient DNA. "
+             "Useful for modern samples where damage should be ignored.",
+    )
     reassign_export_args.add_argument(
         "-S",
         "--reference-stats",
@@ -1859,6 +2026,14 @@ def get_arguments(argv=None):
         help="Minimum number of reads per reference to pass filter (reference-level filter). "
              "Equivalent to --filter 'read_count:N:' but provided for convenience.",
     )
+    filtering_filt_args.add_argument(
+        "--damage-correction",
+        dest="damage_correction",
+        action="store_true",
+        help="Enable damage-corrected ANI computation. Uses the same PMD model as reassign to "
+             "fit a damage curve D(z) and compute ANI values that account for ancient DNA damage "
+             "(C→T at 5' end, G→A at 3' end). Outputs read_ani_corrected_mean and read_ani_corrected_std.",
+    )
     misc_filter_args.add_argument(
         "-m",
         "--sort-memory",
@@ -1892,12 +2067,9 @@ def get_arguments(argv=None):
     filter_required_args.add_argument(
         "--stats",
         dest="output",
-        default=defaults["stats"],
         type=str,
         metavar="FILE",
-        nargs="?",
-        const="",
-        required=False,  # Made optional for commands like --list-columns
+        required=False,
         help=help_msg["stats"],
     )
     out_filter_args.add_argument(
@@ -1906,8 +2078,6 @@ def get_arguments(argv=None):
         default=defaults["stats_filtered"],
         type=str,
         metavar="FILE",
-        nargs="?",
-        const="",
         help=help_msg["stats_filtered"],
     )
     out_filter_args.add_argument(
@@ -1916,8 +2086,6 @@ def get_arguments(argv=None):
         default=defaults["bam_filtered"],
         metavar="FILE",
         type=str,
-        nargs="?",
-        const="",
         help=help_msg["bam_filtered"],
     )
     # parser.add_argument(
@@ -1967,6 +2135,116 @@ def get_arguments(argv=None):
         dest="lca_stats",
         action="store_true",
         help=help_msg["lca_stats_flag"],
+    )
+    lca_optional_args.add_argument(
+        "--authenticity-score-threshold",
+        dest="authenticity_score_threshold",
+        metavar="FLOAT",
+        default=0.0,
+        type=float,
+        help="Minimum authenticity score for a taxon to be classified as authentic. "
+             "Default: 0.0 (positive scores are authentic).",
+    )
+    lca_optional_args.add_argument(
+        "--authenticity-pvalue-threshold",
+        dest="authenticity_pvalue_threshold",
+        metavar="FLOAT",
+        default=0.05,
+        type=float,
+        help="Maximum p-value for a taxon to be classified as authentic. "
+             "Default: 0.05 (5%% significance level).",
+    )
+    lca_optional_args.add_argument(
+        "--subtree-authentic-threshold",
+        dest="subtree_authentic_threshold",
+        metavar="FLOAT",
+        default=0.8,
+        type=float,
+        help="Minimum read-weighted fraction for a subtree to be classified as 'authentic'. "
+             "Default: 0.8 (80%% of descendant read signal must be authentic).",
+    )
+    lca_optional_args.add_argument(
+        "--subtree-contaminant-threshold",
+        dest="subtree_contaminant_threshold",
+        metavar="FLOAT",
+        default=0.2,
+        type=float,
+        help="Maximum read-weighted fraction for a subtree to be classified as 'contaminant'. "
+             "Default: 0.2 (at most 20%% of descendant read signal is authentic).",
+    )
+
+    # Profiler arguments
+    # Note: --bam and -t/--threads are inherited from common_required and common_optional
+    profiler_input_args.add_argument(
+        "--taxonomy-db",
+        metavar="DIR",
+        type=str,
+        dest="taxonomy_db",
+        required=True,
+        help=help_msg["taxonomy_db"],
+    )
+    profiler_output_args.add_argument(
+        "-o",
+        "--output",
+        dest="output",
+        metavar="FILE",
+        type=str,
+        default=None,
+        help="Output TSV path for probabilistic profile. Default: <prefix>.prob_profile.tsv",
+    )
+    profiler_output_args.add_argument(
+        "--min-reads",
+        dest="min_reads",
+        metavar="FLOAT",
+        type=float,
+        default=0.0,
+        help="Minimum expected reads to include taxon in output. Default: 0.0",
+    )
+    profiler_model_args.add_argument(
+        "--beta-alpha0",
+        dest="beta_alpha0",
+        metavar="FLOAT",
+        type=float,
+        default=1.0,
+        help="Global Beta prior alpha parameter. Default: 1.0 (weakly informative)",
+    )
+    profiler_model_args.add_argument(
+        "--beta-beta0",
+        dest="beta_beta0",
+        metavar="FLOAT",
+        type=float,
+        default=1.0,
+        help="Global Beta prior beta parameter. Default: 1.0 (weakly informative)",
+    )
+    profiler_model_args.add_argument(
+        "--lambda-shrink",
+        dest="lambda_shrink",
+        metavar="FLOAT",
+        type=float,
+        default=10.0,
+        help="Hierarchical shrinkage strength (pseudo-counts from parent). Default: 10.0",
+    )
+    profiler_model_args.add_argument(
+        "--kappa-dirichlet",
+        dest="kappa_dirichlet",
+        metavar="FLOAT",
+        type=float,
+        default=2.0,
+        help="Dirichlet smoothing for TAD abundances. Default: 2.0",
+    )
+    profiler_model_args.add_argument(
+        "--exact-quantiles",
+        dest="exact_quantiles",
+        action="store_true",
+        help="Use exact Beta quantiles for CIs (slower). Default: logit-normal approximation.",
+    )
+    profiler_output_args.add_argument(
+        "--min-p-present",
+        dest="min_p_present",
+        metavar="FLOAT",
+        type=float,
+        default=0.0,
+        help="Minimum P(present) to include taxon in output. Default: 0.0",
     )
 
     # Create the parser for the build-taxonomy command
@@ -2201,6 +2479,13 @@ def get_arguments(argv=None):
         args, "reference_stats_tsv", None
     ):
         parser.error("--clustering requires --reference-stats to be set")
+
+    # Graph export requires clustering to be enabled
+    if getattr(args, "graph_export", None) and not getattr(args, "clustering", False):
+        bf_logging.warn("--graph-export requires --clustering; enabling clustering automatically")
+        args.clustering = True
+        if not getattr(args, "reference_stats_tsv", None):
+            parser.error("--graph-export requires --reference-stats to be set (via --clustering)")
 
     # Print chosen graph edge-weight mode early so users see whether auto/none/value was selected
     try:

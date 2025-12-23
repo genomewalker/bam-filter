@@ -10,7 +10,7 @@ conda_prefix = os.environ.get("CONDA_PREFIX", "")
 
 # Common compilation settings for all extensions
 common_compile_args = ["-fopenmp", "-O3", "-ffast-math", "-funroll-loops"]
-common_link_args = ["-fopenmp"]
+common_link_args = ["-fopenmp", "-lmvec", "-lm"]
 common_include_dirs = [
     numpy.get_include(),
     os.path.join(conda_prefix, "include"),
@@ -315,6 +315,16 @@ ext_modules = [
         library_dirs=common_library_dirs,
         libraries=common_libraries + ["m"],
     ),
+    # Bayesian damage model for ancient/modern reference classification
+    Extension(
+        "bam_filter.processor_damage_model",
+        ["bam_filter/processor_damage_model.pyx"],
+        extra_compile_args=common_compile_args,
+        extra_link_args=common_link_args + ["-lm"],
+        include_dirs=common_include_dirs,
+        library_dirs=common_library_dirs,
+        libraries=common_libraries + ["m"],
+    ),
     Extension(
         "bam_filter.processor_lca",
         ["bam_filter/processor_lca.pyx"],
@@ -333,6 +343,46 @@ ext_modules = [
         include_dirs=common_include_dirs,
         library_dirs=common_library_dirs,
         libraries=common_libraries,
+    ),
+    # Probabilistic taxonomic profiler - Bayesian hierarchical model for ancient DNA
+    Extension(
+        "bam_filter.processor_prob_profile",
+        ["bam_filter/processor_prob_profile.pyx"],
+        extra_compile_args=common_compile_args,
+        extra_link_args=common_link_args,
+        include_dirs=common_include_dirs,
+        library_dirs=common_library_dirs,
+        libraries=common_libraries,
+    ),
+    # Novel probabilistic profiler - DCMS + belief propagation (no LCA)
+    Extension(
+        "bam_filter.probabilistic_profiler",
+        ["bam_filter/probabilistic_profiler.pyx"],
+        extra_compile_args=common_compile_args,
+        extra_link_args=common_link_args,
+        include_dirs=common_include_dirs,
+        library_dirs=common_library_dirs,
+        libraries=common_libraries,
+    ),
+    # Generic SQUAREM acceleration for EM algorithms
+    Extension(
+        "bam_filter.squarem",
+        ["bam_filter/squarem.pyx"],
+        extra_compile_args=common_compile_args,
+        extra_link_args=common_link_args + ["-lm"],
+        include_dirs=common_include_dirs,
+        library_dirs=common_library_dirs,
+        libraries=common_libraries + ["m"],
+    ),
+    # Unified ancient DNA damage model - single model for ANI correction, classification, profiling
+    Extension(
+        "bam_filter.unified_damage",
+        ["bam_filter/unified_damage.pyx"],
+        extra_compile_args=common_compile_args,
+        extra_link_args=common_link_args + ["-lm"],
+        include_dirs=common_include_dirs,
+        library_dirs=common_library_dirs,
+        libraries=common_libraries + ["m"],
     ),
 
     # Tiny helper: read-name hashing (extracted from processor.pyx)

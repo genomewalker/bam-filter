@@ -335,6 +335,99 @@ cdef double _fit_omega(uint64_t* n_5p, uint64_t* k_5p,
     return (a + b) / 2.0
 
 
+cdef double _estimate_lambda_from_data(
+    uint64_t* n_5p, uint64_t* k_5p,
+    uint64_t* n_3p, uint64_t* k_3p,
+    double prior_mean, double prior_sd
+) noexcept nogil:
+    """Estimate lambda decay parameter from observed damage rates.
+
+    Uses linear regression on log-transformed damage rates for positions 1-10.
+    Baseline is estimated from positions 15-19.
+
+    Returns lambda with shrinkage toward prior if data is insufficient.
+    """
+    cdef double baseline = 0.0
+    cdef double baseline_n = 0.0
+    cdef int z
+    cdef double rate
+
+    # Estimate baseline from positions 15-19 (0-indexed: 14-18)
+    for z in range(14, 19):
+        if n_5p[z] > 0:
+            baseline += <double>k_5p[z] / <double>n_5p[z]
+            baseline_n += 1.0
+        if n_3p[z] > 0:
+            baseline += <double>k_3p[z] / <double>n_3p[z]
+            baseline_n += 1.0
+
+    if baseline_n > 0:
+        baseline = baseline / baseline_n
+    else:
+        baseline = 0.01
+
+    # Linear regression: log(D[z] - baseline) = log(P) - lambda * (z-1)
+    # We fit: y = a + b*x where y = log(D - baseline), x = z-1, b = -lambda
+    cdef double sum_x = 0.0, sum_y = 0.0, sum_xy = 0.0, sum_xx = 0.0
+    cdef double n_points = 0.0
+    cdef double x, y, D_obs
+
+    # Use positions 1-10 for fitting (0-indexed: 0-9)
+    for z in range(10):
+        # Combine 5' and 3' data
+        if n_5p[z] > 100:  # Require at least 100 observations
+            D_obs = <double>k_5p[z] / <double>n_5p[z]
+            if D_obs > baseline + 0.005:  # Must be above baseline
+                x = <double>z  # z-1 where z is 1-based, so z (0-indexed) = z-1
+                y = log(D_obs - baseline)
+                sum_x += x
+                sum_y += y
+                sum_xy += x * y
+                sum_xx += x * x
+                n_points += 1.0
+
+        if n_3p[z] > 100:
+            D_obs = <double>k_3p[z] / <double>n_3p[z]
+            if D_obs > baseline + 0.005:
+                x = <double>z
+                y = log(D_obs - baseline)
+                sum_x += x
+                sum_y += y
+                sum_xy += x * y
+                sum_xx += x * x
+                n_points += 1.0
+
+    # Need at least 3 points for meaningful fit
+    if n_points < 3:
+        bf_nogil_logf_notime(LOG_TAG, "Insufficient data for lambda fit, using prior (n=%.0f)", n_points)
+        return prior_mean
+
+    # Linear regression: b = (n*sum_xy - sum_x*sum_y) / (n*sum_xx - sum_x^2)
+    cdef double denom = n_points * sum_xx - sum_x * sum_x
+    if fabs(denom) < 1e-10:
+        return prior_mean
+
+    cdef double b = (n_points * sum_xy - sum_x * sum_y) / denom
+    cdef double lambda_fit = -b  # lambda = -slope
+
+    # Clamp to reasonable range [0.1, 1.0]
+    if lambda_fit < 0.1:
+        lambda_fit = 0.1
+    elif lambda_fit > 1.0:
+        lambda_fit = 1.0
+
+    # Shrink toward prior based on data quantity
+    # weight = n_points / (n_points + prior_strength)
+    cdef double prior_strength = 10.0
+    cdef double weight = n_points / (n_points + prior_strength)
+    cdef double lambda_final = weight * lambda_fit + (1.0 - weight) * prior_mean
+
+    bf_nogil_logf_notime(LOG_TAG, "Lambda fit: raw=%.4f prior=%.4f final=%.4f (n=%.0f, baseline=%.4f)",
+                         lambda_fit, prior_mean, lambda_final, n_points, baseline)
+
+    return lambda_final
+
+
 cdef int fit_pmd_curve(PMDGlobalContext* ctx, PMDCurveParams* params) noexcept nogil:
     """Fit PMD damage curve from collected statistics.
 
@@ -360,9 +453,15 @@ cdef int fit_pmd_curve(PMDGlobalContext* ctx, PMDCurveParams* params) noexcept n
     cdef PMDStatsGlobal* stats = &ctx.model.stats
     cdef PMDCurve* curve = &ctx.model.curve
 
-    # Use prior means for shape parameters (could optimize these too)
+    # Fit lambda from observed damage rates (with shrinkage to prior)
+    cdef double lam = _estimate_lambda_from_data(
+        stats.n_5p_noncpg, stats.k_5p_noncpg,
+        stats.n_3p_noncpg, stats.k_3p_noncpg,
+        p.lambda_prior_mean, p.lambda_prior_sd
+    )
+
+    # Use prior means for P and C (could optimize these too in future)
     cdef double P = p.P_prior_mean
-    cdef double lam = p.lambda_prior_mean
     cdef double C = p.C_prior_mean
     cdef double epsilon = p.epsilon
 
@@ -402,8 +501,14 @@ cdef int fit_pmd_curve(PMDGlobalContext* ctx, PMDCurveParams* params) noexcept n
 
     ctx.model.curve_fitted = True
 
-    bf_nogil_logf_notime(LOG_TAG, "PMD curve fitted: omega=%.4f D(1)=%.3f D(5)=%.3f D(10)=%.3f",
-                         omega, curve.D_5p_noncpg[0], curve.D_5p_noncpg[4], curve.D_5p_noncpg[9])
+    # Compute D_avg (average of positions 0-7 for both ends) for comparison with kaiku
+    cdef double D_avg_check = 0.0
+    for z in range(8):
+        D_avg_check += curve.D_5p_noncpg[z] + curve.D_3p_noncpg[z]
+    D_avg_check /= 16.0
+
+    bf_nogil_logf_notime(LOG_TAG, "PMD curve fitted: omega=%.4f lambda=%.4f D_avg=%.4f D(1)=%.3f",
+                         omega, lam, D_avg_check, curve.D_5p_noncpg[0])
 
     return 0
 
@@ -819,8 +924,28 @@ cdef int64_t apply_pmd_corrections_to_pool(MemoryPool* pool,
     # If no curve available, use raw ANI
     cdef bint has_curve = (curve != NULL and curve.omega > 0.001)
 
+    # Precompute log probability factors once for hierarchical EM (hoisted from inner loop)
+    cdef double D_avg = 0.0
+    cdef double log_p_damage_anc, log_p_survive_anc
+    cdef double log_1m_eps, log_eps_over_3
+    cdef double observed_damage, survived, other_mm
+    cdef int actual_opp
+
+    if has_curve:
+        D_avg = (curve.D_5p_noncpg[0] + curve.D_3p_noncpg[0]) / 2.0
+    else:
+        D_avg = 0.1  # default fallback
+
+    # Precomputed log factors (computed ONCE, used for all alignments)
+    log_p_damage_anc = log(fmax(D_avg + (1.0 - D_avg) * epsilon / 3.0, 1e-15))
+    log_p_survive_anc = log(fmax((1.0 - D_avg) * (1.0 - epsilon / 3.0), 1e-15))
+    log_1m_eps = log(fmax(1.0 - epsilon, 1e-15))
+    log_eps_over_3 = log(fmax(epsilon / 3.0, 1e-15))
+
     bf_nogil_logf_notime(LOG_TAG, "Applying PMD corrections to %ld alignments (threshold=%.1f%%)",
                          alignment_count, min_ani_threshold)
+    bf_nogil_logf_notime(LOG_TAG, "Precomputed EM factors: D_avg=%.4f log_p_dmg=%.4f log_p_surv=%.4f",
+                         D_avg, log_p_damage_anc, log_p_survive_anc)
 
     # Process alignments in parallel
     for i in prange(alignment_count, nogil=True, num_threads=num_threads, schedule='static'):
@@ -833,6 +958,8 @@ cdef int64_t apply_pmd_corrections_to_pool(MemoryPool* pool,
             raw_ani = 0.0
             aln.corrected_ani = 0.0
             aln.passes_ani_filter = 0
+            aln.log_L_anc = -1000.0  # very low likelihood
+            aln.log_L_mod = -1000.0
             continue
 
         if has_curve:
@@ -861,6 +988,29 @@ cdef int64_t apply_pmd_corrections_to_pool(MemoryPool* pool,
             aln.passes_ani_filter = 1
         else:
             aln.passes_ani_filter = 0
+
+        # Precompute log-likelihoods for hierarchical EM E-step
+        # Using precomputed log factors - no log() calls in this hot path
+        observed_damage = <double>(aln.ct_5p_count + aln.ga_3p_count)
+        actual_opp = aln.c_at_5p_count + aln.g_at_3p_count
+        survived = fmax(0.0, <double>actual_opp - observed_damage)
+        other_mm = <double>(aln.aligned_length - aln.match_count) - observed_damage
+        if other_mm < 0.0:
+            other_mm = 0.0
+
+        # log_L_anc = obs_damage * log_p_damage + survived * log_p_survive + matches * log(1-eps) + other_mm * log(eps/3)
+        aln.log_L_anc = <float>(
+            observed_damage * log_p_damage_anc +
+            survived * log_p_survive_anc +
+            <double>aln.match_count * log_1m_eps +
+            other_mm * log_eps_over_3
+        )
+
+        # log_L_mod = matches * log(1-eps) + all_mm * log(eps/3) (all mismatches are errors)
+        aln.log_L_mod = <float>(
+            <double>aln.match_count * log_1m_eps +
+            <double>(aln.aligned_length - aln.match_count) * log_eps_over_3
+        )
 
     # Count passed alignments (serial for accuracy)
     for i in range(alignment_count):
@@ -1140,6 +1290,49 @@ def apply_pmd_corrections_py(uintptr_t pool_ptr, uintptr_t curve_ptr,
     cdef MemoryPool* pool = <MemoryPool*>pool_ptr
     cdef PMDCurve* curve = <PMDCurve*>curve_ptr
     return apply_pmd_corrections_to_pool(pool, curve, min_ani_threshold, epsilon, num_threads)
+
+
+def apply_raw_ani_filter_py(uintptr_t pool_ptr, float min_ani_threshold, int num_threads):
+    """Apply raw ANI filtering when PMD is disabled.
+
+    Sets passes_ani_filter based on raw ANI (match_count/aligned_length).
+    Returns the number of alignments that pass the threshold.
+    """
+    cdef MemoryPool* pool = <MemoryPool*>pool_ptr
+    cdef int64_t i
+    cdef int64_t passed_count = 0
+    cdef int64_t alignment_count = pool.alignment_count
+    cdef Alignment* aln
+    cdef float raw_ani
+
+    bf_nogil_logf_notime(LOG_TAG, "Applying raw ANI filter to %lld alignments (threshold=%.1f%%)",
+                         <long long>alignment_count, min_ani_threshold)
+
+    for i in prange(alignment_count, nogil=True, num_threads=num_threads, schedule='static'):
+        aln = &pool.alignments[i]
+
+        if aln.aligned_length > 0:
+            raw_ani = (<float>aln.match_count / <float>aln.aligned_length) * 100.0
+        else:
+            raw_ani = 0.0
+
+        aln.corrected_ani = raw_ani  # No correction, use raw
+
+        if raw_ani >= min_ani_threshold:
+            aln.passes_ani_filter = 1
+        else:
+            aln.passes_ani_filter = 0
+
+    # Count passed (separate loop to avoid race condition)
+    for i in range(alignment_count):
+        if pool.alignments[i].passes_ani_filter == 1:
+            passed_count += 1
+
+    bf_nogil_logf_notime(LOG_TAG, "Raw ANI filter complete: %lld/%lld passed (%.1f%%)",
+                         <long long>passed_count, <long long>alignment_count,
+                         100.0 * <double>passed_count / <double>alignment_count if alignment_count > 0 else 0.0)
+
+    return passed_count
 
 
 def create_pmd_context_py(int num_threads, bint is_single_stranded, bint enable_hierarchical):

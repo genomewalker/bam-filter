@@ -48,6 +48,7 @@ cdef extern from *:
     void sam_hdr_destroy(sam_hdr_t* h) nogil
     int64_t sam_hdr_tid2len(const sam_hdr_t* header, int tid) nogil
     int sam_hdr_name2tid(sam_hdr_t* header, const char* name) nogil
+    const char* sam_hdr_tid2name(const sam_hdr_t* header, int tid) nogil
 
 from libc.stdint cimport int8_t, int16_t, int32_t, int64_t, uint16_t, uint8_t, uint32_t, uint64_t, INT32_MAX
 from libc.stdlib cimport malloc, free, realloc, calloc, qsort
@@ -89,6 +90,8 @@ from bam_filter.stats_rle cimport (
     calculate_rle_coverage_stats,
     calculate_abundance_metrics,
 )
+from cpython.pycapsule cimport PyCapsule_New
+
 from bam_filter.stats_helpers cimport (
     count_gc_bases,
     count_reference_gc_bases,
@@ -99,7 +102,29 @@ from bam_filter.stats_helpers cimport (
     mode_from_sorted,
     calculate_dust_score,
 )
-
+from bam_filter.processor_pmd cimport (
+    PMDStatsAccumulator,
+    PMDStatsGlobal,
+    PMDCurve,
+    PMDCurveParams,
+    PMDGlobalContext,
+    create_pmd_context,
+    destroy_pmd_context,
+    merge_pmd_stats,
+    fit_pmd_curve,
+    finalize_pmd_model,
+    compute_corrected_ani,
+    ANISnapshot,
+    PMD_END_5P,
+    PMD_END_3P,
+    PMD_CTX_NONCPG,
+)
+from bam_filter.processor_md_quality cimport (
+    ANIStats,
+    calculate_md_quality_score_with_stats,
+    initialize_quality_lookup_tables,
+)
+from bam_filter.processor cimport AlignmentScoringConfig
 from typing import Any
 from bam_filter import logging as bf_logging
 
@@ -258,21 +283,42 @@ cdef struct RefStats:
     double ani_median
     double min_ani
     double max_ani
-    # double gc_content  # Removed: only using gc_content_mean and gc_content_var
+
+    # Corrected ANI (damage-corrected, set by PMD stage)
+    double ani_corrected_mean
+    double ani_corrected_std
+
+    # Per-reference damage counts for computing corrected ANI (stored in Pass 1)
+    int64_t total_aligned_length    # Sum of aligned_length across all alignments
+    int64_t total_match_count       # Sum of match_count across all alignments
+    int64_t total_ct_5p_count       # Sum of C→T mismatches in first 8bp (5' end)
+    int64_t total_ga_3p_count       # Sum of G→A mismatches in last 8bp (3' end)
+
     double aligned_length_mean
     double aln_score_mean
     double aln_score_std
+
+    # ZP/ZS tag statistics (from reassign/EM output)
+    double zp_mean     # Mean EM posterior probability
+    double zp_std      # Std of EM posterior
+    double zs_mean     # Mean log-likelihood alignment score
+    double zs_std      # Std of log-likelihood score
+    int64_t zp_count   # Number of alignments with ZP tag
+    int64_t zs_count   # Number of alignments with ZS tag
+
     double mapq_mean
     double mapq_std
     double edit_dist_mean
     double edit_dist_std
-    double read_gc_content_mean         # Mean of per-read GC% (READ sequence)
-    double read_gc_content_std          # Std of per-read GC% (READ sequence)
-    double read_gc_content_total        # Overall GC content (total GC bases / total read length * 100) (READ)
-    double ref_gc_content_mean          # Mean of per-read reference GC%
-    double ref_gc_content_std           # Std of per-read reference GC%
-    double ref_gc_content_total         # Overall reference GC content (total ref GC / total ref length * 100)
-    
+    double read_gc_content_mean
+    double read_gc_content_std
+    double read_gc_content_total
+    double ref_gc_content_mean
+    double ref_gc_content_std
+    double ref_gc_content_total
+    double dust_mean
+    double dust_std
+
     # Coverage statistics
     int64_t bases_covered
     int64_t total_coverage
@@ -294,8 +340,8 @@ cdef struct RefStats:
     int64_t tax_abund_tad
     
     # Coverage distribution stats
-    double entropy
-    double norm_entropy
+    double spatial_entropy
+    double norm_spatial_entropy
     double gini
     double norm_gini
     int64_t n_bins
@@ -309,7 +355,13 @@ cdef struct RefStats:
 
     # Per-reference processing time (seconds)
     double ref_seconds
-    
+    # Breakdown of per-reference timing (seconds)
+    double cov_events_sec
+    double cov_merge_sec
+    double cov_tad_sec
+    double cov_total_sec
+    double abundance_seconds
+
     # Interval merging results
     int64_t max_covered_bases
     double mean_covered_bases
@@ -317,9 +369,16 @@ cdef struct RefStats:
     double sum_interval_length_sq  # Sum of interval_length^2 for WCB (computed inline)
 
     # Contamination detection metrics (computed post-hoc from existing stats)
-    double weighted_contiguity_breadth  # WCB = sum(interval_len^2) / ref_length^2
+    double weighted_contiguity_breadth  # WCB = sum(interval_len^2) / bases_covered^2 (Herfindahl index)
     double complexity_penalized_coverage  # CPC = breadth * (1 - dust_mean)
     double overlap_redundancy_index  # ORI = total_aligned_bases / bases_covered
+    double mega_genome_sparsity_index  # MGSI = log10(expected_breadth / observed_breadth)
+    double coverage_compressibility_ratio  # CCR = n_intervals / (bases_covered / read_len_mean)
+    double feature_space_clustering_score  # FSCS = variance of GC/complexity across aligned regions
+
+    # Authenticity metrics (computed post-hoc from spatial distribution)
+    double authenticity_score  # norm_spatial_entropy - norm_gini (higher = more authentic)
+    double authenticity_pvalue  # P(score <= x | real distribution), lower = likely contamination
 
     # Reference lengths
     int64_t ref_length
@@ -464,6 +523,90 @@ cdef BatchData* create_batch_data(int64_t batch_id, int64_t tid_start, int64_t t
     batch.error_code = BATCH_OK
     return batch
 
+
+cdef int collect_pmd_stats_for_reference(
+    samFile* htsfile,
+    sam_hdr_t* header,
+    hts_idx_t* idx,
+    int64_t tid,
+    int min_read_length_c,
+    int max_read_length_c,
+    PMDStatsAccumulator* pmd_acc
+) nogil:
+    """Lightweight PMD-only stats collection for Pass 1 (no full stats).
+
+    This function reads all alignments for a reference and collects only PMD
+    damage counts. It does NOT apply ANI filtering since we need ALL alignments
+    to fit a robust damage curve.
+
+    Parameters
+    ----------
+    htsfile : samFile*
+        Thread-local opened BAM file handle.
+    header : sam_hdr_t*
+        BAM header pointer.
+    idx : hts_idx_t*
+        Preloaded BAM index.
+    tid : int64_t
+        Reference (target) ID to process.
+    min_read_length_c, max_read_length_c : int
+        Read length filtering thresholds.
+    pmd_acc : PMDStatsAccumulator*
+        Thread-local PMD accumulator to fill with damage counts.
+
+    Returns
+    -------
+    int
+        0 on success, negative error code on failure.
+    """
+    cdef hts_itr_t* iter = sam_itr_queryi(idx, tid, 0, 0x7fffffff)
+    if iter == NULL:
+        return -1
+
+    cdef bam1_t* b = bam_init1()
+    if b == NULL:
+        hts_itr_destroy(iter)
+        return -1
+
+    cdef int ret = 0
+    cdef int32_t read_length
+    cdef ANIStats ani_stats
+    cdef AlignmentScoringConfig scoring_config
+
+    # Initialize scoring config
+    memset(&scoring_config, 0, sizeof(AlignmentScoringConfig))
+    scoring_config.minimum_read_identity = 0.0  # No ANI filtering in Pass 1
+    scoring_config.minimum_read_length = min_read_length_c
+    scoring_config.maximum_read_length = max_read_length_c
+    scoring_config.calculate_pmd = False
+    scoring_config.is_single_stranded = False
+
+    # Initialize lookup tables once
+    initialize_quality_lookup_tables()
+
+    while True:
+        ret = sam_itr_next(htsfile, iter, b)
+        if ret < 0:
+            break
+
+        read_length = b.core.l_qseq
+        if read_length < min_read_length_c or read_length > max_read_length_c:
+            continue
+
+        # Collect PMD stats (no full stats, just damage counts)
+        memset(&ani_stats, 0, sizeof(ANIStats))
+        calculate_md_quality_score_with_stats(
+            b, header, &scoring_config,
+            NULL,       # pmd_result - not needed
+            &ani_stats, # ANI stats output (we don't use this, but function needs it)
+            pmd_acc     # PMD accumulator - THIS is what we want
+        )
+
+    bam_destroy1(b)
+    hts_itr_destroy(iter)
+    return 0
+
+
 cdef int calculate_reference_stats(
     samFile* htsfile,
     sam_hdr_t* header,
@@ -480,7 +623,11 @@ cdef int calculate_reference_stats(
     int trim_min,
     int trim_max,
     bint verbose,
-    void* trusted_reads_hash_int
+    void* trusted_reads_hash_int,
+    PMDStatsAccumulator* pmd_acc,
+    bint collect_damage_stats,
+    PMDCurve* pmd_curve,
+    float pmd_epsilon
 ) nogil:
     """Compute detailed per-reference statistics from BAM alignments.
 
@@ -570,18 +717,25 @@ cdef int calculate_reference_stats(
     # Welford's algorithm variables (combined for efficiency)
     cdef double qaln_mean = 0.0, qaln_M2 = 0.0
     cdef double as_mean = 0.0, as_M2 = 0.0
+    cdef double zp_mean = 0.0, zp_M2 = 0.0  # ZP: EM posterior probability
+    cdef double zs_mean = 0.0, zs_M2 = 0.0  # ZS: alignment score (log-likelihood)
     cdef double nm_mean = 0.0, nm_M2 = 0.0
     cdef double mapq_mean = 0.0, mapq_M2 = 0.0
     cdef double ani_mean = 0.0, ani_M2 = 0.0
+    cdef double ani_corr_mean = 0.0, ani_corr_M2 = 0.0
+    cdef int64_t ani_corr_count = 0
     cdef double dust_mean_acc = 0.0, dust_M2 = 0.0
     cdef double read_gc_mean = 0.0, read_gc_M2 = 0.0
     cdef double ref_gc_mean = 0.0, ref_gc_M2 = 0.0
     cdef int64_t qaln_count = 0, as_count = 0, nm_count = 0, mapq_count = 0, read_gc_count = 0, ref_gc_count = 0
+    cdef int64_t zp_count = 0, zs_count = 0
     
     # Main processing loop
     cdef int ret = 0
     cdef int32_t read_length, read_gc_bases, ref_gc_bases, ref_length, nm_val, mapq_val
     cdef double ani, qaln_len, as_val, read_gc_percent, ref_gc_percent, dust_val
+    cdef double zp_val, zs_val
+    cdef float zp_float, zs_float
     cdef int64_t dust_count = 0
     cdef double delta  # Reused for all Welford calculations
     cdef int64_t start_pos, end_pos, i  # Add missing 'i' variable
@@ -590,7 +744,44 @@ cdef int calculate_reference_stats(
     cdef int ret_val
     cdef uint8_t* nm_tag
     cdef uint8_t* as_tag
-    
+    cdef uint8_t* zp_tag
+    cdef uint8_t* zs_tag
+    cdef uint8_t* da_tag
+    cdef float ani_corr_float
+    cdef double ani_corr
+
+    # Damage stats collection variables (when collect_damage_stats=True or pmd_curve != NULL)
+    cdef ANIStats ani_stats
+    cdef AlignmentScoringConfig scoring_config
+    cdef int64_t ref_total_aligned_length = 0
+    cdef int64_t ref_total_match_count = 0
+    cdef int64_t ref_total_ct_5p_count = 0
+    cdef int64_t ref_total_ga_3p_count = 0
+    cdef int64_t ref_total_c_at_5p_count = 0
+    cdef int64_t ref_total_g_at_3p_count = 0
+    cdef int z  # Loop variable for per-position damage counts
+
+    # Per-reference PMD accumulator for collecting 20-position damage
+    # This is LOCAL to this reference - NOT the global pmd_acc
+    cdef PMDStatsAccumulator ref_pmd_acc
+    memset(&ref_pmd_acc, 0, sizeof(PMDStatsAccumulator))
+
+    # Corrected ANI computation variables (when pmd_curve != NULL)
+    cdef bint use_corrected_ani_filter = (pmd_curve != NULL)
+    cdef ANISnapshot ani_snapshot
+    cdef float corrected_ani_float
+
+    # Initialize scoring config (needed when collect_damage_stats=True OR pmd_curve != NULL)
+    if collect_damage_stats or use_corrected_ani_filter:
+        memset(&scoring_config, 0, sizeof(AlignmentScoringConfig))
+        scoring_config.minimum_read_identity = 0.0  # No pre-filter; we filter by DA below
+        scoring_config.minimum_read_length = min_read_length_c
+        scoring_config.maximum_read_length = max_read_length_c
+        scoring_config.calculate_pmd = False  # We don't need likelihood, just stats
+        scoring_config.is_single_stranded = pmd_curve.is_single_stranded if pmd_curve != NULL else False
+        # Initialize lookup tables for MD parsing
+        initialize_quality_lookup_tables()
+
     while True:
         ret = sam_itr_next(htsfile, iter, b)
         if ret < 0:
@@ -604,16 +795,69 @@ cdef int calculate_reference_stats(
         # Parse NM tag once
         nm_tag = bam_aux_get(b, b"NM")
         nm_val = bam_aux2i(nm_tag) if nm_tag != NULL else -1
-        
-        # Calculate ANI immediately
+
+        # Calculate raw ANI
         if nm_val >= 0 and read_length > 0:
             ani = (1.0 - (<double>nm_val / read_length)) * 100.0
         else:
             ani = 0.0
-            
-        if ani < min_read_ani_c:
-            continue
-        
+
+        # Read DA tag (damage-corrected ANI from reassign output)
+        ani_corr = -1.0
+        da_tag = bam_aux_get(b, b"DA")
+        if da_tag != NULL and da_tag[0] == 102:  # 'f' - float type
+            memcpy(&ani_corr_float, <void*>(da_tag + 1), sizeof(float))
+            ani_corr = <double>ani_corr_float
+
+        # Collect PMD stats and/or compute corrected ANI for filtering
+        if collect_damage_stats or use_corrected_ani_filter:
+            memset(&ani_stats, 0, sizeof(ANIStats))
+            # Call the same function used in reassign to collect PMD stats
+            # Use LOCAL ref_pmd_acc for per-reference damage tracking (not global pmd_acc)
+            calculate_md_quality_score_with_stats(
+                b, header, &scoring_config,
+                NULL,       # pmd_result - not needed
+                &ani_stats, # ANI stats output
+                &ref_pmd_acc if collect_damage_stats else NULL  # Per-reference PMD accumulator
+            )
+
+            # When filtering by corrected ANI (Pass 2 with damage correction)
+            if use_corrected_ani_filter:
+                # Build ANI snapshot from stats
+                ani_snapshot.aligned_length = ani_stats.aligned_length
+                ani_snapshot.match_count = ani_stats.match_count
+                ani_snapshot.ct_5p_count = ani_stats.ct_5p_count
+                ani_snapshot.ga_3p_count = ani_stats.ga_3p_count
+                ani_snapshot.other_mm_count = 0
+                ani_snapshot.flags = 0
+                ani_snapshot.c_at_5p_count = ani_stats.c_at_5p_count
+                ani_snapshot.g_at_3p_count = ani_stats.g_at_3p_count
+
+                # Compute corrected ANI using PMD curve
+                corrected_ani_float = compute_corrected_ani(&ani_snapshot, pmd_curve, pmd_epsilon)
+                ani_corr = <double>corrected_ani_float
+
+                # Filter by corrected ANI
+                if ani_corr < min_read_ani_c:
+                    continue
+            else:
+                # Filter by raw ANI (original behavior)
+                if ani < min_read_ani_c:
+                    continue
+
+            # Accumulate per-reference damage counts (for stats output)
+            if collect_damage_stats:
+                ref_total_aligned_length += ani_stats.aligned_length
+                ref_total_match_count += ani_stats.match_count
+                ref_total_ct_5p_count += ani_stats.ct_5p_count
+                ref_total_ga_3p_count += ani_stats.ga_3p_count
+                ref_total_c_at_5p_count += ani_stats.c_at_5p_count
+                ref_total_g_at_3p_count += ani_stats.g_at_3p_count
+        else:
+            # No damage correction, filter by raw ANI
+            if ani < min_read_ani_c:
+                continue
+
         # Parse AS tag once
         as_val = 0.0
         as_tag = bam_aux_get(b, b"AS")
@@ -624,7 +868,21 @@ cdef int calculate_reference_stats(
             else:  # integer
                 as_val = <double>bam_aux2i(as_tag)
                 as_count += 1
-        
+
+        # Parse ZP tag (EM posterior probability from reassign)
+        zp_val = -1.0
+        zp_tag = bam_aux_get(b, b"ZP")
+        if zp_tag != NULL and zp_tag[0] == 102:  # 'f' - float
+            memcpy(&zp_float, <void*>(zp_tag + 1), sizeof(float))
+            zp_val = <double>zp_float
+
+        # Parse ZS tag (alignment score / log-likelihood from reassign)
+        zs_val = -1e30
+        zs_tag = bam_aux_get(b, b"ZS")
+        if zs_tag != NULL and zs_tag[0] == 102:  # 'f' - float
+            memcpy(&zs_float, <void*>(zs_tag + 1), sizeof(float))
+            zs_val = <double>zs_float
+
         # Get MAPQ once
         mapq_val = 255 if b.core.qual == 255 else b.core.qual
         
@@ -724,13 +982,34 @@ cdef int calculate_reference_stats(
         delta = ani - ani_mean
         ani_mean += delta / n_alns
         ani_M2 += delta * (ani - ani_mean)
-        
+
+        # Corrected ANI (from DA tag if present)
+        if ani_corr >= 0.0:
+            ani_corr_count += 1
+            delta = ani_corr - ani_corr_mean
+            ani_corr_mean += delta / ani_corr_count
+            ani_corr_M2 += delta * (ani_corr - ani_corr_mean)
+
         # Alignment Score (using pre-parsed value)
         if as_count > 0:
             delta = as_val - as_mean
             as_mean += delta / as_count
             as_M2 += delta * (as_val - as_mean)
-        
+
+        # ZP (EM posterior probability)
+        if zp_val >= 0.0:
+            zp_count += 1
+            delta = zp_val - zp_mean
+            zp_mean += delta / zp_count
+            zp_M2 += delta * (zp_val - zp_mean)
+
+        # ZS (alignment score / log-likelihood)
+        if zs_val > -1e29:
+            zs_count += 1
+            delta = zs_val - zs_mean
+            zs_mean += delta / zs_count
+            zs_M2 += delta * (zs_val - zs_mean)
+
         # Edit distance (using pre-parsed value)
         if nm_val >= 0:
             nm_count += 1
@@ -794,11 +1073,59 @@ cdef int calculate_reference_stats(
         stats.ani_std = sqrt(ani_M2 / (n_alns - 1))
     else:
         stats.ani_std = 0.0
+    # Corrected ANI (from DA tag, fallback to raw ANI if not present)
+    # Note: If collect_damage_stats=True, corrected ANI will be computed later
+    # after PMD curve fitting using stored damage counts
+    if ani_corr_count > 0:
+        stats.ani_corrected_mean = ani_corr_mean
+        if ani_corr_count > 1:
+            stats.ani_corrected_std = sqrt(ani_corr_M2 / (ani_corr_count - 1))
+        else:
+            stats.ani_corrected_std = 0.0
+    else:
+        # No DA tags found - fall back to raw ANI (will be corrected later if damage stats collected)
+        stats.ani_corrected_mean = stats.ani_mean
+        stats.ani_corrected_std = stats.ani_std
+
+    # Store per-reference damage counts for later corrected ANI computation
+    if collect_damage_stats:
+        stats.total_aligned_length = ref_total_aligned_length
+        stats.total_match_count = ref_total_match_count
+        stats.total_ct_5p_count = ref_total_ct_5p_count
+        stats.total_ga_3p_count = ref_total_ga_3p_count
+        stats.total_c_at_5p_count = ref_total_c_at_5p_count
+        stats.total_g_at_3p_count = ref_total_g_at_3p_count
+
+        # Copy per-position damage counts from PER-REFERENCE PMD accumulator to RefStats
+        # (combines CpG and non-CpG contexts for the centralized damage model)
+        # NOTE: Uses ref_pmd_acc (local) not pmd_acc (global) for accurate per-reference damage
+        for z in range(20):
+            stats.n_5p[z] = <double>(ref_pmd_acc.n_5p_noncpg[z] + ref_pmd_acc.n_5p_cpg[z])
+            stats.k_5p[z] = <double>(ref_pmd_acc.k_5p_noncpg[z] + ref_pmd_acc.k_5p_cpg[z])
+            stats.n_3p[z] = <double>(ref_pmd_acc.n_3p_noncpg[z] + ref_pmd_acc.n_3p_cpg[z])
+            stats.k_3p[z] = <double>(ref_pmd_acc.k_3p_noncpg[z] + ref_pmd_acc.k_3p_cpg[z])
+
     stats.aln_score_mean = as_mean
     if as_count > 1:
         stats.aln_score_std = sqrt(as_M2 / (as_count - 1))
     else:
         stats.aln_score_std = 0.0
+
+    # ZP/ZS stats (from reassign output)
+    stats.zp_mean = zp_mean
+    stats.zp_count = zp_count
+    if zp_count > 1:
+        stats.zp_std = sqrt(zp_M2 / (zp_count - 1))
+    else:
+        stats.zp_std = 0.0
+
+    stats.zs_mean = zs_mean
+    stats.zs_count = zs_count
+    if zs_count > 1:
+        stats.zs_std = sqrt(zs_M2 / (zs_count - 1))
+    else:
+        stats.zs_std = 0.0
+
     stats.edit_dist_mean = nm_mean
     if nm_count > 1:
         stats.edit_dist_std = sqrt(nm_M2 / (nm_count - 1))
@@ -920,7 +1247,9 @@ cdef int process_batches(
     const char* output_c,
     const char* filtered_output_c,
     const char* filtered_bam_c,
-    GenericFilters* gfilters
+    GenericFilters* gfilters,
+    bint collect_damage_stats,
+    RefStats** out_ref_stats
 ) nogil:
     
     # Declare all variables at the beginning
@@ -949,7 +1278,12 @@ cdef int process_batches(
     cdef int64_t top_k = 0
     cdef int64_t pair_idx
     cdef RefStats* rstat = NULL
-    
+
+    # PMD damage correction variables
+    cdef PMDGlobalContext* pmd_context = NULL
+    cdef PMDCurveParams pmd_params
+    cdef int64_t tid_idx, tid
+
     # Allocate global arrays
     global_ref_stats = <RefStats*>calloc(n_refs, sizeof(RefStats))
     ref_unique_reads = <RefUniqueReads*>calloc(n_refs, sizeof(RefUniqueReads))
@@ -999,43 +1333,135 @@ cdef int process_batches(
             free(global_ref_stats)
             return -1
     
+    # Create PMD context if damage correction is enabled
+    if collect_damage_stats:
+        pmd_context = create_pmd_context(c_num_threads, False, False)
+        if pmd_context == NULL:
+            for batch_id in range(n_batches):
+                if batches[batch_id] != NULL:
+                    free(batches[batch_id])
+            free(batches)
+            for i in range(n_refs):
+                if ref_unique_reads[i].unique_reads_map != NULL:
+                    kh_destroy_seqid_map(ref_unique_reads[i].unique_reads_map)
+            free(ref_unique_reads)
+            free(global_ref_stats)
+            return -1
+
     # Process batches with thread-specific file handles
     # Start wall-clock timer for batch processing (this measures real elapsed time
     # including parallel overlap). We will use this for the user-facing summary so
     # the reported time matches how long the processing actually took.
     batches_wall_start = bf_monotonic_seconds()
 
-    if c_num_threads == 1:
-        for batch_id in range(n_batches):
-            ret = process_reference_batch(
-                thread_files[0], header, idx, tids_to_process, tid_align_counts, batches[batch_id],
-                global_ref_stats, ref_unique_reads,
-                min_read_ani_c, min_read_length_c, max_read_length_c,
-                scale, trim_ends, trim_min, trim_max,
-                verbose,
-                NULL  # No trusted reads filter for regular stats
-            )
-            if ret != 0:
-                break
-    else:
-        # Parallelize batch processing using prange. Each iteration works on a disjoint
-        # set of references (batches are non-overlapping), and each thread uses a
-        # thread-local file handle indexed by threadid(), so this is safe nogil.
-        from cython.parallel import prange, threadid
+    # Local variable for PMD accumulator pointer
+    cdef PMDStatsAccumulator* thread_pmd_acc = NULL
 
-        for batch_id in prange(n_batches, schedule='guided', num_threads=c_num_threads, nogil=True):
-            file_idx = threadid()
-            # We intentionally ignore the return value here because process_reference_batch
-            # will set batches[batch_id].error_code on failure; we will check them after
-            # the parallel region (can't break from inside prange).
-            process_reference_batch(
-                thread_files[file_idx], header, idx, tids_to_process, tid_align_counts, batches[batch_id],
-                global_ref_stats, ref_unique_reads,
-                min_read_ani_c, min_read_length_c, max_read_length_c,
-                scale, trim_ends, trim_min, trim_max,
-                verbose,
-                NULL  # No trusted reads filter for regular stats
-            )
+    # Two-pass workflow for damage correction:
+    # Pass 1: Collect PMD stats from ALL alignments (no ANI filtering) to fit damage curve
+    # Pass 2: Re-read alignments, filter by corrected ANI, collect full stats
+    cdef PMDCurve* fitted_pmd_curve = NULL
+    cdef float pmd_epsilon_val = 0.01
+
+    if collect_damage_stats and pmd_context != NULL:
+        # ===== PASS 1: PMD-only collection (no ANI filtering) =====
+        if verbose:
+            bf_nogil_logf_notime(STATS_TAG, "[Two-pass] Pass 1: Collecting PMD damage statistics...\n")
+
+        if c_num_threads == 1:
+            thread_pmd_acc = &pmd_context.thread_contexts[0].stats
+            for batch_id in range(n_batches):
+                for tid_idx in range(batches[batch_id].tid_start, batches[batch_id].tid_end):
+                    tid = tids_to_process[tid_idx]
+                    ret = collect_pmd_stats_for_reference(
+                        thread_files[0], header, idx, tid,
+                        min_read_length_c, max_read_length_c,
+                        thread_pmd_acc
+                    )
+                    if ret != 0:
+                        break
+                if ret != 0:
+                    break
+        else:
+            from cython.parallel import prange, threadid
+            for batch_id in prange(n_batches, schedule='guided', num_threads=c_num_threads, nogil=True):
+                file_idx = threadid()
+                thread_pmd_acc = &pmd_context.thread_contexts[file_idx].stats
+                for tid_idx in range(batches[batch_id].tid_start, batches[batch_id].tid_end):
+                    tid = tids_to_process[tid_idx]
+                    collect_pmd_stats_for_reference(
+                        thread_files[file_idx], header, idx, tid,
+                        min_read_length_c, max_read_length_c,
+                        thread_pmd_acc
+                    )
+
+        # Merge PMD stats and fit curve
+        if ret == 0:
+            merge_pmd_stats(pmd_context)
+
+            # Set up fitting parameters
+            memset(&pmd_params, 0, sizeof(PMDCurveParams))
+            pmd_params.P_prior_mean = 0.3
+            pmd_params.P_prior_sd = 0.15
+            pmd_params.lambda_prior_mean = 0.35
+            pmd_params.lambda_prior_sd = 0.2
+            pmd_params.C_prior_mean = 0.01
+            pmd_params.C_prior_sd = 0.005
+            pmd_params.omega_alpha = 0.5
+            pmd_params.omega_beta = 5.0
+            pmd_params.epsilon = 0.01
+            pmd_epsilon_val = pmd_params.epsilon
+
+            fit_pmd_curve(pmd_context, &pmd_params)
+            finalize_pmd_model(pmd_context)
+            fitted_pmd_curve = &pmd_context.model.curve
+
+            if verbose:
+                bf_nogil_logf_notime(STATS_TAG, "[Two-pass] PMD curve fitted: omega=%.4f, lambda=%.4f\n",
+                                     fitted_pmd_curve.omega, fitted_pmd_curve.lambda_decay)
+                bf_nogil_logf_notime(STATS_TAG, "[Two-pass] Pass 2: Collecting stats with DA filtering...\n")
+
+    # ===== PASS 2 (or single pass if no damage correction): Full stats collection =====
+    if ret == 0:
+        if c_num_threads == 1:
+            if collect_damage_stats and pmd_context != NULL:
+                thread_pmd_acc = &pmd_context.thread_contexts[0].stats
+            for batch_id in range(n_batches):
+                ret = process_reference_batch(
+                    thread_files[0], header, idx, tids_to_process, tid_align_counts, batches[batch_id],
+                    global_ref_stats, ref_unique_reads,
+                    min_read_ani_c, min_read_length_c, max_read_length_c,
+                    scale, trim_ends, trim_min, trim_max,
+                    verbose,
+                    NULL,  # No trusted reads filter for regular stats
+                    thread_pmd_acc,
+                    collect_damage_stats,
+                    fitted_pmd_curve,
+                    pmd_epsilon_val
+                )
+                if ret != 0:
+                    break
+        else:
+            from cython.parallel import prange, threadid
+
+            for batch_id in prange(n_batches, schedule='guided', num_threads=c_num_threads, nogil=True):
+                file_idx = threadid()
+                if collect_damage_stats and pmd_context != NULL:
+                    thread_pmd_acc = &pmd_context.thread_contexts[file_idx].stats
+                else:
+                    thread_pmd_acc = NULL
+                process_reference_batch(
+                    thread_files[file_idx], header, idx, tids_to_process, tid_align_counts, batches[batch_id],
+                    global_ref_stats, ref_unique_reads,
+                    min_read_ani_c, min_read_length_c, max_read_length_c,
+                    scale, trim_ends, trim_min, trim_max,
+                    verbose,
+                    NULL,  # No trusted reads filter for regular stats
+                    thread_pmd_acc,
+                    collect_damage_stats,
+                    fitted_pmd_curve,
+                    pmd_epsilon_val
+                )
 
         # After the parallel region, inspect batch error codes and report first error if any.
         for batch_id in range(n_batches):
@@ -1068,7 +1494,45 @@ cdef int process_batches(
                                   batches_wall_seconds, counted_batches, batches_wall_seconds / counted_batches)
             # Produce condensed summary: overall (already printed) plus top-N slowest references
             # NOTE: per-ref histogram timing/debugging has been removed; skip top-slowest-by-histogram reporting
-    
+
+    # PMD damage correction: log curve parameters
+    # Note: Per-alignment corrected ANI values are already accumulated during Pass 2
+    # via Welford's algorithm in calculate_reference_stats (ani_corr_mean/ani_corr_M2)
+    if ret == 0 and collect_damage_stats and fitted_pmd_curve != NULL:
+        if verbose:
+            bf_nogil_logf_notime(STATS_TAG, "PMD omega (damage presence): %.4f\n",
+                                 fitted_pmd_curve.omega)
+            bf_nogil_logf_notime(STATS_TAG, "PMD decay parameter: %.4f\n",
+                                 fitted_pmd_curve.lambda_decay)
+            bf_nogil_logf_notime(STATS_TAG, "Alignments analyzed: %lld\n",
+                                 <long long>pmd_context.model.stats.total_alignments)
+
+    # Compute authenticity p-values across all references
+    if ret == 0 and global_ref_stats != NULL:
+        compute_authenticity_pvalues_array(global_ref_stats, n_refs, 3)
+
+    # Store RefStats in output parameter if requested (caller will handle cleanup)
+    if out_ref_stats != NULL and global_ref_stats != NULL:
+        out_ref_stats[0] = global_ref_stats
+        global_ref_stats = NULL  # Transfer ownership to caller
+        # Still free other resources
+        if ref_unique_reads != NULL:
+            for i in range(n_refs):
+                if ref_unique_reads[i].unique_reads_map != NULL:
+                    kh_destroy_seqid_map(ref_unique_reads[i].unique_reads_map)
+            free(ref_unique_reads)
+            ref_unique_reads = NULL
+        if batches != NULL:
+            for batch_id in range(n_batches):
+                if batches[batch_id] != NULL:
+                    free(batches[batch_id])
+            free(batches)
+            batches = NULL
+        if pmd_context != NULL:
+            destroy_pmd_context(pmd_context)
+            pmd_context = NULL
+        return ret
+
     # Write TSV output files
     if ret == 0:
         if (output_c != NULL) or (filtered_output_c != NULL) or (filtered_bam_c != NULL):
@@ -1130,7 +1594,8 @@ cdef int process_batches(
                     bf_nogil_logf_notime(STATS_TAG, "Writing filtered BAM to %s\n", filtered_bam_c)
                     ret = write_filtered_bam_streaming(
                         thread_files[0], idx, bam_file_c, filtered_bam_c, header, ref_filter, c_num_threads,
-                        min_read_ani_c, min_read_length_c, max_read_length_c
+                        min_read_ani_c, min_read_length_c, max_read_length_c,
+                        fitted_pmd_curve, pmd_epsilon_val
                     )
 
                     if ret == 0:
@@ -1164,8 +1629,14 @@ cdef int process_batches(
     if global_ref_stats != NULL:
         free(global_ref_stats)
         global_ref_stats = NULL
-    
+
+    if pmd_context != NULL:
+        destroy_pmd_context(pmd_context)
+        pmd_context = NULL
+
     return ret
+
+
 cdef int process_reference_batch(
     samFile* htsfile,
     sam_hdr_t* header,
@@ -1183,7 +1654,11 @@ cdef int process_reference_batch(
     int trim_min,
     int trim_max,
     bint verbose,
-    void* trusted_reads_hash_int
+    void* trusted_reads_hash_int,
+    PMDStatsAccumulator* pmd_acc,
+    bint collect_damage_stats,
+    PMDCurve* pmd_curve,
+    float pmd_epsilon
 ) nogil:
     """Process a single batch of references."""
     # htsfile is now passed in, already opened for this thread
@@ -1204,7 +1679,11 @@ cdef int process_reference_batch(
             min_read_ani_c, min_read_length_c, max_read_length_c,
             scale, trim_ends, trim_min, trim_max,
             verbose,
-            trusted_reads_hash_int
+            trusted_reads_hash_int,
+            pmd_acc,
+            collect_damage_stats,
+            pmd_curve,
+            pmd_epsilon
         )
 
         # Free unique_reads_map for this reference immediately after processing
@@ -1224,6 +1703,129 @@ cdef int process_reference_batch(
     batch.n_refs_processed = refs_processed
 
     return ret
+
+
+cdef void compute_authenticity_pvalues_array(RefStats* ref_stats, int n_refs, int min_reads) noexcept nogil:
+    """Compute authenticity p-values across all references.
+
+    Uses the score = norm_spatial_entropy - norm_gini metric.
+    P-value is computed by fitting a normal distribution to the upper 50%
+    of scores (assumed to be authentic) and computing P(score >= x).
+
+    Interpretation: LOW pvalue = likely authentic (score significantly high)
+                    HIGH pvalue = not significantly authentic (could be contamination)
+    """
+    cdef int i
+    cdef int n_valid = 0
+    cdef double score
+    cdef double* scores = NULL
+    cdef double sum_val = 0.0
+    cdef double sum_sq = 0.0
+    cdef double median_score, mu_real, std_real
+    cdef int upper_count = 0
+    cdef double upper_sum = 0.0
+    cdef double upper_sum_sq = 0.0
+    cdef double z_score
+
+    # Count valid references
+    for i in range(n_refs):
+        if ref_stats[i].n_reads >= min_reads and ref_stats[i].norm_spatial_entropy > 0:
+            n_valid += 1
+
+    if n_valid < 10:
+        return
+
+    # Allocate and collect scores
+    scores = <double*>malloc(n_valid * sizeof(double))
+    if scores == NULL:
+        return
+
+    n_valid = 0
+    for i in range(n_refs):
+        if ref_stats[i].n_reads >= min_reads and ref_stats[i].norm_spatial_entropy > 0:
+            scores[n_valid] = ref_stats[i].authenticity_score
+            n_valid += 1
+
+    # Sort scores using qsort (O(n log n) vs O(n²) bubble sort)
+    qsort(scores, n_valid, sizeof(double), compare_double)
+
+    median_score = scores[n_valid / 2]
+
+    # Compute mean and std of upper half
+    for i in range(n_valid):
+        if scores[i] >= median_score:
+            upper_sum += scores[i]
+            upper_sum_sq += scores[i] * scores[i]
+            upper_count += 1
+
+    free(scores)
+
+    if upper_count < 5:
+        return
+
+    mu_real = upper_sum / upper_count
+    std_real = sqrt((upper_sum_sq / upper_count) - (mu_real * mu_real))
+
+    if std_real < 1e-6:
+        std_real = 0.1
+
+    # Compute p-value for all references using standard normal CDF approximation
+    for i in range(n_refs):
+        if ref_stats[i].norm_spatial_entropy <= 0:
+            ref_stats[i].authenticity_pvalue = 1.0
+            continue
+
+        score = ref_stats[i].authenticity_score
+        z_score = (score - mu_real) / std_real
+
+        # P(score >= x) = 1 - CDF(z) gives low pvalue for high scores (authentic)
+        ref_stats[i].authenticity_pvalue = 1.0 - _std_normal_cdf(z_score)
+
+
+cdef double _std_normal_cdf(double x) noexcept nogil:
+    """Approximate standard normal CDF using Abramowitz and Stegun formula 26.2.17."""
+    cdef double a1 = 0.254829592
+    cdef double a2 = -0.284496736
+    cdef double a3 = 1.421413741
+    cdef double a4 = -1.453152027
+    cdef double a5 = 1.061405429
+    cdef double p = 0.3275911
+    cdef double sign = 1.0
+    cdef double t, y
+
+    if x < 0:
+        sign = -1.0
+        x = -x
+
+    t = 1.0 / (1.0 + p * x)
+    y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * exp(-x * x / 2.0)
+
+    return 0.5 * (1.0 + sign * y)
+
+
+# Helper to convert RefStats to Python dict for return_stats mode
+cdef dict _refstats_to_dict(RefStats* stats, const char* ref_name):
+    """Convert a RefStats struct to a Python dictionary."""
+    cdef dict result = {
+        'reference': ref_name.decode('utf-8') if ref_name else '',
+        'n_reads': stats.n_reads,
+        'n_alns': stats.n_alns,
+        'breadth': stats.breadth,
+        'mean_coverage': stats.mean_coverage,
+        'norm_spatial_entropy': stats.norm_spatial_entropy,
+        'norm_gini': stats.norm_gini,
+        'weighted_contiguity_breadth': stats.weighted_contiguity_breadth,
+        'tax_abund_tad': stats.tax_abund_tad,
+        'authenticity_score': stats.authenticity_score,
+        'authenticity_pvalue': stats.authenticity_pvalue,
+        'ref_length': stats.ref_length,
+        # Damage counts for p_ancient calculation
+        'n_5p': [stats.n_5p[i] for i in range(20)],
+        'k_5p': [stats.k_5p[i] for i in range(20)],
+        'n_3p': [stats.n_3p[i] for i in range(20)],
+        'k_3p': [stats.k_3p[i] for i in range(20)],
+    }
+    return result
 
 
 # Main Python interface function
@@ -1249,6 +1851,8 @@ def compute_bam_stats(
     reference_lengths_tsv=None,
     generic_filters=None,  # New: list of (column_index, min, max) tuples
     verbosity_level=None,
+    damage_correction=False,
+    return_stats=False,
 ):
     """
     Compute comprehensive statistics for alignments in a BAM file.
@@ -1293,10 +1897,14 @@ def compute_bam_stats(
         Filter conditions for the filtered output file and filtered BAM
     verbosity_level : int, optional
         Explicit verbosity level propagated from the Python logging facade
-    
+    return_stats : bool
+        If True, return stats as list of dicts instead of writing to files.
+        When True, output/filtered_output parameters are ignored.
+
     Returns:
     --------
-    int : Return code (0 for success, negative for errors)
+    int or list : Return code (0 for success) when return_stats=False,
+                  or list of dicts with per-reference stats when return_stats=True.
     """
     if verbosity_level is not None:
         bf_set_verbosity(int(verbosity_level))
@@ -1305,6 +1913,11 @@ def compute_bam_stats(
     cdef double stage_intake_start = 0.0
     cdef double stage_processing_start = 0.0
     cdef double stage_cleanup_start = 0.0
+
+    # For return_stats mode
+    cdef RefStats* out_ref_stats_ptr = NULL
+    cdef int n_refs_out = 0
+    cdef const char* ref_name_ptr = NULL
 
     bam_display = _format_path(bam_file)
     stats_display = _format_path(output)
@@ -1479,8 +2092,8 @@ def compute_bam_stats(
                     free_tsv_reference_map(tsv_map)
             return -1
 
-    # Validate that at least one output is specified
-    if output_c == NULL and filtered_output_c == NULL and filtered_bam_c == NULL:
+    # Validate that at least one output is specified (unless return_stats mode)
+    if not return_stats and output_c == NULL and filtered_output_c == NULL and filtered_bam_c == NULL:
         bf_nogil_logf_notime(STATS_TAG, "At least one output target (output, filtered_output, filtered_bam) must be specified\n")
         if tsv_map:
             with nogil:
@@ -1505,8 +2118,6 @@ def compute_bam_stats(
     
     # Parameter validation and conversion
     cdef int c_num_threads = max(1, int(num_threads))
-    if verbose:
-        c_num_threads = 1  # Force single-threaded mode for timing
     cdef int c_min_read_length = max(0, int(min_read_length))
     cdef int c_max_read_length = min(0x7fffffff, max(c_min_read_length, int(max_read_length)))
     cdef double c_min_read_ani = max(0.0, min(100.0, float(min_read_ani)))
@@ -1885,6 +2496,9 @@ def compute_bam_stats(
     bf_logging.summary("Processing %d batches with %d threads", int(n_batches), c_num_threads)
     stage_processing_start = bf_monotonic_seconds()
 
+    # Store n_refs before processing for return_stats mode
+    n_refs_out = header.n_targets
+
     # Time the main processing step
     clock_gettime(CLOCK_MONOTONIC, &ts_proc_start)
     bf_nogil_logf_notime(STATS_TAG, "Starting batch processing\n")
@@ -1896,14 +2510,78 @@ def compute_bam_stats(
         c_min_read_ani, c_min_read_length, c_max_read_length,
         c_scale, c_trim_ends, c_trim_min, c_trim_max,
         verbose, show_progress,
-        output_c, filtered_output_c, filtered_bam_c,  # Pass filtered_bam_c
-        gfilters
+        output_c if not return_stats else NULL,
+        filtered_output_c if not return_stats else NULL,
+        filtered_bam_c if not return_stats else NULL,
+        gfilters if not return_stats else NULL,
+        damage_correction,
+        &out_ref_stats_ptr if return_stats else NULL
     )
     clock_gettime(CLOCK_MONOTONIC, &ts_proc_end)
     proc_sec = <double>(ts_proc_end.tv_sec - ts_proc_start.tv_sec) + <double>(ts_proc_end.tv_nsec - ts_proc_start.tv_nsec) / 1e9
 
     bf_logging.summary("Batch processing wall time: %.2fs", proc_sec)
     _stage_duration("Statistics calculation", stage_processing_start)
+
+    # Handle return_stats mode - return before cleanup destroys header
+    if return_stats and ret == 0 and out_ref_stats_ptr != NULL:
+        # Build reference names list while header is still valid
+        ref_names = []
+        for i in range(n_refs_out):
+            ref_name_ptr = sam_hdr_tid2name(header, i)
+            ref_names.append(ref_name_ptr.decode('utf-8') if ref_name_ptr else '')
+
+        # Check if capsule mode requested
+        is_capsule_mode = False
+        if isinstance(return_stats, str):
+            is_capsule_mode = return_stats == 'capsule'
+        elif isinstance(return_stats, int):
+            is_capsule_mode = return_stats == 2
+
+        if is_capsule_mode:
+            # Return PyCapsule - caller owns the RefStats memory
+            capsule = PyCapsule_New(out_ref_stats_ptr, "RefStats", NULL)
+            # Cleanup resources (but not RefStats - caller owns it)
+            if tsv_map:
+                with nogil:
+                    free_tsv_reference_map(tsv_map)
+            free(batch_starts)
+            free(batch_ends)
+            free(bam_ref_lengths_array)
+            free(ref_lengths_array)
+            free(tids_to_process)
+            free(tid_align_counts)
+            hts_idx_destroy(idx)
+            sam_hdr_destroy(header)
+            for thread_idx in range(c_num_threads):
+                if thread_files[thread_idx] != NULL:
+                    hts_close(thread_files[thread_idx])
+            free(thread_files)
+            return {'capsule': capsule, 'ref_names': ref_names, 'n_refs': n_refs_out}
+
+        # Dict mode - convert RefStats to Python dicts
+        stats_list = []
+        for i in range(n_refs_out):
+            ref_name_ptr = sam_hdr_tid2name(header, i)
+            stats_list.append(_refstats_to_dict(&out_ref_stats_ptr[i], ref_name_ptr))
+        # Free RefStats and cleanup resources
+        free(out_ref_stats_ptr)
+        if tsv_map:
+            with nogil:
+                free_tsv_reference_map(tsv_map)
+        free(batch_starts)
+        free(batch_ends)
+        free(bam_ref_lengths_array)
+        free(ref_lengths_array)
+        free(tids_to_process)
+        free(tid_align_counts)
+        hts_idx_destroy(idx)
+        sam_hdr_destroy(header)
+        for thread_idx in range(c_num_threads):
+            if thread_files[thread_idx] != NULL:
+                hts_close(thread_files[thread_idx])
+        free(thread_files)
+        return stats_list
 
     _announce_stage("Cleanup", "Releasing temporary buffers and closing file handles")
     stage_cleanup_start = bf_monotonic_seconds()

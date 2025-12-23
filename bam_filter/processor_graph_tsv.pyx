@@ -370,8 +370,19 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
     cdef MultPairExtended* sorted_refs = NULL
     cdef uint32_t valid_count = 0
 
-    # Hierarchical EM: ancient probability per reference
-    cdef double gamma_ancient = -1.0
+    # Bayesian damage model outputs per reference
+    cdef double gamma_ancient = -1.0      # P(ancient | data)
+    cdef double damage_amplitude = -1.0   # A: damage amplitude (like metaDMG A_b)
+    cdef double damage_baseline = -1.0    # b: baseline divergence
+    cdef double damage_log_bf = 0.0       # log Bayes factor (fit quality)
+
+    # Coverage statistics per reference
+    cdef double cov_breadth = 0.0
+    cdef int64_t cov_bases_covered = 0
+    cdef int64_t cov_n_intervals = 0
+    cdef double cov_norm_spatial_entropy = 0.0
+    cdef double cov_norm_gini = 0.0
+    cdef double cov_wcb = 0.0  # weighted_contiguity_breadth
 
     cdef uint32_t UINT32_MAX = <uint32_t>0xFFFFFFFF
 
@@ -385,9 +396,9 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
 
         # Write header - conditional on taxonomy availability
         if taxonomy_db != NULL:
-            gzprintf(gzfp, b"reference_name\treference_length_bp\tcomponent_id\tnode_degree\tcommunity_id\tcommunity_cc\tcommunity_individual_cc\tbetweenness_centrality\tstructural_role\tnum_neighbor_communities\tcommunity_coherent\tfilter_decision\ttaxonomy_outlier_score\ttaxid\ttaxid_rank_id\ttaxid_depth\ttaxonomy_flag\ttax_neighbors_total\ttax_mismatch_domain\ttax_mismatch_kingdom\ttax_mismatch_phylum\ttax_mismatch_class\ttax_mismatch_order\ttax_mismatch_family\ttax_match_genus_below\tsuperkingdom\tclade\tkingdom\tphylum\tclass\torder\tfamily\tgenus\tspecies\tsubspecies\ttotal_reads\tunique_reads\trepeat_reads\tshared_reads\ttotal_alignments\tmultimap_percentage\tconnected_neighbors\tavg_co_mappings_per_read\tmax_co_mappings_observed\tneighbor_multimap_rate\talignment_score_mean\talignment_score_std\talignment_score_min\talignment_score_max\tpmd_available\tpmd_score_mean\tpmd_score_std\tpmd_score_min\tpmd_score_max\tpmd_nonzero_percentage\tmisannotation_flag\tmisannotation_confidence\tcross_domain_edges_before\tedges_after_removal\tcross_domain_fraction\tneighbor_tax_entropy\ttax_ambiguity_flag\tgamma_ancient\n")
+            gzprintf(gzfp, b"reference_name\treference_length_bp\tcomponent_id\tnode_degree\tcommunity_id\tcommunity_cc\tcommunity_individual_cc\tbetweenness_centrality\tstructural_role\tnum_neighbor_communities\tcommunity_coherent\tfilter_decision\ttaxonomy_outlier_score\ttaxid\ttaxid_rank_id\ttaxid_depth\ttaxonomy_flag\ttax_neighbors_total\ttax_mismatch_domain\ttax_mismatch_kingdom\ttax_mismatch_phylum\ttax_mismatch_class\ttax_mismatch_order\ttax_mismatch_family\ttax_match_genus_below\tsuperkingdom\tclade\tkingdom\tphylum\tclass\torder\tfamily\tgenus\tspecies\tsubspecies\ttotal_reads\tunique_reads\trepeat_reads\tshared_reads\ttotal_alignments\tmultimap_percentage\tconnected_neighbors\tavg_co_mappings_per_read\tmax_co_mappings_observed\tneighbor_multimap_rate\talignment_score_mean\talignment_score_std\talignment_score_min\talignment_score_max\tpmd_available\tpmd_score_mean\tpmd_score_std\tpmd_score_min\tpmd_score_max\tpmd_nonzero_percentage\tmisannotation_flag\tmisannotation_confidence\tcross_domain_edges_before\tedges_after_removal\tcross_domain_fraction\tneighbor_tax_entropy\ttax_ambiguity_flag\tgamma_ancient\tdamage_amplitude\tdamage_baseline\tdamage_log_bf\tbreadth\tbases_covered\tn_intervals\tnorm_spatial_entropy\tnorm_gini\tweighted_contiguity_breadth\n")
         else:
-            gzprintf(gzfp, b"reference_name\treference_length_bp\tcomponent_id\tnode_degree\tcommunity_id\tcommunity_cc\tcommunity_individual_cc\tbetweenness_centrality\tstructural_role\tnum_neighbor_communities\tcommunity_coherent\tfilter_decision\ttotal_reads\tunique_reads\trepeat_reads\tshared_reads\ttotal_alignments\tmultimap_percentage\tconnected_neighbors\tavg_co_mappings_per_read\tmax_co_mappings_observed\tneighbor_multimap_rate\talignment_score_mean\talignment_score_std\talignment_score_min\talignment_score_max\tpmd_available\tpmd_score_mean\tpmd_score_std\tpmd_score_min\tpmd_score_max\tpmd_nonzero_percentage\tmisannotation_flag\tmisannotation_confidence\tcross_domain_edges_before\tedges_after_removal\tcross_domain_fraction\tneighbor_tax_entropy\ttax_ambiguity_flag\tgamma_ancient\n")
+            gzprintf(gzfp, b"reference_name\treference_length_bp\tcomponent_id\tnode_degree\tcommunity_id\tcommunity_cc\tcommunity_individual_cc\tbetweenness_centrality\tstructural_role\tnum_neighbor_communities\tcommunity_coherent\tfilter_decision\ttotal_reads\tunique_reads\trepeat_reads\tshared_reads\ttotal_alignments\tmultimap_percentage\tconnected_neighbors\tavg_co_mappings_per_read\tmax_co_mappings_observed\tneighbor_multimap_rate\talignment_score_mean\talignment_score_std\talignment_score_min\talignment_score_max\tpmd_available\tpmd_score_mean\tpmd_score_std\tpmd_score_min\tpmd_score_max\tpmd_nonzero_percentage\tmisannotation_flag\tmisannotation_confidence\tcross_domain_edges_before\tedges_after_removal\tcross_domain_fraction\tneighbor_tax_entropy\ttax_ambiguity_flag\tgamma_ancient\tdamage_amplitude\tdamage_baseline\tdamage_log_bf\tbreadth\tbases_covered\tn_intervals\tnorm_spatial_entropy\tnorm_gini\tweighted_contiguity_breadth\n")
     else:
         f = fopen(tsv_path, b"w")
         if not f:
@@ -395,9 +406,9 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
 
         # Write header - conditional on taxonomy availability
         if taxonomy_db != NULL:
-            fprintf(f, b"reference_name\treference_length_bp\tcomponent_id\tnode_degree\tcommunity_id\tcommunity_cc\tcommunity_individual_cc\tbetweenness_centrality\tstructural_role\tnum_neighbor_communities\tcommunity_coherent\tfilter_decision\ttaxonomy_outlier_score\ttaxid\ttaxid_rank_id\ttaxid_depth\ttaxonomy_flag\ttax_neighbors_total\ttax_mismatch_domain\ttax_mismatch_kingdom\ttax_mismatch_phylum\ttax_mismatch_class\ttax_mismatch_order\ttax_mismatch_family\ttax_match_genus_below\tsuperkingdom\tclade\tkingdom\tphylum\tclass\torder\tfamily\tgenus\tspecies\tsubspecies\ttotal_reads\tunique_reads\trepeat_reads\tshared_reads\ttotal_alignments\tmultimap_percentage\tconnected_neighbors\tavg_co_mappings_per_read\tmax_co_mappings_observed\tneighbor_multimap_rate\talignment_score_mean\talignment_score_std\talignment_score_min\talignment_score_max\tpmd_available\tpmd_score_mean\tpmd_score_std\tpmd_score_min\tpmd_score_max\tpmd_nonzero_percentage\tmisannotation_flag\tmisannotation_confidence\tcross_domain_edges_before\tedges_after_removal\tcross_domain_fraction\tneighbor_tax_entropy\ttax_ambiguity_flag\tgamma_ancient\n")
+            fprintf(f, b"reference_name\treference_length_bp\tcomponent_id\tnode_degree\tcommunity_id\tcommunity_cc\tcommunity_individual_cc\tbetweenness_centrality\tstructural_role\tnum_neighbor_communities\tcommunity_coherent\tfilter_decision\ttaxonomy_outlier_score\ttaxid\ttaxid_rank_id\ttaxid_depth\ttaxonomy_flag\ttax_neighbors_total\ttax_mismatch_domain\ttax_mismatch_kingdom\ttax_mismatch_phylum\ttax_mismatch_class\ttax_mismatch_order\ttax_mismatch_family\ttax_match_genus_below\tsuperkingdom\tclade\tkingdom\tphylum\tclass\torder\tfamily\tgenus\tspecies\tsubspecies\ttotal_reads\tunique_reads\trepeat_reads\tshared_reads\ttotal_alignments\tmultimap_percentage\tconnected_neighbors\tavg_co_mappings_per_read\tmax_co_mappings_observed\tneighbor_multimap_rate\talignment_score_mean\talignment_score_std\talignment_score_min\talignment_score_max\tpmd_available\tpmd_score_mean\tpmd_score_std\tpmd_score_min\tpmd_score_max\tpmd_nonzero_percentage\tmisannotation_flag\tmisannotation_confidence\tcross_domain_edges_before\tedges_after_removal\tcross_domain_fraction\tneighbor_tax_entropy\ttax_ambiguity_flag\tgamma_ancient\tdamage_amplitude\tdamage_baseline\tdamage_log_bf\tbreadth\tbases_covered\tn_intervals\tnorm_spatial_entropy\tnorm_gini\tweighted_contiguity_breadth\n")
         else:
-            fprintf(f, b"reference_name\treference_length_bp\tcomponent_id\tnode_degree\tcommunity_id\tcommunity_cc\tcommunity_individual_cc\tbetweenness_centrality\tstructural_role\tnum_neighbor_communities\tcommunity_coherent\tfilter_decision\ttotal_reads\tunique_reads\trepeat_reads\tshared_reads\ttotal_alignments\tmultimap_percentage\tconnected_neighbors\tavg_co_mappings_per_read\tmax_co_mappings_observed\tneighbor_multimap_rate\talignment_score_mean\talignment_score_std\talignment_score_min\talignment_score_max\tpmd_available\tpmd_score_mean\tpmd_score_std\tpmd_score_min\tpmd_score_max\tpmd_nonzero_percentage\tmisannotation_flag\tmisannotation_confidence\tcross_domain_edges_before\tedges_after_removal\tcross_domain_fraction\tneighbor_tax_entropy\ttax_ambiguity_flag\tgamma_ancient\n")
+            fprintf(f, b"reference_name\treference_length_bp\tcomponent_id\tnode_degree\tcommunity_id\tcommunity_cc\tcommunity_individual_cc\tbetweenness_centrality\tstructural_role\tnum_neighbor_communities\tcommunity_coherent\tfilter_decision\ttotal_reads\tunique_reads\trepeat_reads\tshared_reads\ttotal_alignments\tmultimap_percentage\tconnected_neighbors\tavg_co_mappings_per_read\tmax_co_mappings_observed\tneighbor_multimap_rate\talignment_score_mean\talignment_score_std\talignment_score_min\talignment_score_max\tpmd_available\tpmd_score_mean\tpmd_score_std\tpmd_score_min\tpmd_score_max\tpmd_nonzero_percentage\tmisannotation_flag\tmisannotation_confidence\tcross_domain_edges_before\tedges_after_removal\tcross_domain_fraction\tneighbor_tax_entropy\ttax_ambiguity_flag\tgamma_ancient\tdamage_amplitude\tdamage_baseline\tdamage_log_bf\tbreadth\tbases_covered\tn_intervals\tnorm_spatial_entropy\tnorm_gini\tweighted_contiguity_breadth\n")
 
     sorted_refs = <MultPairExtended*>malloc(pool.reference_count * sizeof(MultPairExtended))
     if not sorted_refs:
@@ -561,10 +572,34 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
         neighbor_tax_entropy = 0.0
         tax_ambiguity_flag = 0
 
-        # Hierarchical EM: Get gamma (ancient probability) for this reference
+        # Bayesian damage model outputs
         gamma_ancient = -1.0  # Default: not available
-        if pool.hierarchical_em_enabled and pool.gamma_values != NULL and ref_idx < pool.reference_count:
+        damage_amplitude = -1.0
+        damage_baseline = -1.0
+        damage_log_bf = 0.0
+        if pool.gamma_values != NULL and ref_idx < pool.reference_count:
             gamma_ancient = pool.gamma_values[ref_idx]
+        if pool.damage_amplitude != NULL and ref_idx < pool.reference_count:
+            damage_amplitude = pool.damage_amplitude[ref_idx]
+        if pool.damage_baseline != NULL and ref_idx < pool.reference_count:
+            damage_baseline = pool.damage_baseline[ref_idx]
+        if pool.damage_log_bf != NULL and ref_idx < pool.reference_count:
+            damage_log_bf = pool.damage_log_bf[ref_idx]
+
+        # Coverage statistics from ref_stats
+        cov_breadth = 0.0
+        cov_bases_covered = 0
+        cov_n_intervals = 0
+        cov_norm_spatial_entropy = 0.0
+        cov_norm_gini = 0.0
+        cov_wcb = 0.0
+        if ref_stats and ref_idx < pool.reference_count:
+            cov_breadth = ref_stats[ref_idx].breadth
+            cov_bases_covered = ref_stats[ref_idx].bases_covered
+            cov_n_intervals = ref_stats[ref_idx].n_intervals
+            cov_norm_spatial_entropy = ref_stats[ref_idx].norm_spatial_entropy
+            cov_norm_gini = ref_stats[ref_idx].norm_gini
+            cov_wcb = ref_stats[ref_idx].weighted_contiguity_breadth
 
         # Initialize lineage names
         name_superkingdom = NULL
@@ -664,7 +699,7 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
                 # WITH TAXONOMY
                 if community_id == UINT32_MAX:
                     if keep_flag:
-                        gzprintf(gzfp, b"%s\t%ld\tcomp_%u\t%u\tsingleton\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\n",
+                        gzprintf(gzfp, b"%s\t%ld\tcomp_%u\t%u\tsingleton\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\t%.6f\t%.6f\t%.4f\t%.6f\t%ld\t%ld\t%.6f\t%.6f\t%.6f\n",
                             ref_name_c, ref_len, component_id, node_degree, community_cc, individual_cc, betweenness,
                             role_names[<int>structural_role], num_neighbor_communities, <int>community_coherent, decision_names[<int>filter_decision],
                             taxonomy_outlier_score, taxid, taxid_rank_id, taxid_depth, <int>taxonomy_flag,
@@ -680,9 +715,9 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
                             pmd_mean, pmd_std, pmd_min, pmd_max, pmd_nonzero_pct,
                             misannotation_flag, misannotation_confidence,
                             cross_domain_edges_before, edges_after_removal, cross_domain_fraction,
-                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient)
+                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient, damage_amplitude, damage_baseline, damage_log_bf, cov_breadth, cov_bases_covered, cov_n_intervals, cov_norm_spatial_entropy, cov_norm_gini, cov_wcb)
                     else:
-                        gzprintf(gzfp, b"%s\t%ld\tcomp_%u\t%u\tsingleton\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\n",
+                        gzprintf(gzfp, b"%s\t%ld\tcomp_%u\t%u\tsingleton\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\t%.6f\t%.6f\t%.4f\t%.6f\t%ld\t%ld\t%.6f\t%.6f\t%.6f\n",
                             ref_name_c, ref_len, component_id, node_degree, community_cc, individual_cc, betweenness,
                             role_names[<int>structural_role], num_neighbor_communities, <int>community_coherent, decision_names[<int>filter_decision],
                             taxonomy_outlier_score, taxid, taxid_rank_id, taxid_depth, <int>taxonomy_flag,
@@ -698,11 +733,11 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
                             pmd_mean, pmd_std, pmd_min, pmd_max, pmd_nonzero_pct,
                             misannotation_flag, misannotation_confidence,
                             cross_domain_edges_before, edges_after_removal, cross_domain_fraction,
-                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient)
+                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient, damage_amplitude, damage_baseline, damage_log_bf, cov_breadth, cov_bases_covered, cov_n_intervals, cov_norm_spatial_entropy, cov_norm_gini, cov_wcb)
                 else:
                     # WITH TAXONOMY - community (non-singleton)
                     if keep_flag:
-                        gzprintf(gzfp, b"%s\t%ld\tcomp_%u\t%u\tcomm_%u\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\n",
+                        gzprintf(gzfp, b"%s\t%ld\tcomp_%u\t%u\tcomm_%u\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\t%.6f\t%.6f\t%.4f\t%.6f\t%ld\t%ld\t%.6f\t%.6f\t%.6f\n",
                             ref_name_c, ref_len, component_id, node_degree, community_id, community_cc, individual_cc, betweenness,
                             role_names[<int>structural_role], num_neighbor_communities, <int>community_coherent, decision_names[<int>filter_decision],
                             taxonomy_outlier_score, taxid, taxid_rank_id, taxid_depth, <int>taxonomy_flag,
@@ -718,9 +753,9 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
                             pmd_mean, pmd_std, pmd_min, pmd_max, pmd_nonzero_pct,
                             misannotation_flag, misannotation_confidence,
                             cross_domain_edges_before, edges_after_removal, cross_domain_fraction,
-                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient)
+                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient, damage_amplitude, damage_baseline, damage_log_bf, cov_breadth, cov_bases_covered, cov_n_intervals, cov_norm_spatial_entropy, cov_norm_gini, cov_wcb)
                     else:
-                        gzprintf(gzfp, b"%s\t%ld\tcomp_%u\t%u\tcomm_%u\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\n",
+                        gzprintf(gzfp, b"%s\t%ld\tcomp_%u\t%u\tcomm_%u\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\t%.6f\t%.6f\t%.4f\t%.6f\t%ld\t%ld\t%.6f\t%.6f\t%.6f\n",
                             ref_name_c, ref_len, component_id, node_degree, community_id, community_cc, individual_cc, betweenness,
                             role_names[<int>structural_role], num_neighbor_communities, <int>community_coherent, decision_names[<int>filter_decision],
                             taxonomy_outlier_score, taxid, taxid_rank_id, taxid_depth, <int>taxonomy_flag,
@@ -736,12 +771,12 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
                             pmd_mean, pmd_std, pmd_min, pmd_max, pmd_nonzero_pct,
                             misannotation_flag, misannotation_confidence,
                             cross_domain_edges_before, edges_after_removal, cross_domain_fraction,
-                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient)
+                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient, damage_amplitude, damage_baseline, damage_log_bf, cov_breadth, cov_bases_covered, cov_n_intervals, cov_norm_spatial_entropy, cov_norm_gini, cov_wcb)
             else:
                 # WITHOUT TAXONOMY
                 if community_id == UINT32_MAX:
                     if keep_flag:
-                        gzprintf(gzfp, b"%s\t%ld\tcomp_%u\t%u\tsingleton\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\n",
+                        gzprintf(gzfp, b"%s\t%ld\tcomp_%u\t%u\tsingleton\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\t%.6f\t%.6f\t%.4f\t%.6f\t%ld\t%ld\t%.6f\t%.6f\t%.6f\n",
                             ref_name_c, ref_len, component_id, node_degree, community_cc, individual_cc, betweenness,
                             role_names[<int>structural_role], num_neighbor_communities, <int>community_coherent, decision_names[<int>filter_decision],
                             treads, unique_reads, repeat_reads, shared_reads, align_count, multimap_pct,
@@ -750,9 +785,9 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
                             pmd_mean, pmd_std, pmd_min, pmd_max, pmd_nonzero_pct,
                             misannotation_flag, misannotation_confidence,
                             cross_domain_edges_before, edges_after_removal, cross_domain_fraction,
-                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient)
+                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient, damage_amplitude, damage_baseline, damage_log_bf, cov_breadth, cov_bases_covered, cov_n_intervals, cov_norm_spatial_entropy, cov_norm_gini, cov_wcb)
                     else:
-                        gzprintf(gzfp, b"%s\t%ld\tcomp_%u\t%u\tsingleton\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\n",
+                        gzprintf(gzfp, b"%s\t%ld\tcomp_%u\t%u\tsingleton\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\t%.6f\t%.6f\t%.4f\t%.6f\t%ld\t%ld\t%.6f\t%.6f\t%.6f\n",
                             ref_name_c, ref_len, component_id, node_degree, community_cc, individual_cc, betweenness,
                             role_names[<int>structural_role], num_neighbor_communities, <int>community_coherent, decision_names[<int>filter_decision],
                             treads, unique_reads, repeat_reads, shared_reads, align_count, multimap_pct,
@@ -761,11 +796,11 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
                             pmd_mean, pmd_std, pmd_min, pmd_max, pmd_nonzero_pct,
                             misannotation_flag, misannotation_confidence,
                             cross_domain_edges_before, edges_after_removal, cross_domain_fraction,
-                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient)
+                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient, damage_amplitude, damage_baseline, damage_log_bf, cov_breadth, cov_bases_covered, cov_n_intervals, cov_norm_spatial_entropy, cov_norm_gini, cov_wcb)
                 else:
                     # WITHOUT TAXONOMY - community (non-singleton)
                     if keep_flag:
-                        gzprintf(gzfp, b"%s\t%ld\tcomp_%u\t%u\tcomm_%u\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\n",
+                        gzprintf(gzfp, b"%s\t%ld\tcomp_%u\t%u\tcomm_%u\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\t%.6f\t%.6f\t%.4f\t%.6f\t%ld\t%ld\t%.6f\t%.6f\t%.6f\n",
                             ref_name_c, ref_len, component_id, node_degree, community_id, community_cc, individual_cc, betweenness,
                             role_names[<int>structural_role], num_neighbor_communities, <int>community_coherent, decision_names[<int>filter_decision],
                             treads, unique_reads, repeat_reads, shared_reads, align_count, multimap_pct,
@@ -774,9 +809,9 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
                             pmd_mean, pmd_std, pmd_min, pmd_max, pmd_nonzero_pct,
                             misannotation_flag, misannotation_confidence,
                             cross_domain_edges_before, edges_after_removal, cross_domain_fraction,
-                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient)
+                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient, damage_amplitude, damage_baseline, damage_log_bf, cov_breadth, cov_bases_covered, cov_n_intervals, cov_norm_spatial_entropy, cov_norm_gini, cov_wcb)
                     else:
-                        gzprintf(gzfp, b"%s\t%ld\tcomp_%u\t%u\tcomm_%u\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\n",
+                        gzprintf(gzfp, b"%s\t%ld\tcomp_%u\t%u\tcomm_%u\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\t%.6f\t%.6f\t%.4f\t%.6f\t%ld\t%ld\t%.6f\t%.6f\t%.6f\n",
                             ref_name_c, ref_len, component_id, node_degree, community_id, community_cc, individual_cc, betweenness,
                             role_names[<int>structural_role], num_neighbor_communities, <int>community_coherent, decision_names[<int>filter_decision],
                             treads, unique_reads, repeat_reads, shared_reads, align_count, multimap_pct,
@@ -785,14 +820,14 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
                             pmd_mean, pmd_std, pmd_min, pmd_max, pmd_nonzero_pct,
                             misannotation_flag, misannotation_confidence,
                             cross_domain_edges_before, edges_after_removal, cross_domain_fraction,
-                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient)
+                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient, damage_amplitude, damage_baseline, damage_log_bf, cov_breadth, cov_bases_covered, cov_n_intervals, cov_norm_spatial_entropy, cov_norm_gini, cov_wcb)
         else:
             # NON-GZIPPED (fprintf)
             if taxonomy_db != NULL:
                 # WITH TAXONOMY
                 if community_id == UINT32_MAX:
                     if keep_flag:
-                        fprintf(f, b"%s\t%ld\tcomp_%u\t%u\tsingleton\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\n",
+                        fprintf(f, b"%s\t%ld\tcomp_%u\t%u\tsingleton\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\t%.6f\t%.6f\t%.4f\t%.6f\t%ld\t%ld\t%.6f\t%.6f\t%.6f\n",
                             ref_name_c, ref_len, component_id, node_degree, community_cc, individual_cc, betweenness,
                             role_names[<int>structural_role], num_neighbor_communities, <int>community_coherent, decision_names[<int>filter_decision],
                             taxonomy_outlier_score, taxid, taxid_rank_id, taxid_depth, <int>taxonomy_flag,
@@ -808,9 +843,9 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
                             pmd_mean, pmd_std, pmd_min, pmd_max, pmd_nonzero_pct,
                             misannotation_flag, misannotation_confidence,
                             cross_domain_edges_before, edges_after_removal, cross_domain_fraction,
-                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient)
+                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient, damage_amplitude, damage_baseline, damage_log_bf, cov_breadth, cov_bases_covered, cov_n_intervals, cov_norm_spatial_entropy, cov_norm_gini, cov_wcb)
                     else:
-                        fprintf(f, b"%s\t%ld\tcomp_%u\t%u\tsingleton\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\n",
+                        fprintf(f, b"%s\t%ld\tcomp_%u\t%u\tsingleton\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\t%.6f\t%.6f\t%.4f\t%.6f\t%ld\t%ld\t%.6f\t%.6f\t%.6f\n",
                             ref_name_c, ref_len, component_id, node_degree, community_cc, individual_cc, betweenness,
                             role_names[<int>structural_role], num_neighbor_communities, <int>community_coherent, decision_names[<int>filter_decision],
                             taxonomy_outlier_score, taxid, taxid_rank_id, taxid_depth, <int>taxonomy_flag,
@@ -826,11 +861,11 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
                             pmd_mean, pmd_std, pmd_min, pmd_max, pmd_nonzero_pct,
                             misannotation_flag, misannotation_confidence,
                             cross_domain_edges_before, edges_after_removal, cross_domain_fraction,
-                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient)
+                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient, damage_amplitude, damage_baseline, damage_log_bf, cov_breadth, cov_bases_covered, cov_n_intervals, cov_norm_spatial_entropy, cov_norm_gini, cov_wcb)
                 else:
                     # WITH TAXONOMY - community (non-singleton)
                     if keep_flag:
-                        fprintf(f, b"%s\t%ld\tcomp_%u\t%u\tcomm_%u\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\n",
+                        fprintf(f, b"%s\t%ld\tcomp_%u\t%u\tcomm_%u\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\t%.6f\t%.6f\t%.4f\t%.6f\t%ld\t%ld\t%.6f\t%.6f\t%.6f\n",
                             ref_name_c, ref_len, component_id, node_degree, community_id, community_cc, individual_cc, betweenness,
                             role_names[<int>structural_role], num_neighbor_communities, <int>community_coherent, decision_names[<int>filter_decision],
                             taxonomy_outlier_score, taxid, taxid_rank_id, taxid_depth, <int>taxonomy_flag,
@@ -846,9 +881,9 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
                             pmd_mean, pmd_std, pmd_min, pmd_max, pmd_nonzero_pct,
                             misannotation_flag, misannotation_confidence,
                             cross_domain_edges_before, edges_after_removal, cross_domain_fraction,
-                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient)
+                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient, damage_amplitude, damage_baseline, damage_log_bf, cov_breadth, cov_bases_covered, cov_n_intervals, cov_norm_spatial_entropy, cov_norm_gini, cov_wcb)
                     else:
-                        fprintf(f, b"%s\t%ld\tcomp_%u\t%u\tcomm_%u\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\n",
+                        fprintf(f, b"%s\t%ld\tcomp_%u\t%u\tcomm_%u\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%d\t%d\t%d\t%d\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%u\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\t%.6f\t%.6f\t%.4f\t%.6f\t%ld\t%ld\t%.6f\t%.6f\t%.6f\n",
                             ref_name_c, ref_len, component_id, node_degree, community_id, community_cc, individual_cc, betweenness,
                             role_names[<int>structural_role], num_neighbor_communities, <int>community_coherent, decision_names[<int>filter_decision],
                             taxonomy_outlier_score, taxid, taxid_rank_id, taxid_depth, <int>taxonomy_flag,
@@ -864,12 +899,12 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
                             pmd_mean, pmd_std, pmd_min, pmd_max, pmd_nonzero_pct,
                             misannotation_flag, misannotation_confidence,
                             cross_domain_edges_before, edges_after_removal, cross_domain_fraction,
-                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient)
+                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient, damage_amplitude, damage_baseline, damage_log_bf, cov_breadth, cov_bases_covered, cov_n_intervals, cov_norm_spatial_entropy, cov_norm_gini, cov_wcb)
             else:
                 # WITHOUT TAXONOMY
                 if community_id == UINT32_MAX:
                     if keep_flag:
-                        fprintf(f, b"%s\t%ld\tcomp_%u\t%u\tsingleton\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\n",
+                        fprintf(f, b"%s\t%ld\tcomp_%u\t%u\tsingleton\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\t%.6f\t%.6f\t%.4f\t%.6f\t%ld\t%ld\t%.6f\t%.6f\t%.6f\n",
                             ref_name_c, ref_len, component_id, node_degree, community_cc, individual_cc, betweenness,
                             role_names[<int>structural_role], num_neighbor_communities, <int>community_coherent, decision_names[<int>filter_decision],
                             treads, unique_reads, repeat_reads, shared_reads, align_count, multimap_pct,
@@ -878,9 +913,9 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
                             pmd_mean, pmd_std, pmd_min, pmd_max, pmd_nonzero_pct,
                             misannotation_flag, misannotation_confidence,
                             cross_domain_edges_before, edges_after_removal, cross_domain_fraction,
-                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient)
+                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient, damage_amplitude, damage_baseline, damage_log_bf, cov_breadth, cov_bases_covered, cov_n_intervals, cov_norm_spatial_entropy, cov_norm_gini, cov_wcb)
                     else:
-                        fprintf(f, b"%s\t%ld\tcomp_%u\t%u\tsingleton\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\n",
+                        fprintf(f, b"%s\t%ld\tcomp_%u\t%u\tsingleton\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\t%.6f\t%.6f\t%.4f\t%.6f\t%ld\t%ld\t%.6f\t%.6f\t%.6f\n",
                             ref_name_c, ref_len, component_id, node_degree, community_cc, individual_cc, betweenness,
                             role_names[<int>structural_role], num_neighbor_communities, <int>community_coherent, decision_names[<int>filter_decision],
                             treads, unique_reads, repeat_reads, shared_reads, align_count, multimap_pct,
@@ -889,11 +924,11 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
                             pmd_mean, pmd_std, pmd_min, pmd_max, pmd_nonzero_pct,
                             misannotation_flag, misannotation_confidence,
                             cross_domain_edges_before, edges_after_removal, cross_domain_fraction,
-                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient)
+                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient, damage_amplitude, damage_baseline, damage_log_bf, cov_breadth, cov_bases_covered, cov_n_intervals, cov_norm_spatial_entropy, cov_norm_gini, cov_wcb)
                 else:
                     # WITHOUT TAXONOMY - community (non-singleton)
                     if keep_flag:
-                        fprintf(f, b"%s\t%ld\tcomp_%u\t%u\tcomm_%u\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\n",
+                        fprintf(f, b"%s\t%ld\tcomp_%u\t%u\tcomm_%u\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\t%.6f\t%.6f\t%.4f\t%.6f\t%ld\t%ld\t%.6f\t%.6f\t%.6f\n",
                             ref_name_c, ref_len, component_id, node_degree, community_id, community_cc, individual_cc, betweenness,
                             role_names[<int>structural_role], num_neighbor_communities, <int>community_coherent, decision_names[<int>filter_decision],
                             treads, unique_reads, repeat_reads, shared_reads, align_count, multimap_pct,
@@ -902,9 +937,9 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
                             pmd_mean, pmd_std, pmd_min, pmd_max, pmd_nonzero_pct,
                             misannotation_flag, misannotation_confidence,
                             cross_domain_edges_before, edges_after_removal, cross_domain_fraction,
-                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient)
+                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient, damage_amplitude, damage_baseline, damage_log_bf, cov_breadth, cov_bases_covered, cov_n_intervals, cov_norm_spatial_entropy, cov_norm_gini, cov_wcb)
                     else:
-                        fprintf(f, b"%s\t%ld\tcomp_%u\t%u\tcomm_%u\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\n",
+                        fprintf(f, b"%s\t%ld\tcomp_%u\t%u\tcomm_%u\t%.6f\t%.6f\t%.6f\t%s\t%u\t%d\t%s\t%u\t%u\t%u\t%u\t%lu\t%.2f\t%u\t%.2f\t%lu\t%.2f\t%.6f\t%.6f\t%.6f\t%.6f\t%u\t%.6f\t%.6f\t%.6f\t%.6f\t%lu\t%u\t%.3f\t%u\t%u\t%.3f\t%.3f\t%u\t%.6f\t%.6f\t%.6f\t%.4f\t%.6f\t%ld\t%ld\t%.6f\t%.6f\t%.6f\n",
                             ref_name_c, ref_len, component_id, node_degree, community_id, community_cc, individual_cc, betweenness,
                             role_names[<int>structural_role], num_neighbor_communities, <int>community_coherent, decision_names[<int>filter_decision],
                             treads, unique_reads, repeat_reads, shared_reads, align_count, multimap_pct,
@@ -913,7 +948,7 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
                             pmd_mean, pmd_std, pmd_min, pmd_max, pmd_nonzero_pct,
                             misannotation_flag, misannotation_confidence,
                             cross_domain_edges_before, edges_after_removal, cross_domain_fraction,
-                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient)
+                            neighbor_tax_entropy, tax_ambiguity_flag, gamma_ancient, damage_amplitude, damage_baseline, damage_log_bf, cov_breadth, cov_bases_covered, cov_n_intervals, cov_norm_spatial_entropy, cov_norm_gini, cov_wcb)
 
     # Cleanup lineage cache
     if cached_taxids != NULL:

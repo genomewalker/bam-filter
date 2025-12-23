@@ -104,6 +104,14 @@ cdef double[DMAX] DZ
 cdef double[DMAX] LOG_DZ
 cdef double[DMAX] LOG1M_DZ
 
+# Precomputed damage LLR lookup tables for hierarchical EM
+# LLR_MATCH[z] = log(L_anc/L_mod) for C/G match at position z
+# LLR_MISMATCH[z] = log(L_anc/L_mod) for C→T or G→A mismatch at position z
+# Using fixed epsilon = 0.01 for damage model
+cdef double[DMAX] LLR_MATCH
+cdef double[DMAX] LLR_MISMATCH
+cdef double DAMAGE_EPSILON = 0.01
+
 cdef unsigned char IS_A[256]
 cdef unsigned char IS_C[256]
 cdef unsigned char IS_G[256]
@@ -269,6 +277,12 @@ cdef void initialize_quality_lookup_tables() noexcept nogil:
         PRECOMPUTED_LOG_P_ERROR[qual]   = log(p_error / 3.0)
 
     powv = 1.0
+    cdef double eps = DAMAGE_EPSILON
+    cdef double eps3 = eps / 3.0
+    cdef double one_m_eps = 1.0 - eps
+    cdef double L_anc_match, L_mod_match, L_anc_mm, L_mod_mm
+    cdef double Dz_clipped
+
     for i in range(DMAX):
         if i == 0:
             powv = 1.0
@@ -277,6 +291,24 @@ cdef void initialize_quality_lookup_tables() noexcept nogil:
         DZ[i]       = P_CONST * powv + C_CONST
         LOG_DZ[i]   = log(DZ[i])
         LOG1M_DZ[i] = log(1.0 - DZ[i])
+
+        # Compute damage LLR lookup tables
+        # Clamp D(z) for numerical stability
+        Dz_clipped = fmax(1e-6, fmin(1.0 - 1e-6, DZ[i]))
+
+        # For C/G match at position z+1 (0-indexed array, 1-indexed position):
+        # L_anc = (1-D(z))*(1-ε) + D(z)*(ε/3)
+        # L_mod = 1-ε
+        L_anc_match = (1.0 - Dz_clipped) * one_m_eps + Dz_clipped * eps3
+        L_mod_match = one_m_eps
+        LLR_MATCH[i] = log(L_anc_match) - log(L_mod_match)
+
+        # For C→T or G→A mismatch at position z+1:
+        # L_anc = D(z)*(1-ε) + (1-D(z))*(ε/3)
+        # L_mod = ε/3
+        L_anc_mm = Dz_clipped * one_m_eps + (1.0 - Dz_clipped) * eps3
+        L_mod_mm = eps3
+        LLR_MISMATCH[i] = log(L_anc_mm) - log(L_mod_mm)
 
     LOOKUP_TABLES_INITIALIZED = True
 
@@ -894,6 +926,14 @@ cdef double calculate_md_score_with_stats_impl(char* md_tag, uint8_t* read_bases
     cdef uint8_t c_at_5p_count = 0  # Total C bases in reference at 5' damage zone
     cdef uint8_t g_at_3p_count = 0  # Total G bases in reference at 3' damage zone
 
+    # Position-specific damage log-likelihood ratio for hierarchical EM
+    cdef double damage_llr = 0.0
+    cdef double eps_fixed = 0.01  # Fixed sequencing error rate for damage model
+    cdef double log_eps_fixed = -4.605170185988091  # log(0.01)
+    cdef double log_eps3_fixed = -5.704748226543460  # log(0.01/3)
+    cdef double log_1m_eps_fixed = -0.01005033585350144  # log(0.99)
+    cdef double Dz_val, log_L_anc_pos, log_L_mod_pos
+
     # Cached constants
     cdef double log_pi = -6.907755278982137
     cdef double log_1_minus_pi = -0.001000500333583532
@@ -930,6 +970,11 @@ cdef double calculate_md_score_with_stats_impl(char* md_tag, uint8_t* read_bases
 
     cdef bint collect_stats = (pmd_acc != NULL)
 
+    # Pre-initialize ref_sequence with decoded read bases for CpG context detection
+    # This ensures ref_sequence[k+1] is valid when checking CpG at position k during match processing
+    for k in range(rlen):
+        ref_sequence[k] = rptr[k]
+
     while ptr[0] != 0 and read_pos < rlen:
         ch = <unsigned char>ptr[0]
 
@@ -961,6 +1006,17 @@ cdef double calculate_md_score_with_stats_impl(char* md_tag, uint8_t* read_bases
                     if is_g_base and z_from_3prime <= ANI_DAMAGE_WINDOW:
                         if g_at_3p_count < 255:
                             g_at_3p_count += 1
+
+                    # Accumulate position-specific damage LLR for hierarchical EM
+                    # Double-stranded: C at 5' and G at 3' (complementary damage)
+                    # Single-stranded: C at both ends (both overhangs exposed)
+                    if is_c_base:
+                        if z_from_5prime <= DMAX:
+                            damage_llr += LLR_MATCH[z_from_5prime - 1]
+                        if is_single_stranded and z_from_3prime <= DMAX:
+                            damage_llr += LLR_MATCH[z_from_3prime - 1]
+                    if is_g_base and not is_single_stranded and z_from_3prime <= DMAX:
+                        damage_llr += LLR_MATCH[z_from_3prime - 1]
 
                 # Collect PMD stats for C/G matches (eligible sites)
                 if collect_stats and (is_c_base or is_g_base):
@@ -1070,6 +1126,17 @@ cdef double calculate_md_score_with_stats_impl(char* md_tag, uint8_t* read_bases
                     if g_at_3p_count < 255:
                         g_at_3p_count += 1
 
+                # Accumulate position-specific damage LLR for hierarchical EM
+                # Double-stranded: C→T at 5' and G→A at 3' (complementary damage)
+                # Single-stranded: C→T at both ends (both overhangs exposed)
+                if is_ct_mismatch:
+                    if z_from_5prime <= DMAX:
+                        damage_llr += LLR_MISMATCH[z_from_5prime - 1]
+                    if is_single_stranded and z_from_3prime <= DMAX:
+                        damage_llr += LLR_MISMATCH[z_from_3prime - 1]
+                if is_ga_mismatch and not is_single_stranded and z_from_3prime <= DMAX:
+                    damage_llr += LLR_MISMATCH[z_from_3prime - 1]
+
                 # Collect PMD stats for mismatches
                 if collect_stats:
                     if is_ct_mismatch and z_from_5prime <= PMD_STAT_WINDOW:
@@ -1169,6 +1236,7 @@ cdef double calculate_md_score_with_stats_impl(char* md_tag, uint8_t* read_bases
         ani_stats.other_mm_count = other_mm_count
         ani_stats.c_at_5p_count = c_at_5p_count
         ani_stats.g_at_3p_count = g_at_3p_count
+        ani_stats.damage_llr = <float>damage_llr
 
     # Update accumulator metadata
     if pmd_acc:

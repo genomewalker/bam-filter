@@ -10,7 +10,7 @@ Functions:
 - create_weighted_graph: Create empty graph structure
 - destroy_weighted_graph: Free graph memory
 - add_edge: Add or increment edge weight
-- build_weighted_graph_from_alignments: Build graph from alignment data
+- build_igraph_direct_from_read_index: Build igraph directly from read index
 - prune_low_weight_edges: Remove edges below threshold
 - calculate_graph_statistics: Calculate all graph metrics from filtered graph
 """
@@ -75,17 +75,6 @@ cdef void destroy_weighted_graph(WeightedGraph* graph) noexcept nogil
 cdef int add_edge(WeightedGraph* graph, uint32_t from_node, uint32_t to_node,
                   uint32_t weight) noexcept nogil
 
-# Graph building from alignment data
-cdef WeightedGraph* build_weighted_graph_from_alignments(
-    MemoryPool* pool,
-    ReferenceStats* ref_stats,
-    ReadIndex* read_index,
-    uint32_t array_size,
-    int32_t min_read_count
-) except NULL nogil
-
-
-
 # Build igraph from WeightedGraph (after pruning)
 cdef int build_igraph_from_weighted_graph(
     igraph_t* ig_graph,
@@ -110,20 +99,6 @@ cdef void calculate_graph_statistics(WeightedGraph* graph,
                                      float* dataset_multimap_fractions,
                                      ReferenceStats* ref_stats,
                                      uint32_t num_refs) noexcept nogil
-
-# Direct igraph builder (convenience wrapper that produces igraph_t and weights)
-cdef int build_igraph_from_read_index(
-    void* ig_graph,               # igraph_t* (opaque pointer)
-    void* ig_weights,             # igraph_vector_t* (opaque pointer)
-    MemoryPool* pool,
-    ReadIndex* read_index,
-    ReferenceStats* ref_stats,
-    uint32_t num_refs,
-    uint32_t min_read_count,
-    uint32_t min_edge_weight,
-    int num_threads,
-    int verbose
-) except -1 nogil
 
 # Direct-to-igraph builder that avoids allocating full WeightedGraph
 cdef int build_igraph_direct_from_read_index(

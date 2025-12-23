@@ -31,7 +31,7 @@ from libc.time cimport clock, clock_t, CLOCKS_PER_SEC
 
 # Project module imports
 from .batch_utils cimport create_balanced_batches_greedy
-from .processor_memory cimport create_memory_pool, destroy_memory_pool, shrink_memory_pool, cleanup_presorted_memory, cleanup_em_intermediate_memory
+from .processor_memory cimport create_memory_pool, create_memory_pool_split, destroy_memory_pool, shrink_memory_pool, cleanup_presorted_memory, cleanup_em_intermediate_memory
 from .processor_fast_math cimport stable_log_sum_exp, safe_normalize_weights
 from .processor_types cimport PrecomputedWeights, EMAlgorithmConfig
 from .processor_graph_ops cimport WeightedGraph, destroy_weighted_graph, pick_min_edge_weight_elbow
@@ -49,6 +49,9 @@ from .processor_batch cimport (
     count_unique_refs_from_batches,
     parallel_streaming_stats_optimized,
     populate_memory_pool_direct,
+    populate_memory_pool_filtered,
+    populate_memory_pool_filtered_split,
+    count_alignments_passing_ani_filter,
     count_unique_reads_from_thread_maps,
 )
 
@@ -63,9 +66,11 @@ from .processor_pmd cimport (
     finalize_pmd_model,
 )
 # Python wrapper for applying PMD corrections to alignments
-from .processor_pmd import apply_pmd_corrections_py, init_hierarchical_em_py
-# Python wrapper for EM algorithm
-from .processor_em import execute_em_py
+from .processor_pmd import apply_pmd_corrections_py, apply_raw_ani_filter_py, init_hierarchical_em_py
+# NOTE: processor_em.execute_em_py is imported lazily in run_reassignment_pipeline
+# to avoid circular import (processor_em cimports from processor)
+# NOTE: processor_damage_model is imported lazily in run_reassignment_pipeline
+# to avoid circular import (it cimports from processor)
 
 from .processor_filters cimport (
     apply_probability_filtering,
@@ -134,8 +139,12 @@ from .processor_graph cimport (
     ReferencePattern, ReferenceStats, ReadIndex,
     analyze_reference_graph,
     calculate_reference_stats,
+    calculate_reference_coverage,
+    compute_authenticity_scores,
+    init_cwrp,
     build_read_index_parallel,
-    destroy_read_index
+    destroy_read_index,
+    write_graph_tsv
 )
 
 from .processor_graph_taxonomy cimport (
@@ -150,6 +159,10 @@ from .processor_taxonomy_filters cimport (
 
 from .processor_network_qc cimport (
     NetworkQCConfig
+)
+
+from .probabilistic_profiler cimport (
+    apply_gmrf_smoothing_to_graph,
 )
 
 from .taxonomy_db cimport (
@@ -384,6 +397,23 @@ cdef score_alignments(
     entropy_mixed_threshold=2.0,
     entropy_highly_mixed_threshold=3.0,
     tax_ambiguity_removal_level=2,
+    # Coverage-Weighted Reference Priors (CWRP)
+    cwrp_lambda=0.0,
+    iterative_auth=False,
+    auth_update_interval=5,
+    damage_weight=1.0,
+    low_cov_floor=10,
+    low_cov_shrink_tau=50.0,
+    # Posterior-Weighted Coverage Authenticity (Path B)
+    auth_post_enabled=False,
+    auth_update_interval_post=3,
+    auth_scale_post=4.0,
+    auth_lambda_ramp_iters=5,
+    # Sample-level P(ancient) gate
+    sample_pi_override=0.0,
+    # GMRF smoothing (profile-only)
+    enable_gmrf=False,
+    gmrf_tau=1.0,
 ):
     """Core BAM alignment scoring and filtering engine.
 
@@ -501,22 +531,9 @@ cdef score_alignments(
     em_config.em_length_output_exp = em_length_output_exp
     em_config.em_length_prior_exp = em_length_prior_exp
 
-    # Disable regular dominance regularization by default
+    # Dominance regularization is disabled - use em_power_rho for anti-dominance behavior
     em_config.enable_dominance_regularization = False
-
-    if enable_dominance_regularization:
-        if auto_tune_penalties and dominance_strength is None:
-            em_config.dominance_strength = 0.0  # Triggers auto-tuning
-            if verbose:
-                _info("  Dominance regularization will be auto-tuned from dataset")
-        elif dominance_strength is not None:
-            em_config.dominance_strength = dominance_strength
-            if verbose:
-                _info(f"  Manual dominance strength: {dominance_strength}")
-        else:
-            em_config.dominance_strength = 1.5  # Conservative default
-            if verbose:
-                _info("  Using default dominance strength: 1.5")
+    em_config.dominance_strength = 0.0
 
     # Initialize C variables
     cdef samFile* bam_handle = NULL
@@ -535,6 +552,7 @@ cdef score_alignments(
     cdef PMDGlobalContext* pmd_context = NULL
     cdef PMDCurveParams pmd_params
     cdef bint collect_pmd_stats = False
+    cdef bint hierarchical_pmd_c = hierarchical_pmd
 
     # TSV integration variables
     cdef TSVReferenceMap* tsv_map = NULL
@@ -567,6 +585,11 @@ cdef score_alignments(
     cdef int32_t nentries = 0
     cdef char* ref_selected = NULL
 
+    # Gamma remapping variables (for preserving EM gamma values after reference compaction)
+    cdef double* old_gamma = NULL
+    cdef double* new_gamma = NULL
+    cdef uint32_t old_idx, new_idx
+
     # Filtered length validation variables
     cdef int64_t min_filt_len, max_filt_len, total_filt_len
     cdef int invalid_original_lengths = 0
@@ -580,6 +603,7 @@ cdef score_alignments(
     cdef int64_t expected_alignments
     cdef int64_t ref_idx
     cdef ReferencePattern* pattern_data = NULL
+    cdef ReferenceMapping* mapping = NULL
 
     # Streaming stats variables
     cdef double min_score = 0.0, max_score = 0.0, mean_score = 0.0, variance_score = 0.0
@@ -589,6 +613,29 @@ cdef score_alignments(
 
     # Taxonomy filtering statistics
     cdef TaxonomyFilterStats taxonomy_stats
+
+    # Coverage-Weighted Reference Priors
+    cdef double c_cwrp_lambda = cwrp_lambda
+    cdef bint c_iterative_auth = iterative_auth
+    cdef int32_t c_auth_update_interval = auth_update_interval
+    cdef double c_damage_weight = damage_weight
+    cdef int32_t c_low_cov_floor = low_cov_floor
+    cdef double c_low_cov_shrink_tau = low_cov_shrink_tau
+
+    # Posterior-Weighted Coverage Authenticity (Path B)
+    cdef bint c_auth_post_enabled = auth_post_enabled
+    cdef int32_t c_auth_update_interval_post = auth_update_interval_post
+    cdef double c_auth_scale_post = auth_scale_post
+
+    # Sample-level P(ancient) gate
+    cdef double c_sample_pi_override = sample_pi_override
+
+    # ANI filtering variables (for filtered memory pool creation)
+    cdef float min_ani_threshold = 90.0
+    cdef float c_epsilon = 0.01  # Sequencing error rate
+    cdef PMDCurve* curve_ptr = NULL
+    cdef int64_t filtered_alignment_count = 0
+    cdef int32_t c_auth_lambda_ramp_iters = auth_lambda_ramp_iters
 
     # Taxonomy integration variables
     cdef TaxonomyDB* taxdb_c = NULL
@@ -624,6 +671,14 @@ cdef score_alignments(
     cdef uint32_t min_read_count_c  # C copy of min_read_count for nogil calls
     cdef int64_t aligns_filtered_information = 0
     cdef int64_t alignments_before_filtering = 0  # Alignments before filtering
+
+    # GMRF smoothing variables
+    cdef double gmrf_stage_timer
+    cdef int gmrf_result
+    cdef int32_t gmrf_i
+    cdef uint32_t* gmrf_n_reads = NULL
+    cdef double gmrf_tau_c = gmrf_tau
+    cdef bint enable_gmrf_c = enable_gmrf
 
     try:
         pipeline_start = bf_monotonic_seconds()
@@ -944,7 +999,7 @@ cdef score_alignments(
 
         if collect_pmd_stats:
             with nogil:
-                pmd_context = create_pmd_context(num_threads_c, scoring_config.is_single_stranded, False)
+                pmd_context = create_pmd_context(num_threads_c, scoring_config.is_single_stranded, hierarchical_pmd_c)
             if not pmd_context:
                 raise MemoryError("Failed to create PMD context")
             if verbose:
@@ -1050,88 +1105,155 @@ cdef score_alignments(
 
         # Apply EM algorithm
         if use_em:
-            if verbose:
-                _info(f"Creating memory pool with filtered reference lengths")
+            # Determine ANI threshold from scoring config
+            min_ani_threshold = scoring_config.minimum_read_identity if scoring_config.minimum_read_identity > 0 else 90.0
 
-            # Pass filtered reference lengths to memory pool
-            memory_pool = create_memory_pool(actual_total_alignments, unique_reference_count,
-                                           unique_read_count, filtered_reference_lengths, calculate_pmd, num_threads_c)
+            # Get PMD curve pointer if available
+            if pmd_context != NULL and pmd_context.model.finalized:
+                curve_ptr = &pmd_context.model.curve
+
+            # Count alignments passing ANI filter (uses PMD curve if available)
+            if verbose:
+                _info("Counting alignments passing ANI filter")
+            _announce_stage("ANI Filter", "Computing corrected ANI and counting passing alignments")
+            stage_timer = bf_monotonic_seconds()
+
+            with nogil:
+                filtered_alignment_count = count_alignments_passing_ani_filter(
+                    processing_batches, batch_count,
+                    curve_ptr, min_ani_threshold, c_epsilon
+                )
+            _log_stage("ANI filter count", stage_timer)
+
+            if verbose:
+                _info(f"  Alignments passing ANI >= {min_ani_threshold:.1f}%: {filtered_alignment_count:,} / {actual_total_alignments:,}")
+                _info(f"  Memory savings: {100.0 * (1.0 - <double>filtered_alignment_count / <double>actual_total_alignments):.1f}%")
+
+            if filtered_alignment_count == 0:
+                raise RuntimeError("No alignments pass the ANI filter - check threshold setting")
+
+            # Create memory pool sized for filtered alignments only
+            # Use split arrays for reduced memory usage
+            if verbose:
+                _info(f"Creating memory pool for {filtered_alignment_count:,} filtered alignments (split arrays)")
+
+            memory_pool = create_memory_pool_split(
+                filtered_alignment_count, unique_reference_count, unique_read_count,
+                filtered_reference_lengths, calculate_pmd,
+                hierarchical_pmd,  # enable hierarchical arrays
+                hierarchical_pmd,  # enable damage counts (needed for gamma update)
+                num_threads_c)
             if not memory_pool:
                 raise MemoryError("Failed to create memory pool")
 
             # Store PMD curve pointer for BAM writing
-            if pmd_context != NULL and pmd_context.model.finalized:
-                memory_pool.pmd_curve_ptr = <void*>&pmd_context.model.curve
+            if curve_ptr != NULL:
+                memory_pool.pmd_curve_ptr = <void*>curve_ptr
             else:
                 memory_pool.pmd_curve_ptr = NULL
 
             if memory_pool.stats != NULL:
                 memory_pool.stats.taxonomy_enabled = 1 if taxonomy_filter_config.enabled else 0
 
+            # Transfer only filtered alignments to pool
             if verbose:
-                _info("Transferring alignments to memory pool")
+                _info("Transferring filtered alignments to memory pool")
 
-            _announce_stage("Memory Optimization", "Transferring filtered alignments to optimized memory structures")
+            _announce_stage("Memory Optimization", "Transferring ANI-filtered alignments to optimized memory structures")
             stage_timer = bf_monotonic_seconds()
-            if populate_memory_pool_direct(memory_pool, processing_batches, batch_count, 
-                                                             bam_header, num_threads_c) != 0:
-                raise RuntimeError("Failed to stream batches to memory pool")
-            _log_stage("Memory pool streaming", stage_timer)
+
+            with nogil:
+                if memory_pool.use_split_arrays:
+                    if populate_memory_pool_filtered_split(memory_pool, processing_batches, batch_count,
+                                                           bam_header, curve_ptr, min_ani_threshold,
+                                                           c_epsilon, num_threads_c) != 0:
+                        with gil:
+                            raise RuntimeError("Failed to stream filtered batches to memory pool (split)")
+                else:
+                    if populate_memory_pool_filtered(memory_pool, processing_batches, batch_count,
+                                                      bam_header, curve_ptr, min_ani_threshold,
+                                                      c_epsilon, num_threads_c) != 0:
+                        with gil:
+                            raise RuntimeError("Failed to stream filtered batches to memory pool")
+            _log_stage("Filtered pool streaming", stage_timer)
+
+            if verbose:
+                _info(f"  Final pool: {memory_pool.alignment_count:,} alignments, {memory_pool.final_unique_reads:,} unique reads")
+
+            # CRITICAL: Remap reference indices to compact form BEFORE EM runs
+            # Alignments from batches use original BAM header indices [0, n_original_refs-1]
+            # But pool.reference_count is set to unique_reference_count (refs with alignments)
+            # EM uses pool.reference_count as n_refs, so indices must be in [0, reference_count-1]
+            #
+            # We create the mapping once here and KEEP IT for later use (after probability filtering).
+            # This ensures new_to_old_tid always maps to original BAM header indices.
+            # After probability filtering, we use update_reference_mapping_after_filtering()
+            # instead of creating a new mapping.
+            mapping = create_reference_mapping(memory_pool, bam_header)
+            if not mapping:
+                raise RuntimeError("Failed to create initial reference mapping")
+
+            if remap_alignment_reference_ids(memory_pool, mapping) != 0:
+                destroy_reference_mapping(mapping)
+                mapping = NULL
+                raise RuntimeError("Failed to remap alignment reference IDs for EM")
+
+            # Update reference count to match the compact mapping
+            memory_pool.reference_count = mapping.n_retained_refs
+            if verbose:
+                _info(f"  Remapped {mapping.n_retained_refs} reference indices for EM")
 
             # Update initial stats (use total_references from BAM header, not just refs with alignments)
             with nogil:
                 update_initial_stats(memory_pool.stats, memory_pool.alignment_count,
                                    unique_read_count, total_references)
 
-            # Apply PMD corrections to compute damage-corrected ANI for all alignments
-            # This must happen AFTER PMD curve fitting and BEFORE EM/filtering
-            if pmd_context != NULL and pmd_context.model.finalized:
+            # Initialize hierarchical EM for ancient/modern classification if enabled and PMD available
+            if pmd_context != NULL and pmd_context.model.finalized and hierarchical_pmd:
                 if verbose:
-                    _info("Applying PMD damage corrections to alignments")
-                _announce_stage("PMD Correction", "Computing damage-corrected ANI for all alignments")
-                stage_timer = bf_monotonic_seconds()
-
-                # Get minimum ANI threshold from scoring config
-                min_ani_threshold = scoring_config.minimum_read_identity if scoring_config.minimum_read_identity > 0 else 90.0
-
-                # Apply corrections using the fitted PMD curve
-                passed_count = apply_pmd_corrections_py(
+                    _info("Initializing hierarchical EM for ancient/modern classification")
+                init_hierarchical_em_py(
                     <uintptr_t>memory_pool,
                     <uintptr_t>&pmd_context.model.curve,
-                    min_ani_threshold,
-                    0.01,  # epsilon (sequencing error rate)
-                    num_threads_c
+                    c_epsilon
                 )
-                _log_stage("PMD correction", stage_timer)
 
-                if verbose:
-                    _info(f"  Alignments passing corrected ANI >= {min_ani_threshold:.1f}%: {passed_count:,} / {memory_pool.alignment_count:,}")
-
-                # Initialize hierarchical EM for ancient/modern classification if enabled
-                if hierarchical_pmd:
-                    if verbose:
-                        _info("Initializing hierarchical EM for ancient/modern classification")
-                    init_hierarchical_em_py(
-                        <uintptr_t>memory_pool,
-                        <uintptr_t>&pmd_context.model.curve,
-                        0.01  # epsilon (sequencing error rate)
-                    )
-
-            # Update quality filter stats (now using corrected ANI filtering)
+            # Update quality filter stats (now using ANI-filtered count)
             with nogil:
                 update_quality_filter_stats(memory_pool.stats, memory_pool.alignment_count,
                                           unique_read_count, unique_reference_count)
 
-            # Batch array cleanup (contents already freed by streaming)
+            # Batch array cleanup (contents already freed by filtered streaming)
             if processing_batches:
                 free(processing_batches)
                 processing_batches = NULL
+
+            # Initialize Coverage-Weighted Reference Priors if enabled
+            if c_cwrp_lambda > 0.0:
+                if verbose:
+                    _info(f"Initializing CWRP with lambda={c_cwrp_lambda:.3f} iterative={c_iterative_auth}")
+                with nogil:
+                    if init_cwrp(memory_pool, c_cwrp_lambda, c_iterative_auth,
+                                 c_auth_update_interval, c_damage_weight,
+                                 c_low_cov_floor, c_low_cov_shrink_tau) != 0:
+                        with gil:
+                            raise RuntimeError("CWRP initialization failed")
+
+            # Set Posterior-Weighted Coverage Authenticity (Path B) parameters on pool
+            # These are read by execute_em_py to configure the EM loop
+            with nogil:
+                memory_pool.auth_update_interval_post = c_auth_update_interval_post if c_auth_post_enabled else 0
+                memory_pool.auth_scale_post = c_auth_scale_post
+                memory_pool.auth_lambda_ramp_iters = c_auth_lambda_ramp_iters
+                memory_pool.sample_pi_override = c_sample_pi_override
 
             # Execute EM algorithm before graph analysis
             if verbose:
                 _info("Running EM algorithm")
 
             # EM algorithm: phi-space optimization with SQUAREM acceleration
+            # Lazy import to avoid circular dependency (processor_em cimports from processor)
+            from .processor_em import execute_em_py
             _announce_stage("EM Optimization", "Running Expectation-Maximization algorithm with SQUAREM acceleration")
             stage_timer = bf_monotonic_seconds()
             if execute_em_py(
@@ -1151,6 +1273,7 @@ cdef score_alignments(
                 enable_globalization,
                 backtrack_factor,
                 max_backtrack_steps,
+                steplength_scheme,
                 num_threads,
             ) != 0:
                 raise RuntimeError("EM algorithm execution failed")
@@ -1183,20 +1306,85 @@ cdef score_alignments(
             if verbose:
                 _info(f"Analyzing reference graph...")
 
-            # Create mapping BEFORE potential graph analysis
-            mapping = create_reference_mapping(memory_pool, bam_header)
-            if not mapping:
-                raise RuntimeError("Failed to create reference mapping")
-
-            if remap_alignment_reference_ids(memory_pool, mapping) != 0:
-                destroy_reference_mapping(mapping)
-                raise RuntimeError("Failed to remap alignment reference IDs")
-
+            # Update the existing mapping to account for refs that lost all alignments during filtering.
+            # This preserves the original BAM header index mapping while compacting to eliminate gaps.
+            # The mapping was created before EM runs and contains original->compact1 indices.
+            # update_reference_mapping_after_filtering updates it to original->compact2 indices.
             if mapping != NULL:
+                if update_reference_mapping_after_filtering(mapping, memory_pool) != 0:
+                    destroy_reference_mapping(mapping)
+                    mapping = NULL
+                    raise RuntimeError("Failed to update reference mapping after filtering")
+
                 memory_pool.reference_count = mapping.n_retained_refs
                 _debug(1, f"APPLY MAPPING: Updated memory_pool.reference_count -> {mapping.n_retained_refs}")
                 if memory_pool.stats != NULL:
                     memory_pool.stats.post_probability_references = mapping.n_retained_refs
+            else:
+                raise RuntimeError("Reference mapping is NULL after probability filtering")
+
+            # Run Bayesian damage model AFTER remapping to compute damage metrics per reference
+            # Uses EM phi values as weights for damage count accumulation
+            #
+            # NOTE: The EM hierarchical gamma values are PRESERVED and remapped to new indices.
+            # These provide superior estimates via information pooling across references.
+            # The damage model computes amplitude, baseline, and log_bf for each reference,
+            # but does NOT overwrite gamma_values.
+            if calculate_pmd:
+                _announce_stage("Damage Model", "Computing per-reference P(ancient) using unified damage model")
+                stage_timer = bf_monotonic_seconds()
+                from .processor_damage_model import (
+                    allocate_damage_stats_py, free_damage_stats_py,
+                    accumulate_from_em_py
+                )
+                from .unified_damage import fit_unified_from_damage_stats_py
+                try:
+                    # Remap EM gamma values to new reference indices (preserves hierarchical shrinkage)
+                    old_gamma = memory_pool.gamma_values
+
+                    if old_gamma != NULL and mapping != NULL:
+                        new_gamma = <double*>calloc(memory_pool.reference_count, sizeof(double))
+                        if new_gamma != NULL:
+                            for new_idx in range(mapping.n_retained_refs):
+                                old_idx = mapping.new_to_old_tid[new_idx]
+                                if old_idx < mapping.n_original_refs:
+                                    new_gamma[new_idx] = old_gamma[old_idx]
+                            free(old_gamma)
+                            memory_pool.gamma_values = new_gamma
+                            _debug(1, f"Remapped {mapping.n_retained_refs} gamma values from EM")
+                        else:
+                            _warn("Failed to allocate remapped gamma array, keeping old")
+                    elif old_gamma == NULL:
+                        memory_pool.gamma_values = <double*>calloc(memory_pool.reference_count, sizeof(double))
+
+                    # Allocate arrays for damage model results
+                    if memory_pool.damage_amplitude != NULL:
+                        free(memory_pool.damage_amplitude)
+                    if memory_pool.damage_baseline != NULL:
+                        free(memory_pool.damage_baseline)
+                    if memory_pool.damage_log_bf != NULL:
+                        free(memory_pool.damage_log_bf)
+                    memory_pool.damage_amplitude = <double*>calloc(memory_pool.reference_count, sizeof(double))
+                    memory_pool.damage_baseline = <double*>calloc(memory_pool.reference_count, sizeof(double))
+                    memory_pool.damage_log_bf = <double*>calloc(memory_pool.reference_count, sizeof(double))
+                    if memory_pool.gamma_values == NULL or memory_pool.damage_amplitude == NULL or memory_pool.damage_baseline == NULL or memory_pool.damage_log_bf == NULL:
+                        raise MemoryError("Failed to allocate damage model arrays")
+
+                    # Accumulate damage counts from alignments weighted by EM posteriors
+                    damage_stats_ptr = allocate_damage_stats_py(memory_pool.reference_count)
+                    is_ss = library_type == "ss"
+                    accumulate_from_em_py(<uintptr_t>memory_pool, damage_stats_ptr, is_ss, num_threads)
+
+                    # Fit unified damage model (data-driven tau, Gamma shrinkage for amplitudes)
+                    damage_result = fit_unified_from_damage_stats_py(
+                        <uintptr_t>memory_pool, damage_stats_ptr, is_ss
+                    )
+                    if verbose:
+                        _info(f"Unified damage model: tau={damage_result['tau']:.2f}, {damage_result['n_ancient']}/{damage_result['n_fitted']} ancient (p>0.5)")
+                    free_damage_stats_py(damage_stats_ptr)
+                except Exception as e:
+                    _warn(f"Damage model failed: {e}")
+                _log_stage("Unified damage model", stage_timer)
 
             pattern_data = <ReferencePattern*>calloc(memory_pool.reference_count, sizeof(ReferencePattern))
             if not pattern_data:
@@ -1237,10 +1425,46 @@ cdef score_alignments(
 
                 _announce_stage("Connectivity Analysis", "Constructing reference connectivity graph and analyzing read categories")
                 stage_timer = bf_monotonic_seconds()
+                # Build graph if clustering is enabled OR GMRF smoothing is requested
                 filtered_graph = analyze_reference_graph(memory_pool, pattern_data, em_config.minimum_read_coverage,
-                                          &em_config, bam_header, mapping, verbose, clustering, tsv_file_path_c,
+                                          &em_config, bam_header, mapping, verbose, clustering or enable_gmrf_c, tsv_file_path_c,
                                           graph_min_edge_weight_c, NULL, read_index)
                 _log_stage("Reference graph analysis", stage_timer)
+
+                # GMRF smoothing for reference-level ancientness estimates (profile-only)
+                # Requires nodes array to be populated (done in analyze_reference_graph)
+                if enable_gmrf_c and filtered_graph != NULL and memory_pool.gamma_values != NULL:
+                    if filtered_graph.nodes != NULL and ref_stats != NULL:
+                        _announce_stage("GMRF Smoothing", "Smoothing reference ancientness using graph structure")
+                        gmrf_stage_timer = bf_monotonic_seconds()
+
+                        gmrf_n_reads = <uint32_t*>malloc(
+                            memory_pool.reference_count * sizeof(uint32_t))
+                        if gmrf_n_reads != NULL:
+                            for gmrf_i in range(<int32_t>memory_pool.reference_count):
+                                gmrf_n_reads[gmrf_i] = ref_stats[gmrf_i].total_reads
+
+                            with nogil:
+                                gmrf_result = apply_gmrf_smoothing_to_graph(
+                                    filtered_graph,
+                                    memory_pool.gamma_values,
+                                    memory_pool.damage_log_bf,
+                                    gmrf_n_reads,
+                                    <uint32_t>memory_pool.reference_count,
+                                    gmrf_tau_c,
+                                    100,   # max_iter
+                                    1e-6,  # tol
+                                    verbose_c,
+                                )
+
+                            free(gmrf_n_reads)
+                            gmrf_n_reads = NULL
+
+                            if gmrf_result == 0:
+                                _log_stage("GMRF smoothing", gmrf_stage_timer)
+                            else:
+                                if verbose:
+                                    bf_logging.warn("GMRF smoothing failed, using unsmoothed values")
 
                 # Taxonomy-aware graph analysis (if databases provided)
                 if taxonomy_db is not None and taxonomy_accession_map is not None:
@@ -1746,6 +1970,23 @@ def process_bam_with_em(
     entropy_mixed_threshold=2.0,
     entropy_highly_mixed_threshold=3.0,
     tax_ambiguity_removal_level=2,
+    # Coverage-Weighted Reference Priors (CWRP)
+    cwrp_lambda=0.0,
+    iterative_auth=False,
+    auth_update_interval=5,
+    damage_weight=1.0,
+    low_cov_floor=10,
+    low_cov_shrink_tau=50.0,
+    # Posterior-Weighted Coverage Authenticity (Path B)
+    auth_post_enabled=False,
+    auth_update_interval_post=3,
+    auth_scale_post=4.0,
+    auth_lambda_ramp_iters=5,
+    # Sample-level P(ancient) gate
+    sample_pi_override=0.0,
+    # GMRF smoothing (profile-only)
+    enable_gmrf=False,
+    gmrf_tau=1.0,
 ):
     """
     High-level entry point to process a BAM file with the EM-based pipeline.
@@ -1779,38 +2020,7 @@ def process_bam_with_em(
         Summary information including alignment counts, EM statistics and
         processing metadata.
     """
-    """
-    ENHANCED EM with DOMINANCE REGULARIZATION
-    
-    NEW Dominance Regularization Features:
-    - Prevents "rich-get-richer" dynamics in mixture models
-    - Theoretically sound regularization based on exponential penalties
-    - Adaptive strength based on dataset entropy characteristics
-    - Zero overhead when disabled (enable_dominance_regularization=False)
-
-    Dominance Regularization Parameters:
-    - enable_dominance_regularization: Master switch (default: True)
-    - dominance_strength: Base penalty strength (default: 2.0, range: 0.1-10.0)
-    - use_adaptive_dominance: Adapt penalty to dataset entropy (default: True)
-    - entropy_scaling_factor: How much entropy affects penalty (default: 1.0)
-    - min_penalty_strength: Minimum penalty strength (default: 0.1)
-    - max_penalty_strength: Maximum penalty strength (default: 10.0)
-
-    Theory:
-    Dominance regularization applies exp(-strength * π_j) factor to prevent
-    references with high mixture weights from becoming overly dominant.
-    Maintains theoretical EM guarantees while improving convergence.
-    """
-
-    if verbose:
-        _info(f"[DOMINANCE REGULARIZATION] {'ENABLED' if enable_dominance_regularization else 'DISABLED'}")
-        if enable_dominance_regularization:
-            _info(f"  Base strength: {dominance_strength}")
-            _info(f"  Adaptive: {'YES' if use_adaptive_dominance else 'NO'}")
-            _info(f"  Strength range: [{min_penalty_strength}, {max_penalty_strength}]")
-            _info(f"  Entropy scaling: {entropy_scaling_factor}")
-        else:
-            _info(f"  Standard EM - no dominance regularization")
+    # Anti-dominance behavior is controlled via em_power_rho (φ-space EM)
 
     clock_start = bf_logging.start_timer()
 
@@ -1899,6 +2109,23 @@ def process_bam_with_em(
             entropy_mixed_threshold=entropy_mixed_threshold,
             entropy_highly_mixed_threshold=entropy_highly_mixed_threshold,
             tax_ambiguity_removal_level=tax_ambiguity_removal_level,
+            # Coverage-Weighted Reference Priors
+            cwrp_lambda=cwrp_lambda,
+            iterative_auth=iterative_auth,
+            auth_update_interval=auth_update_interval,
+            damage_weight=damage_weight,
+            low_cov_floor=low_cov_floor,
+            low_cov_shrink_tau=low_cov_shrink_tau,
+            # Posterior-Weighted Coverage Authenticity (Path B)
+            auth_post_enabled=auth_post_enabled,
+            auth_update_interval_post=auth_update_interval_post,
+            auth_scale_post=auth_scale_post,
+            auth_lambda_ramp_iters=auth_lambda_ramp_iters,
+            # Sample-level P(ancient) gate
+            sample_pi_override=sample_pi_override,
+            # GMRF smoothing
+            enable_gmrf=enable_gmrf,
+            gmrf_tau=gmrf_tau,
         )
 
         processing_time = bf_monotonic_seconds() - clock_start
@@ -1918,15 +2145,6 @@ def process_bam_with_em(
             'total_time': float(processing_time),
             'memory_pool_available': bool(result.get('memory_pool_available', False)),
 
-            # Enhanced dominance regularization results
-            'dominance_regularization_enabled': bool(enable_dominance_regularization),
-            # dominance_strength may be None (auto-tune mode). Coerce safely.
-            'dominance_strength_used': float(dominance_strength)
-                if dominance_strength is not None else 0.0,
-            'adaptive_dominance': bool(use_adaptive_dominance),
-            'entropy_scaling': float(entropy_scaling_factor)
-                if entropy_scaling_factor is not None else 1.0,
-            
             # PMD results
             'pmd_enabled': bool(result.get('pmd_enabled', False)),
             'library_type': result.get('library_type', 'ds'),
@@ -1939,14 +2157,10 @@ def process_bam_with_em(
             'globalization_enabled': bool(enable_globalization),
             'steplength_scheme': f"S{steplength_scheme}",
             'paper_aligned': True,
-            'implementation': 'Varadhan & Roland (2008) + Dominance Regularization + PMD + Ultra-fast ZP'
+            'implementation': 'Varadhan & Roland (2008) SQUAREM + PMD + Ultra-fast ZP'
         }
 
         if verbose:
-            _info(f"Dominance regularization: {formatted_result['dominance_regularization_enabled']}")
-            if formatted_result['dominance_regularization_enabled']:
-                _info(f"Penalty strength: {formatted_result['dominance_strength_used']}")
-                _info(f"Adaptive: {formatted_result['adaptive_dominance']}")
             _info(f"PMD enabled: {formatted_result['pmd_enabled']}")
             _info(f"Implementation: {formatted_result['implementation']}")
 
@@ -1971,13 +2185,6 @@ def process_bam_with_em(
             'final_likelihood': 0.0,
             'total_time': processing_time,
             'memory_pool_available': False,
-            'dominance_regularization_enabled': enable_dominance_regularization,
-            # Return safe numeric defaults on failure to avoid downstream float(None)
-            'dominance_strength_used': float(dominance_strength)
-                if dominance_strength is not None else 0.0,
-            'adaptive_dominance': use_adaptive_dominance,
-            'entropy_scaling': float(entropy_scaling_factor)
-                if entropy_scaling_factor is not None else 1.0,
             'pmd_enabled': calculate_pmd,
             'library_type': library_type,
             'zp_values_precomputed': False,
@@ -1987,7 +2194,7 @@ def process_bam_with_em(
             'globalization_enabled': enable_globalization,
             'steplength_scheme': f"S{steplength_scheme}",
             'paper_aligned': True,
-            'implementation': 'Varadhan & Roland (2008) + Dominance Regularization + PMD - FAILED'
+            'implementation': 'Varadhan & Roland (2008) SQUAREM + PMD - FAILED'
         }
     finally:
         # Cleanup any remaining global memory

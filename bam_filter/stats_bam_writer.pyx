@@ -12,6 +12,7 @@
 
 from libc.stdint cimport int32_t, int64_t, uint32_t, uint8_t, uint16_t
 from libc.stdlib cimport malloc, free
+from libc.string cimport memcpy, memset
 
 from bam_filter.stats cimport RefStats
 from bam_filter.generic_filters cimport GenericFilters, passes_generic_filters
@@ -19,6 +20,7 @@ from bam_filter.processor cimport (
     min_int32,
     samFile,
     sam_hdr_t,
+    AlignmentScoringConfig,
 )
 from bam_filter.processor_types cimport (
     bam1_t,
@@ -29,6 +31,7 @@ from bam_filter.processor_types cimport (
     bam_destroy1,
     bam_aux_get,
     bam_aux2i,
+    bam_aux_append,
     sam_index_load,
     hts_idx_destroy,
     sam_itr_queryi,
@@ -57,6 +60,16 @@ from bam_filter.processor_types cimport (
 from bam_filter.processor_mapping cimport ReferenceMapping, create_filtered_header_efficient
 
 from bam_filter.stats_bam_writer cimport ReferenceFilter
+from bam_filter.processor_pmd cimport (
+    PMDCurve,
+    ANISnapshot,
+    compute_corrected_ani,
+)
+from bam_filter.processor_md_quality cimport (
+    ANIStats,
+    calculate_md_quality_score_with_stats,
+    initialize_quality_lookup_tables,
+)
 
 cdef extern from "time.h":
     cdef struct timespec:
@@ -178,7 +191,9 @@ cdef int write_filtered_bam_streaming(
     int num_threads,
     double min_read_ani_c,
     int min_read_length_c,
-    int max_read_length_c
+    int max_read_length_c,
+    PMDCurve* pmd_curve,
+    float pmd_epsilon
 ) except -1 nogil:
     cdef samFile* output_bam = NULL
     cdef hts_idx_t* bam_index = NULL
@@ -201,6 +216,15 @@ cdef int write_filtered_bam_streaming(
     cdef double aln_ani
     cdef timespec ts_write_start, ts_write_end
     cdef double write_sec = <double>0.0
+
+    # Damage correction variables
+    cdef bint use_damage_correction = (pmd_curve != NULL)
+    cdef ANIStats ani_stats
+    cdef ANISnapshot ani_snapshot
+    cdef AlignmentScoringConfig scoring_config
+    cdef float corrected_ani
+    cdef float da_value
+    cdef uint8_t da_tag_data[4]  # Float is 4 bytes
 
 
     if ref_filter.n_filtered_refs == 0:
@@ -288,6 +312,17 @@ cdef int write_filtered_bam_streaming(
             if not record:
                 ret = -1
             else:
+                # Initialize scoring config for damage correction
+                if use_damage_correction:
+                    memset(&scoring_config, 0, sizeof(AlignmentScoringConfig))
+                    scoring_config.minimum_read_identity = 0.0  # No pre-filter, we filter by DA
+                    scoring_config.minimum_read_length = min_read_length_c
+                    scoring_config.maximum_read_length = max_read_length_c
+                    scoring_config.calculate_pmd = False
+                    scoring_config.is_single_stranded = pmd_curve.is_single_stranded
+                    initialize_quality_lookup_tables()
+                    bf_nogil_logf_notime(<const char*>NULL, <const char*>b"Damage correction enabled: filtering by corrected ANI (DA), adding DA tags\n")
+
                 for orig_tid in range(mapping.n_original_refs):
                     if ret != 0:
                         break
@@ -305,18 +340,52 @@ cdef int write_filtered_bam_streaming(
                             if aln_read_length < min_read_length_c or aln_read_length > max_read_length_c:
                                 continue
 
-                            nm_tag_local = bam_aux_get(record, <const char*>b"NM")
-                            nm_val_local = -1
-                            aln_ani = <double>0.0
-                            if nm_tag_local:
-                                nm_val_local = bam_aux2i(nm_tag_local)
-                            if nm_val_local >= 0 and aln_read_length > 0:
-                                aln_ani = (1.0 - (<double>nm_val_local / aln_read_length)) * 100.0
-                            else:
-                                aln_ani = <double>0.0
+                            if use_damage_correction:
+                                # Compute corrected ANI using PMD curve
+                                memset(&ani_stats, 0, sizeof(ANIStats))
+                                calculate_md_quality_score_with_stats(
+                                    record, original_header, &scoring_config,
+                                    NULL,       # pmd_result - not needed
+                                    &ani_stats, # ANI stats output
+                                    NULL        # pmd_acc - not collecting stats
+                                )
 
-                            if aln_ani < min_read_ani_c:
-                                continue
+                                # Build ANI snapshot from stats
+                                ani_snapshot.aligned_length = ani_stats.aligned_length
+                                ani_snapshot.match_count = ani_stats.match_count
+                                ani_snapshot.ct_5p_count = ani_stats.ct_5p_count
+                                ani_snapshot.ga_3p_count = ani_stats.ga_3p_count
+                                ani_snapshot.other_mm_count = 0
+                                ani_snapshot.flags = 0
+                                ani_snapshot.c_at_5p_count = ani_stats.c_at_5p_count
+                                ani_snapshot.g_at_3p_count = ani_stats.g_at_3p_count
+
+                                # Compute corrected ANI (DA)
+                                corrected_ani = compute_corrected_ani(&ani_snapshot, pmd_curve, pmd_epsilon)
+                                da_value = corrected_ani
+
+                                # Filter by corrected ANI
+                                if <double>corrected_ani < min_read_ani_c:
+                                    continue
+
+                                # Add DA tag to alignment
+                                memcpy(da_tag_data, &da_value, 4)
+                                bam_aux_append(record, <const char*>b"DA", <char>102, 4, da_tag_data)  # 'f' = 102
+
+                            else:
+                                # Original behavior: filter by raw ANI from NM tag
+                                nm_tag_local = bam_aux_get(record, <const char*>b"NM")
+                                nm_val_local = -1
+                                aln_ani = <double>0.0
+                                if nm_tag_local:
+                                    nm_val_local = bam_aux2i(nm_tag_local)
+                                if nm_val_local >= 0 and aln_read_length > 0:
+                                    aln_ani = (1.0 - (<double>nm_val_local / aln_read_length)) * 100.0
+                                else:
+                                    aln_ani = <double>0.0
+
+                                if aln_ani < min_read_ani_c:
+                                    continue
 
                             record.core.tid = <int64_t>mapped_new
 

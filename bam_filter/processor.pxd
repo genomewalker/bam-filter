@@ -48,23 +48,56 @@ cdef struct WriteBatch:
 from libc.stddef cimport size_t
 from libc.stdint cimport int64_t, uint16_t, uint8_t
 
+# -----------------------------------------------------------------------------
+# Memory-optimized alignment storage using split arrays
+# Core struct (16 bytes) + optional arrays allocated only when needed
+# -----------------------------------------------------------------------------
+
+# Core alignment data - always allocated (16 bytes, cache-line friendly)
+cdef struct AlignmentCore:
+    uint32_t reference_index      # Reference sequence index
+    float    alignment_score      # Log-likelihood alignment score
+    uint32_t alignment_position   # Start position in reference
+    uint16_t aligned_length       # Total aligned bases
+    uint16_t match_count          # Exact matches (for AN tag)
+
+# Hierarchical EM data - allocated only when hierarchical_em_enabled (12 bytes)
+cdef struct HierarchicalData:
+    float damage_llr              # log(L_ancient/L_modern) position-specific
+    float log_L_anc               # log P(alignment | ancient DNA model)
+    float log_L_mod               # log P(alignment | modern DNA model)
+
+# Damage counts for gamma update - allocated only when needed (4 bytes packed)
+cdef struct DamageCounts:
+    uint8_t ct_5p_count           # C→T mismatches in first 8bp from 5' end
+    uint8_t ga_3p_count           # G→A mismatches in last 8bp from 3' end
+    uint8_t c_at_5p_count         # C bases in reference at first 8bp (damage zone)
+    uint8_t g_at_3p_count         # G bases in reference at last 8bp (damage zone)
+
+# BAM writer auxiliary data - allocated only for BAM output (8 bytes)
+cdef struct BAMWriterAux:
+    float    pmd_score            # PMD score for PM:f tag output
+    float    corrected_ani        # Damage-corrected ANI percentage (0-100, for DA:f tag)
+
+# Legacy Alignment struct for backwards compatibility during transition
+# TODO: Remove after full migration to split arrays
 cdef struct Alignment:
     uint32_t read_index
     uint32_t reference_index
     uint32_t alignment_position
     float    alignment_score
     float    pmd_score
-    # ANI snapshot fields (for on-the-fly AN/DA tag computation)
     uint16_t aligned_length       # Total aligned bases
     uint16_t match_count          # Exact matches
     uint8_t  ct_5p_count          # C→T mismatches in first 8bp from 5' end
     uint8_t  ga_3p_count          # G→A mismatches in last 8bp from 3' end
-    # Damage opportunity counts (for hierarchical EM)
     uint8_t  c_at_5p_count        # C bases in reference at first 8bp (5' damage zone)
     uint8_t  g_at_3p_count        # G bases in reference at last 8bp (3' damage zone)
-    # Damage-corrected ANI (computed after PMD curve fitting)
     float    corrected_ani        # Damage-corrected ANI percentage (0-100)
     uint8_t  passes_ani_filter    # 1 if passes corrected ANI threshold, 0 otherwise
+    float    damage_llr           # log(L_ancient/L_modern) using position-specific D(z)
+    float    log_L_anc            # log P(alignment | ancient DNA model)
+    float    log_L_mod            # log P(alignment | modern DNA model)
 
 
 cdef struct MemoryPool:
@@ -87,6 +120,18 @@ cdef struct MemoryPool:
     int64_t alignment_capacity       # Allocated capacity for alignments array
     bint alignments_is_external
     int64_t original_alignment_count
+
+    # Split array storage (memory-optimized path)
+    AlignmentCore* alignment_cores   # Always allocated (16 bytes/alignment)
+    uint32_t* read_indices           # Always allocated (4 bytes/alignment) - needed for sort/index
+    HierarchicalData* hierarchical   # Optional: only when hierarchical_em_enabled
+    DamageCounts* damage_counts      # Optional: only when damage gamma update needed
+    BAMWriterAux* bam_aux            # Optional: only when writing BAM with AN/DA tags
+    bint use_split_arrays            # True if using split arrays instead of Alignment*
+    size_t read_indices_alloc_size   # mmap size for read_indices array (0 if malloc)
+    size_t hierarchical_alloc_size   # mmap size for hierarchical array (0 if malloc)
+    size_t damage_counts_alloc_size  # mmap size for damage_counts array (0 if malloc)
+    size_t bam_aux_alloc_size        # mmap size for bam_aux array (0 if malloc)
 
     # Memory management flags
     bint hash_data_dumped
@@ -129,6 +174,9 @@ cdef struct MemoryPool:
     # Hierarchical EM: Ancient/Modern Reference Classification
     bint hierarchical_em_enabled    # Whether hierarchical EM is active
     double* gamma_values            # γ_k: P(ancient | ref k) per reference [0,1]
+    double* damage_amplitude        # A_k: damage amplitude per reference (like metaDMG A_b)
+    double* damage_baseline         # b_k: baseline divergence per reference
+    double* damage_log_bf           # log Bayes factor: log[P(data|ancient)/P(data|modern)]
     double* eta_values              # η_k = logit(γ_k) for SQUAREM extrapolation
     double* S_anc_accum             # Accumulated weighted ancient posterior per ref
     double* S_mod_accum             # Accumulated weighted modern posterior per ref
@@ -139,6 +187,39 @@ cdef struct MemoryPool:
     float D_avg_5p                   # Average D(z) for 5' positions 1-8 (precomputed)
     float D_avg_3p                   # Average D(z) for 3' positions 1-8 (precomputed)
     float epsilon_error              # Sequencing error rate (default 0.01)
+
+    # Per-reference Bayesian damage model (computed after EM)
+    void* ref_damage_stats          # RefDamageStats* array [reference_count]
+    void* damage_hyperparams        # DamageModelHyperparams* (global hyperparameters)
+
+    # Coverage-Weighted Reference Priors (CWRP)
+    double* authenticity_scores     # Per-reference authenticity scores [0,1] (hard/unweighted - path A)
+    bint cwrp_enabled               # Whether CWRP is active
+    double cwrp_lambda              # CWRP weight parameter
+
+    # Posterior-Weighted Coverage Authenticity (Path B - used by CWRP inside EM)
+    double* authenticity_scores_post  # Posterior-weighted authenticity [0,1] for CWRP
+    double* norm_entropy_post         # Posterior-weighted normalized spatial entropy [0,1]
+    double* norm_gini_post            # Posterior-weighted normalized Gini [0,1]
+    int32_t auth_update_interval_post # Update B every N iterations (default 3)
+    double auth_scale_post            # Sigmoid scale for posterior authenticity (default 4.0)
+    int32_t auth_lambda_ramp_iters    # Ramp lambda from 0 to target over N iterations (default 5)
+    double sample_pi_override         # Sample-level P(ancient) gate; 0.0 = auto from PMD
+
+    # Ancientness Field (Full Fix: Joint γ-authenticity model)
+    double* eta_ancientness         # Latent ancientness η_j per reference
+    double* anc_feat_entropy        # Normalized spatial entropy [0,1]
+    double* anc_feat_gini           # Normalized Gini coefficient [0,1]
+    double* anc_feat_damage_5p      # Damage score at 5' end [0,1]
+    double* anc_feat_damage_3p      # Damage score at 3' end [0,1]
+    double* anc_feat_short_frac     # Fraction of short fragments [0,1]
+    double* anc_feat_mean_length    # Mean fragment length
+    double* anc_feat_read_count     # Posterior-weighted read count per ref
+    bint iterative_auth_enabled     # Update authenticity during EM iterations
+    int32_t auth_update_interval    # Update every N iterations (default 5)
+    double damage_weight            # Weight for damage in ancientness (default 1.0)
+    int32_t low_cov_floor_reads     # Shrink authenticity below this threshold
+    double low_cov_shrink_tau       # Strength of shrinkage to neutral
 
     # Pooled scratch arrays for filtering (pooled & reused)
     float* scratch_read_max_probs

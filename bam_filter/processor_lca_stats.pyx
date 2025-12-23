@@ -40,6 +40,10 @@ from bam_filter.processor_types cimport (
     sam_index_load, hts_idx_destroy, hts_idx_get_stat, sam_itr_queryi, sam_itr_next, hts_itr_destroy,
     hts_open, hts_close, hts_set_threads
 )
+from bam_filter.processor_pmd cimport PMDStatsAccumulator, RefDamageStats, DamageModelHyperparams
+from bam_filter.processor_damage_model cimport (
+    estimate_baseline, compute_bayes_factor, create_hyperparams
+)
 # Future: Stream-based merge join for O(1) memory (not used yet)
 # from bam_filter.sorted_merge_join cimport (
 #     SortedLCAReader, LCAEntry,
@@ -933,6 +937,10 @@ cdef int process_single_reference_stats(
     cdef uint64_t unmapped = 0
     hts_idx_get_stat(idx, tid, &mapped, &unmapped)
 
+    # Local PMD accumulator for per-position damage counts
+    cdef PMDStatsAccumulator pmd_acc
+    memset(&pmd_acc, 0, sizeof(PMDStatsAccumulator))
+
     cdef int ret = calculate_reference_stats(
         stats_bam,
         header,
@@ -949,7 +957,11 @@ cdef int process_single_reference_stats(
         trim_min,
         trim_max,
         verbose,
-        <void*>trusted_reads_hash_int  # Hash-based trusted reads (70% memory reduction!)
+        <void*>trusted_reads_hash_int,  # Hash-based trusted reads (70% memory reduction!)
+        &pmd_acc,  # Per-reference PMD accumulator for damage model
+        True,  # collect_damage_stats - enabled for damage model computation
+        NULL,  # pmd_curve - not used in LCA stats
+        0.0    # pmd_epsilon - not used in LCA stats
     )
 
     kh_destroy_seqid_map(unique_reads_map)
@@ -1000,6 +1012,20 @@ cdef dict _create_taxid_entry(int32_t taxid):
         'weighted_contiguity_breadth': 0.0,
         'complexity_penalized_coverage': 0.0,
         'overlap_redundancy_index': 0.0,
+        'mega_genome_sparsity_index': 0.0,
+        'coverage_compressibility_ratio': 0.0,
+        'feature_space_clustering_score': 0.0,
+        # Damage model outputs
+        'damage_ct_5p_count': 0,
+        'damage_ga_3p_count': 0,
+        'damage_c_at_5p_count': 0,
+        'damage_g_at_3p_count': 0,
+        'damage_rate_5p': 0.0,
+        'damage_rate_3p': 0.0,
+        'damage_amplitude': 0.0,
+        'damage_baseline': 0.0,
+        'damage_log_bf': 0.0,
+        'gamma_ancient': 0.5,
         'tax_abund_read': 0,
         'tax_abund_aln': 0,
         'tax_abund_tad': 0,
@@ -1017,6 +1043,13 @@ cdef dict _create_taxid_entry(int32_t taxid):
         'dust_std': 0.0,
         'read_aligned_length': 0.0,
         'read_aln_score': 0.0,
+        # ZP/ZS stats (from reassign/EM output)
+        'zp_mean': 0.0,
+        'zp_std': 0.0,
+        'zp_count': 0,
+        'zs_mean': 0.0,
+        'zs_std': 0.0,
+        'zs_count': 0,
         'mapping_quality': 0.0,
         'edit_distances': 0.0,
         'read_ani_mean': 0.0,
@@ -1035,6 +1068,13 @@ cdef dict _create_taxid_entry(int32_t taxid):
             'total_gc_bases': 0.0,
             'sum_aligned_length': 0.0,
             'sum_aln_score': 0.0,
+            # ZP/ZS accumulators
+            'sum_zp': 0.0,
+            'sum_zp_sq': 0.0,
+            'total_zp_count': 0,
+            'sum_zs': 0.0,
+            'sum_zs_sq': 0.0,
+            'total_zs_count': 0,
             'sum_mapq': 0.0,
             'sum_edit_dist': 0.0,
             'sum_mean_covered_weight': 0.0,
@@ -1068,6 +1108,19 @@ cdef dict _create_taxid_entry(int32_t taxid):
             'sum_cpc': 0.0,
             'sum_ori': 0.0,
             'sum_ori_weight': 0.0,
+            'sum_mgsi': 0.0,
+            'sum_ccr': 0.0,
+            'sum_fscs': 0.0,
+            # Damage counts accumulators (total)
+            'sum_ct_5p_count': 0,
+            'sum_ga_3p_count': 0,
+            'sum_c_at_5p_count': 0,
+            'sum_g_at_3p_count': 0,
+            # Per-position damage counts for centralized damage model (20 positions)
+            'sum_n_5p': [0.0] * 20,  # C opportunities at each 5' position
+            'sum_k_5p': [0.0] * 20,  # C→T mismatches at each 5' position
+            'sum_n_3p': [0.0] * 20,  # G opportunities at each 3' position
+            'sum_k_3p': [0.0] * 20,  # G→A mismatches at each 3' position
             'best_ref_alns': -1,
             'best_ref_name': None,
             'best_stats': None,
@@ -1098,6 +1151,12 @@ cdef void _accumulate_taxid_metrics(dict entry, RefStats* stats, str ref_name):
     cdef double ani_mean = stats.ani_mean
     cdef double total_read_bases = read_mean * weight if weight > 0 else 0.0
     cdef double total_gc_bases = (stats.read_gc_content_total / 100.0) * total_read_bases if total_read_bases > 0 else 0.0
+    # Per-position damage accumulation variables
+    cdef int z
+    cdef list sum_n_5p
+    cdef list sum_k_5p
+    cdef list sum_n_3p
+    cdef list sum_k_3p
 
     entry['n_refs'] += 1
     entry['total_alns'] += stats.n_alns
@@ -1134,6 +1193,15 @@ cdef void _accumulate_taxid_metrics(dict entry, RefStats* stats, str ref_name):
         accum['sum_dust_sq'] += _compute_sum_of_squares(stats.dust_mean, stats.dust_std, weight)
         accum['sum_aligned_length'] += stats.aligned_length_mean * weight
         accum['sum_aln_score'] += stats.aln_score_mean * weight
+        # ZP/ZS accumulation (use their own counts as weights)
+        if stats.zp_count > 0:
+            accum['sum_zp'] += stats.zp_mean * stats.zp_count
+            accum['sum_zp_sq'] += _compute_sum_of_squares(stats.zp_mean, stats.zp_std, stats.zp_count)
+            accum['total_zp_count'] += stats.zp_count
+        if stats.zs_count > 0:
+            accum['sum_zs'] += stats.zs_mean * stats.zs_count
+            accum['sum_zs_sq'] += _compute_sum_of_squares(stats.zs_mean, stats.zs_std, stats.zs_count)
+            accum['total_zs_count'] += stats.zs_count
         accum['sum_mapq'] += stats.mapq_mean * weight
         accum['sum_edit_dist'] += stats.edit_dist_mean * weight
 
@@ -1172,6 +1240,27 @@ cdef void _accumulate_taxid_metrics(dict entry, RefStats* stats, str ref_name):
     if stats.bases_covered > 0:
         accum['sum_ori'] += stats.overlap_redundancy_index * stats.bases_covered
         accum['sum_ori_weight'] += stats.bases_covered
+    # MGSI, CCR weighted by ref_length; FSCS weighted by n_reads
+    accum['sum_mgsi'] += stats.mega_genome_sparsity_index * stats.ref_length
+    accum['sum_ccr'] += stats.coverage_compressibility_ratio * stats.ref_length
+    accum['sum_fscs'] += stats.feature_space_clustering_score * stats.n_reads
+
+    # Damage counts accumulation (total)
+    accum['sum_ct_5p_count'] += stats.total_ct_5p_count
+    accum['sum_ga_3p_count'] += stats.total_ga_3p_count
+    accum['sum_c_at_5p_count'] += stats.total_c_at_5p_count
+    accum['sum_g_at_3p_count'] += stats.total_g_at_3p_count
+
+    # Per-position damage counts accumulation (for centralized damage model)
+    sum_n_5p = accum['sum_n_5p']
+    sum_k_5p = accum['sum_k_5p']
+    sum_n_3p = accum['sum_n_3p']
+    sum_k_3p = accum['sum_k_3p']
+    for z in range(20):
+        sum_n_5p[z] += stats.n_5p[z]
+        sum_k_5p[z] += stats.k_5p[z]
+        sum_n_3p[z] += stats.n_3p[z]
+        sum_k_3p[z] += stats.k_3p[z]
 
     if stats.n_alns > accum['best_ref_alns']:
         accum['best_ref_alns'] = stats.n_alns
@@ -1262,6 +1351,16 @@ cdef void finalize_taxid_entries(dict results_dict):
     cdef double bases_covered
     cdef dict best_stats
     cdef double ref_n
+    # Damage model variables
+    cdef RefDamageStats damage_stats
+    cdef DamageModelHyperparams* hyper
+    cdef int z
+    cdef list sum_n_5p
+    cdef list sum_k_5p
+    cdef list sum_n_3p
+    cdef list sum_k_3p
+    cdef double total_n
+    cdef double total_reads
 
     for entry in results_dict.values():
         accum = entry.get('_accum')
@@ -1295,6 +1394,21 @@ cdef void finalize_taxid_entries(dict results_dict):
 
             entry['read_aligned_length'] = accum['sum_aligned_length'] / total_alns
             entry['read_aln_score'] = accum['sum_aln_score'] / total_alns
+            # ZP/ZS finalization (use their own counts)
+            total_zp = accum['total_zp_count']
+            if total_zp > 0:
+                entry['zp_mean'] = accum['sum_zp'] / total_zp
+                entry['zp_count'] = total_zp
+                if total_zp > 1:
+                    variance = (accum['sum_zp_sq'] - (accum['sum_zp'] * accum['sum_zp']) / total_zp) / (total_zp - 1)
+                    entry['zp_std'] = sqrt(max(0.0, variance))
+            total_zs = accum['total_zs_count']
+            if total_zs > 0:
+                entry['zs_mean'] = accum['sum_zs'] / total_zs
+                entry['zs_count'] = total_zs
+                if total_zs > 1:
+                    variance = (accum['sum_zs_sq'] - (accum['sum_zs'] * accum['sum_zs']) / total_zs) / (total_zs - 1)
+                    entry['zs_std'] = sqrt(max(0.0, variance))
             entry['mapping_quality'] = accum['sum_mapq'] / total_alns
             entry['edit_distances'] = accum['sum_edit_dist'] / total_alns
             entry['read_ani_mean'] = accum['sum_ani'] / total_alns
@@ -1393,6 +1507,18 @@ cdef void finalize_taxid_entries(dict results_dict):
             entry['overlap_redundancy_index'] = accum['sum_ori'] / accum['sum_ori_weight']
         else:
             entry['overlap_redundancy_index'] = 0.0
+        # MGSI, CCR weighted by ref_length
+        if coverage_weight > 0:
+            entry['mega_genome_sparsity_index'] = accum['sum_mgsi'] / coverage_weight
+            entry['coverage_compressibility_ratio'] = accum['sum_ccr'] / coverage_weight
+        else:
+            entry['mega_genome_sparsity_index'] = 0.0
+            entry['coverage_compressibility_ratio'] = 0.0
+        # FSCS weighted by n_reads
+        if entry['total_reads'] > 0:
+            entry['feature_space_clustering_score'] = accum['sum_fscs'] / entry['total_reads']
+        else:
+            entry['feature_space_clustering_score'] = 0.0
 
         best_stats = accum['best_stats']
         if best_stats is not None:
@@ -1469,6 +1595,91 @@ cdef void finalize_taxid_entries(dict results_dict):
             entry['coverage_mean_trunc_per_ref_std'] = 0.0
             entry['coverage_covered_mean_per_ref'] = 0.0
             entry['coverage_covered_mean_per_ref_std'] = 0.0
+
+        # Compute damage model using centralized model from processor_damage_model
+        ct_5p = accum['sum_ct_5p_count']
+        ga_3p = accum['sum_ga_3p_count']
+        c_at_5p = accum['sum_c_at_5p_count']
+        g_at_3p = accum['sum_g_at_3p_count']
+
+        entry['damage_ct_5p_count'] = ct_5p
+        entry['damage_ga_3p_count'] = ga_3p
+        entry['damage_c_at_5p_count'] = c_at_5p
+        entry['damage_g_at_3p_count'] = g_at_3p
+
+        # Compute damage rates (simple ratios for output)
+        if c_at_5p > 0:
+            entry['damage_rate_5p'] = ct_5p / c_at_5p
+        else:
+            entry['damage_rate_5p'] = 0.0
+
+        if g_at_3p > 0:
+            entry['damage_rate_3p'] = ga_3p / g_at_3p
+        else:
+            entry['damage_rate_3p'] = 0.0
+
+        # Use centralized damage model: populate RefDamageStats with per-position counts
+        sum_n_5p = accum['sum_n_5p']
+        sum_k_5p = accum['sum_k_5p']
+        sum_n_3p = accum['sum_n_3p']
+        sum_k_3p = accum['sum_k_3p']
+        total_n = 0.0
+        total_reads = float(entry['total_reads'])
+        hyper = NULL
+
+        memset(&damage_stats, 0, sizeof(RefDamageStats))
+
+        # Copy per-position counts to RefDamageStats
+        for z in range(20):
+            damage_stats.n_5p[z] = sum_n_5p[z]
+            damage_stats.k_5p[z] = sum_k_5p[z]
+            damage_stats.n_3p[z] = sum_n_3p[z]
+            damage_stats.k_3p[z] = sum_k_3p[z]
+            total_n += sum_n_5p[z] + sum_n_3p[z]
+
+        damage_stats.total_weight = total_reads
+
+        # Check if we have enough data for the damage model
+        if total_n >= 10.0:
+            # Create default hyperparameters (NULL curve = exponential decay D_shape)
+            # global_baseline=0.005, baseline_strength=10.0, amplitude_mu=log(0.05),
+            # amplitude_sigma=1.0, rho=0.5, concentration=100.0
+            hyper = create_hyperparams(
+                NULL,    # curve - uses default exponential decay
+                0.005,   # global_baseline (sequencing error)
+                10.0,    # baseline_strength (prior weight)
+                -3.0,    # amplitude_mu (log(0.05) ~ -3.0)
+                1.0,     # amplitude_sigma
+                0.5,     # rho (uninformative prior)
+                100.0    # concentration (Beta-Binomial overdispersion)
+            )
+
+            if hyper != NULL:
+                # Estimate baseline from interior positions (16-20)
+                estimate_baseline(&damage_stats, hyper.baseline_alpha0, hyper.baseline_beta0)
+
+                # Compute Bayes factor using Beta-Binomial model
+                compute_bayes_factor(&damage_stats, hyper, 1)  # use_both_ends=True
+
+                # Extract results
+                entry['damage_baseline'] = damage_stats.baseline
+                entry['damage_amplitude'] = damage_stats.amplitude
+                entry['damage_log_bf'] = damage_stats.log_bf
+                entry['gamma_ancient'] = damage_stats.p_ancient
+
+                free(hyper)
+            else:
+                # Fallback: use defaults
+                entry['damage_baseline'] = 0.005
+                entry['damage_amplitude'] = 0.0
+                entry['damage_log_bf'] = 0.0
+                entry['gamma_ancient'] = 0.5
+        else:
+            # Not enough data - use uninformative prior
+            entry['damage_baseline'] = 0.005
+            entry['damage_amplitude'] = 0.0
+            entry['damage_log_bf'] = 0.0
+            entry['gamma_ancient'] = 0.5
 
         del entry['_accum']
 
@@ -2272,6 +2483,102 @@ cdef int propagate_hierarchical_stats(dict results_dict, dict taxid_unique_read_
     return 0
 
 
+def compute_authenticity_pvalues(dict results_dict, TaxonomyDatabase taxdb_py, int min_reads=3, bint verbose=False):
+    """Compute authenticity p-value for each taxon based on spatial coverage metrics.
+
+    The score = norm_spatial_entropy - norm_gini measures coverage evenness.
+    Real taxa have even coverage (high entropy, low gini) -> high score.
+    Contamination has clustered coverage (low entropy, high gini) -> low score.
+
+    P-value is computed PER RANK by fitting a normal to the upper 50% of scores
+    (assumed real) and computing P(score >= x) under that distribution.
+    Each rank has its own score distribution due to different aggregation levels.
+
+    Interpretation: LOW pvalue = likely authentic (score significantly high)
+                    HIGH pvalue = not significantly authentic (could be contamination)
+    """
+    from scipy import stats as scipy_stats
+    import numpy as np
+
+    # Group taxa by rank and collect scores
+    rank_scores = {}  # rank -> list of (taxid, score)
+
+    for taxid, entry in results_dict.items():
+        rank = taxdb_py.get_rank(taxid) or 'unknown'
+
+        n_reads = entry.get('total_reads', 0)
+        if n_reads < min_reads:
+            continue
+
+        norm_ent = entry.get('norm_spatial_entropy', 0.0)
+        norm_gini = entry.get('norm_gini', 0.0)
+
+        if norm_ent <= 0 or np.isnan(norm_ent) or np.isnan(norm_gini):
+            continue
+
+        score = norm_ent - norm_gini
+
+        if rank not in rank_scores:
+            rank_scores[rank] = []
+        rank_scores[rank].append((taxid, score))
+
+    # Fit distribution per rank
+    rank_params = {}  # rank -> (mu, std)
+    for rank, taxid_scores in rank_scores.items():
+        if len(taxid_scores) < 10:
+            continue
+
+        scores = np.array([s for _, s in taxid_scores])
+        median_score = np.median(scores)
+        upper_half = scores[scores >= median_score]
+
+        mu_real = np.mean(upper_half)
+        std_real = np.std(upper_half)
+
+        if std_real < 1e-6:
+            std_real = 0.1
+
+        rank_params[rank] = (mu_real, std_real)
+
+        if verbose:
+            bf_logging.log(LOG_TAG, f"Authenticity p-value [{rank}]: fitted from {len(upper_half)} taxa, mu={mu_real:.4f}, std={std_real:.4f}")
+
+    # Fallback: use genus params if available, or global
+    fallback_params = rank_params.get('genus')
+    if fallback_params is None and rank_params:
+        # Use the rank with most taxa as fallback
+        best_rank = max(rank_params.keys(), key=lambda r: len(rank_scores.get(r, [])))
+        fallback_params = rank_params[best_rank]
+        if verbose:
+            bf_logging.log(LOG_TAG, f"Using {best_rank} as fallback for ranks without enough samples")
+
+    if not fallback_params:
+        if verbose:
+            bf_logging.log(LOG_TAG, "Not enough taxa to compute authenticity p-values")
+        return
+
+    # Compute p-value for ALL taxa using rank-specific or fallback params
+    for taxid, entry in results_dict.items():
+        norm_ent = entry.get('norm_spatial_entropy', 0.0)
+        norm_gini = entry.get('norm_gini', 0.0)
+
+        if norm_ent <= 0 or np.isnan(norm_ent) or np.isnan(norm_gini):
+            entry['authenticity_score'] = 0.0
+            entry['authenticity_pvalue'] = 1.0
+            continue
+
+        score = norm_ent - norm_gini
+        entry['authenticity_score'] = score
+
+        # Use rank-specific params if available, otherwise fallback
+        rank = taxdb_py.get_rank(taxid) or 'unknown'
+        mu, std = rank_params.get(rank, fallback_params)
+
+        # P(score >= x) = 1 - CDF gives low pvalue for high scores (authentic)
+        pvalue = 1.0 - scipy_stats.norm.cdf(score, loc=mu, scale=std)
+        entry['authenticity_pvalue'] = pvalue
+
+
 cdef int write_taxid_stats(str output_path, dict results_dict, TaxonomyDatabase taxdb_py, bint verbose) except -1:
     """Write aggregated taxid stats to TSV file."""
     if verbose:
@@ -2290,7 +2597,9 @@ cdef int write_taxid_stats(str output_path, dict results_dict, TaxonomyDatabase 
             "read_length_median", "read_length_mode",
             "gc_content_mean", "gc_content_std", "gc_content_total",
             "dust_mean", "dust_std",
-            "read_aligned_length", "read_aln_score", "mapping_quality", "edit_distances",
+            "read_aligned_length", "read_aln_score",
+            "zp_mean", "zp_std", "zp_count", "zs_mean", "zs_std", "zs_count",
+            "mapping_quality", "edit_distances",
             "read_ani_mean", "read_ani_std", "read_ani_median",
             "bases_covered", "max_covered_bases", "mean_covered_bases",
             "coverage_mean", "coverage_mean_trunc", "coverage_mean_trunc_len", "coverage_covered_mean",
@@ -2302,6 +2611,8 @@ cdef int write_taxid_stats(str output_path, dict results_dict, TaxonomyDatabase 
             "n_bins", "site_density",
             "spatial_entropy", "norm_spatial_entropy", "gini", "norm_gini", "c_v", "d_i", "cov_evenness",
             "n_intervals", "weighted_contiguity_breadth", "complexity_penalized_coverage", "overlap_redundancy_index",
+            "mega_genome_sparsity_index", "coverage_compressibility_ratio", "feature_space_clustering_score",
+            "authenticity_score", "authenticity_pvalue",
             "tax_abund_read", "tax_abund_aln", "tax_abund_tad", "n_reads_tad",
             "tax_path"
         ]
@@ -2353,6 +2664,12 @@ cdef int write_taxid_stats(str output_path, dict results_dict, TaxonomyDatabase 
                     f"{stats.get('dust_std', 0.0):.4f}",
                     f"{stats.get('read_aligned_length', 0.0):.2f}",
                     f"{stats.get('read_aln_score', 0.0):.2f}",
+                    f"{stats.get('zp_mean', 0.0):.6f}",
+                    f"{stats.get('zp_std', 0.0):.6f}",
+                    str(stats.get('zp_count', 0)),
+                    f"{stats.get('zs_mean', 0.0):.4f}",
+                    f"{stats.get('zs_std', 0.0):.4f}",
+                    str(stats.get('zs_count', 0)),
                     f"{stats.get('mapping_quality', 0.0):.2f}",
                     f"{stats.get('edit_distances', 0.0):.2f}",
                     f"{stats.get('read_ani_mean', 0.0):.2f}",
@@ -2389,6 +2706,11 @@ cdef int write_taxid_stats(str output_path, dict results_dict, TaxonomyDatabase 
                     f"{stats.get('weighted_contiguity_breadth', 0.0):.8f}",
                     f"{stats.get('complexity_penalized_coverage', 0.0):.8f}",
                     f"{stats.get('overlap_redundancy_index', 0.0):.4f}",
+                    f"{stats.get('mega_genome_sparsity_index', 0.0):.4f}",
+                    f"{stats.get('coverage_compressibility_ratio', 0.0):.4f}",
+                    f"{stats.get('feature_space_clustering_score', 0.0):.4f}",
+                    f"{stats.get('authenticity_score', 0.0):.4f}",
+                    f"{stats.get('authenticity_pvalue', 1.0):.6f}",
                     str(stats.get('tax_abund_read', 0)),
                     str(stats.get('tax_abund_aln', 0)),
                     str(stats.get('tax_abund_tad', 0)),
@@ -2568,6 +2890,14 @@ cdef int process_lca_stats(
     if verbose:
         bf_logging.log(LOG_TAG, "LCA read counts propagated in %.2f seconds", phase_end - phase_start)
 
+    # Compute authenticity p-values
+    bf_logging.summary("Computing authenticity p-values...")
+    phase_start = bf_monotonic_seconds()
+    compute_authenticity_pvalues(results_dict, taxdb_py, min_reads=3, verbose=verbose)
+    phase_end = bf_monotonic_seconds()
+    if verbose:
+        bf_logging.log(LOG_TAG, "Authenticity p-values computed in %.2f seconds", phase_end - phase_start)
+
     # Write output (pass Python wrapper for taxonomy methods)
     bf_logging.summary("Writing output file...")
     phase_start = bf_monotonic_seconds()
@@ -2645,3 +2975,206 @@ def process_lca_stats_wrapper(
         num_threads,
         verbose
     )
+
+
+def process_lca_stats_from_bam(
+    bytes bam_path,
+    bytes lca_per_read_path,
+    TaxonomyDatabase taxdb,
+    bytes taxonomy_db_path,
+    int num_threads,
+    bint verbose
+) -> dict:
+    """
+    Compute taxon-level statistics from BAM and LCA per-read assignments.
+
+    Returns dict mapping taxid -> stats dict with all accumulated metrics.
+    This is used by the probabilistic profiler to get stats without writing to file.
+
+    Parameters
+    ----------
+    bam_path : bytes
+        Path to BAM file (encoded as UTF-8 bytes)
+    lca_per_read_path : bytes
+        Path to per-read LCA TSV file
+    taxdb : TaxonomyDatabase
+        Taxonomy database object
+    taxonomy_db_path : bytes
+        Path to taxonomy database directory (for loading accession_map)
+    num_threads : int
+        Number of threads to use
+    verbose : bool
+        Enable verbose logging
+
+    Returns
+    -------
+    dict
+        Dictionary mapping taxid (int) -> stats dict with keys like:
+        - n_reads, n_alns
+        - breadth, coverage_mean, coverage_covered_mean
+        - norm_spatial_entropy, norm_gini
+        - weighted_contiguity_breadth, complexity_penalized_coverage, overlap_redundancy_index
+        - dust_mean, read_ani_mean
+        - authenticity_score, authenticity_pvalue
+        - tax_abund_tad
+    """
+    cdef const char* bam_path_c = <const char*>bam_path
+    cdef const char* lca_per_read_path_c = <const char*>lca_per_read_path
+    cdef const char* taxonomy_db_path_c = <const char*>taxonomy_db_path
+
+    cdef double total_start = bf_monotonic_seconds()
+    cdef double phase_start, phase_end
+
+    if verbose:
+        bf_logging.log(LOG_TAG, "Computing taxon stats from BAM (no file output)...")
+
+    cdef TaxonomyDB* c_taxdb = taxdb.db
+
+    cdef htsFile* bam_file = hts_open(bam_path_c, b"r")
+    if bam_file == NULL:
+        raise IOError(f"Failed to open BAM file: {bam_path.decode('utf-8')}")
+
+    cdef sam_hdr_t* bam_header = sam_hdr_read(bam_file)
+    if bam_header == NULL:
+        hts_close(bam_file)
+        raise IOError("Failed to read BAM header")
+
+    hts_close(bam_file)
+
+    cdef int n_refs = sam_hdr_nref(bam_header)
+    cdef list reference_accessions = []
+    cdef int i
+
+    if verbose:
+        bf_logging.log(LOG_TAG, f"Collecting {n_refs:,} reference names from BAM header...")
+
+    for i in range(n_refs):
+        ref_name = sam_hdr_tid2name(bam_header, i)
+        reference_accessions.append(ref_name.decode('utf-8'))
+
+    if verbose:
+        bf_logging.log(LOG_TAG, f"Loading accession map (filtered to {len(reference_accessions):,} references)...")
+
+    acc_map_path = os.path.join(taxonomy_db_path.decode('utf-8'), 'accession_map.parquet')
+    cdef AccessionMapping acc_map_obj = load_accession_map_from_file(
+        acc_map_path,
+        accession_filter=reference_accessions
+    )
+
+    if acc_map_obj is None:
+        raise IOError(f"Failed to load accession map from {acc_map_path}")
+
+    cdef AccessionMap* acc_map = acc_map_obj.amap
+
+    if acc_map == NULL:
+        raise IOError(f"AccessionMap C pointer is NULL after loading from {acc_map_path}")
+
+    if verbose:
+        bf_logging.summary("Loading LCA assignments...")
+    phase_start = bf_monotonic_seconds()
+
+    cdef kh_read_hash_to_taxid_t* read_hash_to_taxid = load_lca_assignments_hashed(lca_per_read_path_c, verbose)
+
+    phase_end = bf_monotonic_seconds()
+    if verbose:
+        bf_logging.log(LOG_TAG, "LCA assignments loaded in %.2f seconds", phase_end - phase_start)
+
+    cdef kh_taxid_count_t* lca_counts_hash = NULL
+    cdef dict taxid_unique_read_counts = {}
+    cdef khint_t k_lca
+    cdef int32_t lca_taxid
+    cdef int64_t lca_count
+
+    if verbose:
+        bf_logging.summary("Extracting unique read counts per taxon...")
+    phase_start = bf_monotonic_seconds()
+
+    with nogil:
+        lca_counts_hash = count_reads_per_lca_taxid_hashed(read_hash_to_taxid)
+
+    if lca_counts_hash == NULL:
+        raise MemoryError("Failed to count reads per LCA taxid")
+
+    for k_lca in range(kh_begin_taxid_count(lca_counts_hash), kh_end_taxid_count(lca_counts_hash)):
+        if kh_exist_taxid_count(lca_counts_hash, k_lca):
+            lca_taxid = kh_key_taxid_count(lca_counts_hash, k_lca)
+            lca_count = kh_val_taxid_count(lca_counts_hash, k_lca)
+            taxid_unique_read_counts[lca_taxid] = lca_count
+
+    kh_destroy_taxid_count(lca_counts_hash)
+
+    phase_end = bf_monotonic_seconds()
+    if verbose:
+        bf_logging.log(LOG_TAG, "Extracted %d LCA taxids with read counts in %.2f seconds", len(taxid_unique_read_counts), phase_end - phase_start)
+
+    if verbose:
+        bf_logging.summary("Computing per-reference quality statistics (%d threads)...", num_threads)
+    phase_start = bf_monotonic_seconds()
+
+    cdef RefStats* ref_stats_array = compute_trusted_reference_stats(
+        bam_path_c,
+        bam_header,
+        read_hash_to_taxid,
+        LCA_STATS_MIN_READ_ANI,
+        LCA_STATS_MIN_READ_LENGTH,
+        LCA_STATS_MAX_READ_LENGTH,
+        LCA_STATS_SCALE,
+        LCA_STATS_TRIM_ENDS,
+        LCA_STATS_TRIM_MIN,
+        LCA_STATS_TRIM_MAX,
+        num_threads,
+        verbose
+    )
+
+    phase_end = bf_monotonic_seconds()
+    if verbose:
+        bf_logging.log(LOG_TAG, "Per-reference stats computed in %.2f seconds", phase_end - phase_start)
+
+    if verbose:
+        bf_logging.summary("Aggregating statistics across taxonomy hierarchy...")
+    phase_start = bf_monotonic_seconds()
+
+    cdef dict results_dict = aggregate_reference_stats(
+        ref_stats_array,
+        n_refs,
+        bam_header,
+        taxdb,
+        acc_map,
+        verbose
+    )
+
+    phase_end = bf_monotonic_seconds()
+    if verbose:
+        bf_logging.log(LOG_TAG, "Reference stats aggregated in %.2f seconds", phase_end - phase_start)
+
+    if verbose:
+        bf_logging.summary("Propagating read counts through taxonomy...")
+    phase_start = bf_monotonic_seconds()
+
+    propagate_lca_read_counts(results_dict, taxid_unique_read_counts, taxdb, verbose)
+    finalize_taxid_entries(results_dict)
+
+    phase_end = bf_monotonic_seconds()
+    if verbose:
+        bf_logging.log(LOG_TAG, "LCA read counts propagated in %.2f seconds", phase_end - phase_start)
+
+    if verbose:
+        bf_logging.summary("Computing authenticity p-values...")
+    phase_start = bf_monotonic_seconds()
+    compute_authenticity_pvalues(results_dict, taxdb, min_reads=3, verbose=verbose)
+    phase_end = bf_monotonic_seconds()
+    if verbose:
+        bf_logging.log(LOG_TAG, "Authenticity p-values computed in %.2f seconds", phase_end - phase_start)
+
+    sam_hdr_destroy(bam_header)
+    if ref_stats_array != NULL:
+        free(ref_stats_array)
+
+    if read_hash_to_taxid != NULL:
+        kh_destroy_read_hash_to_taxid(read_hash_to_taxid)
+
+    cdef double total_end = bf_monotonic_seconds()
+    if verbose:
+        bf_logging.log(LOG_TAG, "Total taxon stats computation completed in %.2f seconds", total_end - total_start)
+
+    return results_dict

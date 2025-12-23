@@ -133,7 +133,7 @@ cdef void print_processing_stats(ProcessingStats* stats) noexcept nogil:
     bf_nogil_logf_notime(tag, "[STAGE 1] Initial BAM Reading\n")
     bf_nogil_logf_notime(tag, "  Total alignments:     %12lld\n", <long long>stats.initial_total_alignments)
     bf_nogil_logf_notime(tag, "  Unique reads:         %12lld\n", <long long>stats.initial_total_reads)
-    bf_nogil_logf_notime(tag, "  References with data: %12lld\n\n", <long long>stats.initial_total_references)
+    bf_nogil_logf_notime(tag, "  References in header: %12lld\n\n", <long long>stats.initial_total_references)
 
     if stats.post_quality_alignments > 0:
         bf_nogil_logf_notime(tag, "[STAGE 2] Quality Filtering (ANI >= %.1f%%, Length filters)\n", 90.0)
@@ -145,7 +145,7 @@ cdef void print_processing_stats(ProcessingStats* stats) noexcept nogil:
         )
         bf_nogil_logf_notime(tag, "  Alignments filtered:  %12lld\n", <long long>stats.filtered_quality_alignments)
         bf_nogil_logf_notime(tag, "  Unique reads kept:    %12lld\n", <long long>stats.post_quality_reads)
-        bf_nogil_logf_notime(tag, "  References kept:      %12lld\n\n", <long long>stats.post_quality_references)
+        bf_nogil_logf_notime(tag, "  Refs with alignments: %12lld\n\n", <long long>stats.post_quality_references)
 
     bf_nogil_logf_notime(tag, "[STAGE 3] EM Algorithm (Read Reassignment)\n")
     bf_nogil_logf_notime(tag, "  Iterations:           %12d\n", stats.em_iterations)

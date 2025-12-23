@@ -66,6 +66,20 @@ def list_filterable_columns():
             'gini_coefficient_normalized', 'coefficient_of_variation',
             'diversity_index', 'site_density'
         ],
+        'Contamination Detection': [
+            'interval_count', 'weighted_contiguity_breadth', 'complexity_penalized_coverage',
+            'overlap_redundancy_index', 'mega_genome_sparsity_index',
+            'coverage_compressibility_ratio', 'feature_space_clustering_score'
+        ],
+        'Authenticity Metrics': [
+            'authenticity_score', 'authenticity_pvalue'
+        ],
+        'Damage-Corrected ANI': [
+            'read_ani_corrected_mean', 'read_ani_corrected_std'
+        ],
+        'EM/Reassign Statistics': [
+            'zp_mean', 'zp_std', 'zs_mean', 'zs_std', 'zp_count', 'zs_count'
+        ],
         'Reference & Other': [
             'reference_length', 'reference_length_bam', 'bin_count',
             'abundance_read_based', 'abundance_alignment_based',
@@ -122,7 +136,7 @@ def filter_references(args):
     RuntimeError
         If filtering fails
     """
-    # Handle --list-columns (doesn't need BAM file)
+    # Handle --list-columns (doesn't need BAM file or --stats)
     if getattr(args, "list_columns", False):
         list_filterable_columns()
         sys.exit(0)
@@ -132,9 +146,13 @@ def filter_references(args):
     if bam_file is None and hasattr(args, "bam_file"):
         bam_file = getattr(args, "bam_file")
 
-    # Validate input exists (required for all operations except --list-columns)
+    # Validate required arguments
     if bam_file is None:
         raise ValueError("--bam argument is required (unless using --list-columns)")
+
+    stats_output = getattr(args, "output", None)
+    if not stats_output:
+        raise ValueError("--stats FILE is required")
     if not os.path.exists(bam_file):
         raise FileNotFoundError(f"Input BAM file not found: {bam_file}")
 
@@ -178,6 +196,13 @@ def filter_references(args):
             _error("Filter parsing error: %s", str(e))
             raise RuntimeError(f"Invalid filter specification: {e}") from e
 
+        # Require --stats-filtered when using --filter
+        if not getattr(args, "filtered_output", None):
+            raise ValueError(
+                "--stats-filtered is required when using --filter. "
+                "Provide a path to save filtered statistics."
+            )
+
     # Note: min_read_count is passed to compute_bam_stats for index-based pre-filtering
     # It is NOT added to generic_filters because it's applied earlier (before stats computation)
     # to skip references with too few reads using the BAM index
@@ -203,7 +228,7 @@ def filter_references(args):
         max_read_length=getattr(args, "max_read_length", defaults["max_read_length"]),
         min_read_ani=getattr(args, "min_read_ani", defaults["min_read_ani"]),
         min_read_count=min_read_count if min_read_count is not None else 1,
-        generic_filters=generic_filters_list,  # New parameter
+        generic_filters=generic_filters_list,
         output=getattr(args, "output", None),
         filtered_output=getattr(args, "filtered_output", None),
         filtered_bam=getattr(args, "filtered_bam", None),
@@ -212,6 +237,7 @@ def filter_references(args):
         trim_min=getattr(args, "trim_min", 10),
         trim_max=getattr(args, "trim_max", 90),
         reference_lengths_tsv=getattr(args, "reference_lengths_tsv", None),
+        damage_correction=getattr(args, "damage_correction", False),
     )
 
     # Check result and raise on failure

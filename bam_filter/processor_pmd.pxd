@@ -173,6 +173,66 @@ cdef struct ANIResult:
 
 
 # =============================================================================
+# Per-Reference Damage Statistics (Bayesian ancient/modern classification)
+# Accumulated after EM using assignment probabilities (phi) as weights.
+# Separates damage from divergence using interior baseline estimation.
+# =============================================================================
+
+cdef struct RefDamageStats:
+    # Per-position counts for 5' C→T damage (positions 1-20)
+    # Using doubles to allow weighted accumulation from EM phi values
+    double n_5p[20]               # Weighted count of C bases at each position
+    double k_5p[20]               # Weighted count of C→T mismatches at each position
+
+    # Per-position counts for 3' G→A damage (positions 1-20)
+    double n_3p[20]               # Weighted count of G bases at each position
+    double k_3p[20]               # Weighted count of G→A mismatches at each position
+
+    # Interior counts for baseline estimation (positions 16-20, where damage ≈ 0)
+    double n_interior             # Weighted opportunities in interior region
+    double k_interior             # Weighted mismatches in interior region
+
+    # Estimated baseline (divergence + sequencing error)
+    double baseline               # Posterior mean: (a0 + k_int) / (a0 + b0 + n_int)
+    double baseline_alpha         # Posterior Beta alpha parameter
+    double baseline_beta          # Posterior Beta beta parameter
+
+    # Estimated damage amplitude (hierarchical, shrunk to global)
+    double amplitude              # A_j: damage amplitude for this reference
+    double amplitude_se           # Standard error of amplitude estimate
+
+    # Bayesian inference results
+    double log_lik_modern         # Log-likelihood under M0: A_j = 0 (modern)
+    double log_lik_ancient        # Log-likelihood under M1: A_j > 0 (ancient)
+    double log_bf                 # Log Bayes factor: log[P(data|ancient) / P(data|modern)]
+    double p_ancient              # Posterior P(ancient | data) with prior rho
+
+    # Summary statistics
+    double total_weight           # Sum of phi weights (effective read count)
+    uint32_t n_alignments         # Number of alignments to this reference
+
+
+# Global hyperparameters for hierarchical damage model
+cdef struct DamageModelHyperparams:
+    # Baseline prior (Beta distribution)
+    double baseline_alpha0        # Prior alpha for baseline (default: estimated from global)
+    double baseline_beta0         # Prior beta for baseline
+
+    # Amplitude prior (LogNormal distribution on A_j)
+    double amplitude_mu           # Prior mean of log(A_j)
+    double amplitude_sigma        # Prior SD of log(A_j) - controls shrinkage
+
+    # Global damage shape D(z) - normalized so D(1) = 1.0
+    double D_shape[20]            # D_shape(z) = decay^(z-1), normalized
+
+    # Per-position overdispersion for Beta-binomial
+    double concentration[20]      # c_z: concentration parameter at each position
+
+    # Ancient prior
+    double rho                    # Prior P(ancient) for each reference
+
+
+# =============================================================================
 # Complete PMD Model (frozen after finalization)
 # =============================================================================
 

@@ -2329,6 +2329,18 @@ cdef class AccessionMapping:
         else:
             return None
 
+    def get(self, str key, default=None):
+        """Dict-like get method. Returns taxid for accession or default."""
+        result = self.get_taxid(key)
+        return result if result is not None else default
+
+    def __getitem__(self, str key):
+        """Dict-like access. Raises KeyError if not found."""
+        result = self.get_taxid(key)
+        if result is None:
+            raise KeyError(key)
+        return result
+
     def get_taxids_batch(self, list accessions):
         """
         Get taxids for a batch of accessions (faster than individual queries).
@@ -2400,3 +2412,7 @@ cdef class AccessionMapping:
             return self.amap.n_entries
         else:
             return 0
+
+    def __len__(self):
+        """Return number of accession mappings."""
+        return self.n_entries

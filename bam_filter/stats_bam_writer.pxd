@@ -3,6 +3,7 @@ from libc.stdint cimport int32_t
 
 from bam_filter.stats cimport RefStats
 from bam_filter.generic_filters cimport GenericFilters
+from bam_filter.processor_pmd cimport PMDCurve
 
 # Use centralized htslib bindings
 from bam_filter.processor_types cimport (
@@ -35,5 +36,7 @@ cdef int write_filtered_bam_streaming(
     int num_threads,
     double min_read_ani_c,
     int min_read_length_c,
-    int max_read_length_c
+    int max_read_length_c,
+    PMDCurve* pmd_curve,
+    float pmd_epsilon
 ) except -1 nogil

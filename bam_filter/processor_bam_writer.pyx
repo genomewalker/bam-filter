@@ -22,7 +22,10 @@ from libc.string cimport memcpy, memset
 from libc.stdint cimport intptr_t
 
 # Import basic types from processor pxd
-from bam_filter.processor cimport MemoryPool, Alignment, samFile
+from bam_filter.processor cimport (
+    MemoryPool, Alignment, samFile,
+    AlignmentCore, HierarchicalData, DamageCounts, BAMWriterAux,
+)
 from bam_filter.processor_mapping cimport ReferenceMapping, create_filtered_header_efficient
 from bam_filter import logging as bf_logging
 
@@ -171,7 +174,7 @@ cdef LookupTable* create_lookup_table(MemoryPool* pool, ReferenceMapping* mappin
 	cdef uint32_t compact_ref, original_ref
 
 	for i in range(table.total_count):
-		compact_ref = pool.alignments[i].reference_index
+		compact_ref = pool.alignment_cores[i].reference_index
 		if compact_ref < mapping.n_retained_refs:
 			original_ref = mapping.new_to_old_tid[compact_ref]
 			if original_ref < table.num_refs:
@@ -191,12 +194,12 @@ cdef LookupTable* create_lookup_table(MemoryPool* pool, ReferenceMapping* mappin
 
 	cdef uint64_t write_pos
 	for i in range(table.total_count):
-		compact_ref = pool.alignments[i].reference_index
+		compact_ref = pool.alignment_cores[i].reference_index
 		if compact_ref < mapping.n_retained_refs:
 			original_ref = mapping.new_to_old_tid[compact_ref]
 			if original_ref < table.num_refs:
 				write_pos = table.ref_starts[original_ref] + table.ref_counts[original_ref]
-				table.alignments[write_pos].original_position = pool.alignments[i].alignment_position
+				table.alignments[write_pos].original_position = pool.alignment_cores[i].alignment_position
 				table.alignments[write_pos].pool_index = i
 				table.alignments[write_pos].reference_id = original_ref
 				table.ref_counts[original_ref] += 1
@@ -436,9 +439,11 @@ cdef int write_filtered_bam(MemoryPool* pool,
 	cdef float zp_value, zs_value, pm_value, an_value, da_value
 	cdef uint32_t ref_id
 	cdef uint32_t alignment_position_counter
-	cdef Alignment* aln_ptr
 	cdef ANISnapshot ani_snapshot
 	cdef int tag_offset
+	cdef AlignmentCore* core_ptr
+	cdef DamageCounts* dmg_ptr
+	cdef BAMWriterAux* aux_ptr
 
 	# ASCII codes: 'Z' 90, 'P' 80, 'f' 102, 'S' 83, 'M' 77, 'A' 65, 'N' 78, 'D' 68
 	zp_tag[0] = 90; zp_tag[1] = 80; zp_tag[2] = 102  # ZP:f
@@ -562,30 +567,33 @@ cdef int write_filtered_bam(MemoryPool* pool,
 							free(zp_tag); free(zs_tag); free(pm_tag); free(an_tag); free(da_tag); free(tag_buffer)
 							return -1
 
-						out_record.core.tid = pool.alignments[pool_idx].reference_index
+						core_ptr = &pool.alignment_cores[pool_idx]
+						dmg_ptr = &pool.damage_counts[pool_idx]
+						aux_ptr = &pool.bam_aux[pool_idx]
 
-						aln_ptr = &pool.alignments[pool_idx]
+						out_record.core.tid = core_ptr.reference_index
+
 						zp_value = pool.precomputed_zp_values[pool_idx]
-						zs_value = aln_ptr.alignment_score
-						pm_value = aln_ptr.pmd_score
+						zs_value = core_ptr.alignment_score
+						pm_value = aux_ptr.pmd_score
 
 						# Compute raw ANI from alignment's ANI snapshot
-						if aln_ptr.aligned_length > 0:
-							an_value = (<float>aln_ptr.match_count / <float>aln_ptr.aligned_length) * 100.0
+						if core_ptr.aligned_length > 0:
+							an_value = (<float>core_ptr.match_count / <float>core_ptr.aligned_length) * 100.0
 						else:
 							an_value = 0.0
 
 						# Compute damage-corrected ANI if curve available
-						if pmd_curve != NULL and aln_ptr.aligned_length > 0:
-							# Build ANI snapshot from Alignment fields
-							ani_snapshot.aligned_length = aln_ptr.aligned_length
-							ani_snapshot.match_count = aln_ptr.match_count
-							ani_snapshot.ct_5p_count = aln_ptr.ct_5p_count
-							ani_snapshot.ga_3p_count = aln_ptr.ga_3p_count
+						if pmd_curve != NULL and core_ptr.aligned_length > 0:
+							# Build ANI snapshot from split array fields
+							ani_snapshot.aligned_length = core_ptr.aligned_length
+							ani_snapshot.match_count = core_ptr.match_count
+							ani_snapshot.ct_5p_count = dmg_ptr.ct_5p_count
+							ani_snapshot.ga_3p_count = dmg_ptr.ga_3p_count
 							ani_snapshot.other_mm_count = 0  # Not stored, but computed from total
 							ani_snapshot.flags = 0
-							ani_snapshot.c_at_5p_count = aln_ptr.c_at_5p_count
-							ani_snapshot.g_at_3p_count = aln_ptr.g_at_3p_count
+							ani_snapshot.c_at_5p_count = dmg_ptr.c_at_5p_count
+							ani_snapshot.g_at_3p_count = dmg_ptr.g_at_3p_count
 							da_value = compute_corrected_ani(&ani_snapshot, pmd_curve, 0.01)
 						else:
 							da_value = an_value  # Fallback to raw ANI if no curve
