@@ -69,6 +69,7 @@ cdef struct ReferencePattern:
     int32_t taxid                      # Taxonomy ID from accession mapping (-1 if not found)
     int32_t taxid_rank_id              # Rank ID of this taxid (for quick comparisons)
     int32_t taxid_depth                # Depth in taxonomy tree
+    int32_t domain_taxid               # Taxid at domain/superkingdom rank (for entropy computation)
     char taxonomy_flag                 # Flag indicating taxonomy-based anomaly: 0=normal, 1=potential_contamination, 2=cross_domain, 3=kingdom_mismatch
 
     # Per-rank taxonomy mismatch counts (for analyzing purity dynamics)

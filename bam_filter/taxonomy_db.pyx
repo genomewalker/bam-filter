@@ -1783,6 +1783,62 @@ cdef const char* get_name_at_rank_nogil(TaxonomyDB* db, int32_t taxid, int32_t t
     return NULL
 
 
+cdef int32_t get_taxid_at_rank_nogil(TaxonomyDB* db, int32_t taxid, int32_t target_rank_id) noexcept nogil:
+    """
+    Get the ancestor taxid at a specific rank by traversing lineage upward.
+
+    Parameters
+    ----------
+    db : TaxonomyDB*
+        Taxonomy database
+    taxid : int32_t
+        Starting taxonomy ID
+    target_rank_id : int32_t
+        Target rank ID to find (e.g., 24 for superkingdom, 25 for domain)
+
+    Returns
+    -------
+    int32_t
+        Taxid at the target rank, or -1 if not found
+    """
+    if db == NULL or taxid < 0 or taxid > db.max_taxid:
+        return -1
+
+    cdef int32_t current_idx = db.taxid_to_idx[taxid]
+    if current_idx < 0:
+        return -1
+
+    cdef int32_t current_taxid = taxid
+    cdef TaxNode* node
+
+    # Traverse lineage upward looking for target rank
+    while current_idx >= 0:
+        node = &db.nodes[current_idx]
+
+        # Check if this node matches our target rank
+        # Also check for domain (25) when looking for superkingdom (24) and vice versa
+        if node.rank_id == target_rank_id:
+            return node.taxid
+        # Accept either superkingdom (24) or domain (25) for domain-level queries
+        if target_rank_id == 24 and node.rank_id == 25:
+            return node.taxid
+        if target_rank_id == 25 and node.rank_id == 24:
+            return node.taxid
+
+        # Move to parent
+        current_taxid = node.parent_taxid
+        if current_taxid < 0 or current_taxid > db.max_taxid:
+            break
+
+        # Check for root (parent == self)
+        if current_taxid == node.taxid:
+            break
+
+        current_idx = db.taxid_to_idx[current_taxid]
+
+    return -1
+
+
 # =============================================================================
 # LCA caching for O(1) lookups
 # =============================================================================

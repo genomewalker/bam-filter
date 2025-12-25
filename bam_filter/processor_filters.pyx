@@ -693,6 +693,7 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
         bf_nogil_logf_notime(b"CLUSTER", "ERROR: Community clustering failed\n")
         return -1
 
+
     cdef char* keep_flag = community_results.keep_flag
 
     # Detect taxonomy anomalies using neighbor connectivity (Phase 6b)
@@ -703,6 +704,7 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
     cdef uint32_t tax_ref_idx
     cdef int extract_result = 0
     cdef bint neighbors_from_igraph = False
+
 
     if taxonomy_filter_config != NULL and taxonomy_filter_config.enabled and taxonomy_db != NULL:
         if verbose:
@@ -725,8 +727,12 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
                 neighbor_counts = <uint32_t*>malloc(array_size * sizeof(uint32_t))
                 if neighbor_lists and neighbor_counts:
                     for tax_ref_idx in range(array_size):
-                        neighbor_lists[tax_ref_idx] = existing_graph.nodes[tax_ref_idx].neighbors
-                        neighbor_counts[tax_ref_idx] = existing_graph.nodes[tax_ref_idx].degree
+                        if tax_ref_idx >= existing_graph.num_nodes:
+                            neighbor_lists[tax_ref_idx] = NULL
+                            neighbor_counts[tax_ref_idx] = 0
+                        else:
+                            neighbor_lists[tax_ref_idx] = existing_graph.nodes[tax_ref_idx].neighbors
+                            neighbor_counts[tax_ref_idx] = existing_graph.nodes[tax_ref_idx].degree
                 else:
                     bf_nogil_logf_notime(b"CLUSTER", "WARNING: Failed to allocate neighbor arrays\n")
             elif existing_graph.igraph_handle:
@@ -822,6 +828,7 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
                     pattern_data[ref_idx_loop].betweenness_centrality = 0.0
                     pattern_data[ref_idx_loop].num_neighbor_communities = 0
 
+
     # Apply three-tier filtering (NEW - includes bridge detection!)
     if verbose:
         bf_nogil_logf_notime(b"CLUSTER", "\\nApplying three-tier filtering...\\n")
@@ -898,9 +905,15 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
                     else:
                         community_ids_for_qc[qc_idx] = -1  # No community
 
-                    # Get taxonomy ID and structural role from pattern_data if available
+                    # Get taxonomy ID at domain level for entropy computation
+                    # Using domain-level taxids prevents over-flagging due to species-level diversity
                     if pattern_data != NULL:
-                        taxonomy_ids_for_qc[qc_idx] = pattern_data[qc_idx].taxid
+                        # Use domain_taxid for entropy (species-level taxids cause over-filtering)
+                        if pattern_data[qc_idx].domain_taxid > 0:
+                            taxonomy_ids_for_qc[qc_idx] = pattern_data[qc_idx].domain_taxid
+                        else:
+                            # Fallback to species-level taxid if domain not found
+                            taxonomy_ids_for_qc[qc_idx] = pattern_data[qc_idx].taxid
                         structural_roles_for_qc[qc_idx] = pattern_data[qc_idx].structural_role
                     else:
                         taxonomy_ids_for_qc[qc_idx] = -1
@@ -1010,10 +1023,14 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
     cdef int64_t surviving_alignments = 0
     cdef int64_t edge_removed_count = 0
     cdef int64_t ref_removed_count = 0
+    cdef bint use_split = (pool.alignment_cores != NULL)
 
     # Count surviving alignments (must pass BOTH filters)
     for alignment_idx in range(pool.alignment_count):
-        ref_id = pool.alignments[alignment_idx].reference_index
+        if use_split:
+            ref_id = pool.alignment_cores[alignment_idx].reference_index
+        else:
+            ref_id = pool.alignments[alignment_idx].reference_index
 
         # Check reference filter
         if ref_id >= array_size or not keep_flag[ref_id]:
@@ -1042,7 +1059,10 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
     # COMBINED COMPACTION: Apply both filters in single pass
     new_alignment_idx = 0
     for alignment_idx in range(pool.alignment_count):
-        ref_id = pool.alignments[alignment_idx].reference_index
+        if use_split:
+            ref_id = pool.alignment_cores[alignment_idx].reference_index
+        else:
+            ref_id = pool.alignments[alignment_idx].reference_index
 
         # Check reference filter
         if ref_id >= array_size or not keep_flag[ref_id]:
@@ -1054,7 +1074,18 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
 
         # Alignment survives both filters - keep it
         if new_alignment_idx != alignment_idx:
-            pool.alignments[new_alignment_idx] = pool.alignments[alignment_idx]
+            if use_split:
+                # Copy all split arrays
+                pool.alignment_cores[new_alignment_idx] = pool.alignment_cores[alignment_idx]
+                pool.read_indices[new_alignment_idx] = pool.read_indices[alignment_idx]
+                if pool.hierarchical != NULL:
+                    pool.hierarchical[new_alignment_idx] = pool.hierarchical[alignment_idx]
+                if pool.damage_counts != NULL:
+                    pool.damage_counts[new_alignment_idx] = pool.damage_counts[alignment_idx]
+                if pool.bam_aux != NULL:
+                    pool.bam_aux[new_alignment_idx] = pool.bam_aux[alignment_idx]
+            else:
+                pool.alignments[new_alignment_idx] = pool.alignments[alignment_idx]
 
         if pool.precomputed_zp_values:
             new_zp_values[new_alignment_idx] = pool.precomputed_zp_values[alignment_idx]
@@ -1086,7 +1117,10 @@ cdef int apply_cluster_aware_filtering(MemoryPool* pool,
 
     cdef uint32_t current_rid
     for alignment_idx in range(pool.alignment_count):
-        current_rid = pool.alignments[alignment_idx].read_index
+        if use_split:
+            current_rid = pool.read_indices[alignment_idx]
+        else:
+            current_rid = pool.alignments[alignment_idx].read_index
         if current_rid < pool.unique_read_count:
             pool.read_alignment_counts[current_rid] += 1
 

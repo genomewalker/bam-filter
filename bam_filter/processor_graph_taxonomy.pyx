@@ -39,8 +39,12 @@ from bam_filter.processor_graph_ops cimport WeightedGraph, GraphNode
 from bam_filter.taxonomy_db cimport (
     TaxonomyDB, AccessionMap,
     compute_lca_nogil, TaxonomyDatabase, AccessionMapping,
-    lookup_taxid_duckdb
+    lookup_taxid_duckdb, get_taxid_at_rank_nogil
 )
+
+# Rank IDs for domain/superkingdom
+cdef int32_t RANK_SUPERKINGDOM = 24
+cdef int32_t RANK_DOMAIN = 25
 
 cdef extern from "htslib/sam.h":
     ctypedef struct sam_hdr_t
@@ -229,6 +233,7 @@ cdef int enrich_patterns_with_taxonomy(
         pattern_data[ref_idx].taxid = -1
         pattern_data[ref_idx].taxid_rank_id = -1
         pattern_data[ref_idx].taxid_depth = -1
+        pattern_data[ref_idx].domain_taxid = -1
         pattern_data[ref_idx].taxonomy_flag = 0
 
         # Get reference name using the same approach as GraphML/TSV export
@@ -282,6 +287,8 @@ cdef int enrich_patterns_with_taxonomy(
         pattern_data[ref_idx].taxid = taxid
         pattern_data[ref_idx].taxid_rank_id = taxdb.nodes[taxid_idx].rank_id
         pattern_data[ref_idx].taxid_depth = taxdb.nodes[taxid_idx].depth
+        # Get domain-level taxid for entropy computation (superkingdom rank = 24)
+        pattern_data[ref_idx].domain_taxid = get_taxid_at_rank_nogil(taxdb, taxid, RANK_SUPERKINGDOM)
         found_count += 1
 
     if verbose:

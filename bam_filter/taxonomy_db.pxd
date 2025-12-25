@@ -71,6 +71,9 @@ cdef int build_lineage_string_nogil(TaxonomyDB* db, int32_t taxid, char* buffer,
 # Get taxonomic name at specific rank
 cdef const char* get_name_at_rank_nogil(TaxonomyDB* db, int32_t taxid, int32_t target_rank_id) noexcept nogil
 
+# Get ancestor taxid at specific rank (for domain-level entropy computation)
+cdef int32_t get_taxid_at_rank_nogil(TaxonomyDB* db, int32_t taxid, int32_t target_rank_id) noexcept nogil
+
 # Rank utilities
 cdef int32_t get_rank_id(str rank_str)
 cdef str get_rank_name(int32_t rank_id)
