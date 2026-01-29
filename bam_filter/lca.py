@@ -104,38 +104,38 @@ def calculate_cumulative_weight_and_path(graph, node, lengths):
     # Base case: if the node is the root, return its cumulative weight and path
     if not list(graph.predecessors(node)):
         if node in lengths:
-            return 0, 0, [node]
+            return 0, 0, 0, [node]
         else:
-            # nei = list(graph.neighbors(node))[0]
-            # cumulative_weight = graph[node][nei].get("weight", 0)
-            # cumulative_norm_weight = graph[node][nei].get("norm_weight", 0)
-            # return cumulative_weight, cumulative_norm_weight, [node]
-            return 0, 0, [node]
+            return 0, 0, 0, [node]
 
     # Recursive case: calculate cumulative weight and path by summing the edge weight
     # and norm_weight with the cumulative weight and path of its parent(s)
     cumulative_weight = 0
     cumulative_norm_weight = 0
+    cumulative_raw_weight = 0
     cumulative_path = []
 
     for parent in graph.predecessors(node):
         edge_weight = graph[parent][node].get("weight", 0)
         norm_weight = graph[parent][node].get("norm_weight", 0)
+        raw_weight = graph[parent][node].get("raw_weight", 0)
         (
             parent_weight,
             parent_norm_weight,
+            parent_raw_weight,
             parent_path,
         ) = calculate_cumulative_weight_and_path(graph, parent, lengths)
 
         cumulative_weight += edge_weight + parent_weight
         cumulative_norm_weight += norm_weight + parent_norm_weight
-        cumulative_path.extend(parent_path + [node])  # Fix: Use += to concatenate lists
+        cumulative_raw_weight += raw_weight + parent_raw_weight
+        cumulative_path.extend(parent_path + [node])
 
-    return cumulative_weight, cumulative_norm_weight, cumulative_path
+    return cumulative_weight, cumulative_norm_weight, cumulative_raw_weight, cumulative_path
 
 
 def create_tax_graph_w(tax_path, weight, lengths, ref_stats=None, scale=1_000_000):
-    root_row = pd.DataFrame({"source": ["root"], "target": ["root"], "weight": 0})
+    root_row = pd.DataFrame({"source": ["root"], "target": ["root"], "weight": 0, "raw_weight": 0})
     res = list(zip(tax_path, tax_path[1:]))
     # get last element
     res = pd.DataFrame(res, columns=["source", "target"])
@@ -143,6 +143,9 @@ def create_tax_graph_w(tax_path, weight, lengths, ref_stats=None, scale=1_000_00
     res = res.drop_duplicates()
     res["weight"] = 0
     res["norm_weight"] = 0
+    res["raw_weight"] = 0
+    # Always store raw weight (original count before TAD adjustment)
+    res.iloc[-1, res.columns.get_loc("raw_weight")] = weight
     if ref_stats:
         target = res.iloc[-1, res.columns.get_loc("target")]
         if target in ref_stats:
@@ -150,6 +153,11 @@ def create_tax_graph_w(tax_path, weight, lengths, ref_stats=None, scale=1_000_00
                 res.iloc[-1, res.columns.get_loc("weight")] = ref_stats[target][1]
                 res.iloc[-1, res.columns.get_loc("norm_weight")] = round(
                     (ref_stats[target][1] / ref_stats[target][2]) * scale
+                )
+            else:
+                res.iloc[-1, res.columns.get_loc("weight")] = weight
+                res.iloc[-1, res.columns.get_loc("norm_weight")] = round(
+                    (weight / lengths[res.iloc[-1, res.columns.get_loc("target")]]) * scale
                 )
         else:
             res.iloc[-1, res.columns.get_loc("weight")] = weight
@@ -165,15 +173,17 @@ def create_tax_graph_w(tax_path, weight, lengths, ref_stats=None, scale=1_000_00
 
 
 def create_lca_df(tax_path, weight):
-    root_row = pd.DataFrame({"source": ["root"], "target": ["root"], "weight": 0})
+    root_row = pd.DataFrame({"source": ["root"], "target": ["root"], "weight": 0, "raw_weight": 0})
     res = list(zip(tax_path, tax_path[1:]))
     # get last element
     res = pd.DataFrame(res, columns=["source", "target"])
     res = pd.concat([root_row, res])
     res = res.drop_duplicates()
     res["weight"] = 0
-    # add 1 to the last row weight
+    res["raw_weight"] = 0
+    # add weight to the last row (LCA reads are not TAD-adjusted, so weight == raw_weight)
     res.iloc[-1, res.columns.get_loc("weight")] = weight
+    res.iloc[-1, res.columns.get_loc("raw_weight")] = weight
     return res
 
 
@@ -524,6 +534,7 @@ def do_lca(args):
         df_l = concat_df(for_lca_df)
         df_l["weight"] = 0
         df_l["norm_weight"] = 0
+        df_l["raw_weight"] = 0
         df = concat_df([df, df_l])
     # group by source and target and sum weight
     df = df.groupby(["source", "target"]).sum().reset_index()
@@ -539,11 +550,13 @@ def do_lca(args):
         (
             cumulative_weight,
             cumulative_norm_weight,
+            cumulative_raw_weight,
             path,
         ) = calculate_cumulative_weight_and_path(modified_graph, node, ref_lengths)
         cumulative_weights_and_paths[node] = {
             "cumulative_weight": cumulative_weight,
             "cumulative_norm_weight": cumulative_norm_weight,
+            "cumulative_raw_weight": cumulative_raw_weight,
             "path": ";".join(nx.shortest_path(G, target=node)["root"]),
         }
 
@@ -555,6 +568,10 @@ def do_lca(args):
             modified_graph[parent][node]["cum_norm_weight"] = (
                 modified_graph[parent][node].get("norm_weight", 0)
                 + cumulative_norm_weight
+            )
+            modified_graph[parent][node]["cum_raw_weight"] = (
+                modified_graph[parent][node].get("raw_weight", 0)
+                + cumulative_raw_weight
             )
 
     cumulative_weights_and_paths = dict(
@@ -584,7 +601,7 @@ def do_lca(args):
             tax_path = nx.shortest_path(G, target=k)["root"]
 
             root_row = pd.DataFrame(
-                {"source": ["root"], "target": ["root"], "weight": 0}
+                {"source": ["root"], "target": ["root"], "weight": 0, "raw_weight": 0}
             )
             res = list(zip(tax_path, tax_path[1:]))
             # get last element
@@ -593,7 +610,9 @@ def do_lca(args):
             res = res.drop_duplicates()
             res["weight"] = 0
             res["norm_weight"] = 0
+            res["raw_weight"] = 0
             res.iloc[-1, res.columns.get_loc("weight")] = df1_d[k]
+            res.iloc[-1, res.columns.get_loc("raw_weight")] = df1_d[k]
             if v["reference"] is None:
                 res.iloc[-1, res.columns.get_loc("norm_weight")] = df1_d[k]
             else:
@@ -618,12 +637,14 @@ def do_lca(args):
             (
                 cumulative_weight,
                 cumulative_norm_weight,
+                cumulative_raw_weight,
                 path,
             ) = calculate_cumulative_weight_and_path(modified_graph, node, ref_lengths)
 
             cumulative_weights_and_paths[node] = {
                 "cumulative_weight": cumulative_weight,
                 "cumulative_norm_weight": cumulative_norm_weight,
+                "cumulative_raw_weight": cumulative_raw_weight,
                 "path": ";".join(nx.shortest_path(G, target=node)["root"]),
             }
 
@@ -635,6 +656,10 @@ def do_lca(args):
                 modified_graph[parent][node]["cum_norm_weight"] = (
                     modified_graph[parent][node].get("norm_weight", 0)
                     + cumulative_norm_weight
+                )
+                modified_graph[parent][node]["cum_raw_weight"] = (
+                    modified_graph[parent][node].get("raw_weight", 0)
+                    + cumulative_raw_weight
                 )
         cumulative_weights_and_paths = dict(
             sorted(
@@ -648,7 +673,7 @@ def do_lca(args):
             [
                 node
                 for node, data in cumulative_weights_and_paths.items()
-                if data["cumulative_weight"] > 0
+                if data["cumulative_raw_weight"] > 0
             ]
         )
     )
@@ -659,7 +684,7 @@ def do_lca(args):
     # determine if the file is gzipped or not
     if out_file.endswith(".gz"):
         with gzip.open(out_file, "wt") as f:
-            f.write("taxid\tname\trank\tn_reads\tabundance\ttax_path\n")
+            f.write("taxid\tname\trank\tn_reads_raw\tn_reads\tabundance\ttax_path\n")
             for node, data in tqdm(
                 cumulative_weights_and_paths.items(),
                 total=len(cumulative_weights_and_paths),
@@ -668,22 +693,22 @@ def do_lca(args):
                 desc="Writing results",
                 unit="nodes",
             ):
-                if data["cumulative_weight"] > 0:
+                if data["cumulative_raw_weight"] > 0:
                     taxid = taxids[node][0]
                     rank = taxdb.taxid2rank[taxid]
                     f.write(
-                        f"{taxid}\t{node}\t{rank}\t{data['cumulative_weight']}\t{data['cumulative_norm_weight']}\t{data['path']}\n"
+                        f"{taxid}\t{node}\t{rank}\t{data['cumulative_raw_weight']}\t{data['cumulative_weight']}\t{data['cumulative_norm_weight']}\t{data['path']}\n"
                     )
     else:
         with open(out_file, "wt") as f:
-            f.write("taxid\tname\trank\tn_reads\tabundance\ttax_path\n")
+            f.write("taxid\tname\trank\tn_reads_raw\tn_reads\tabundance\ttax_path\n")
             for node, data in tqdm(
                 cumulative_weights_and_paths.items(),
                 total=len(cumulative_weights_and_paths),
             ):
-                if data["cumulative_weight"] > 0:
+                if data["cumulative_raw_weight"] > 0:
                     taxid = taxids[node][0]
                     rank = taxdb.taxid2rank[taxid]
                     f.write(
-                        f"{taxid}\t{node}\t{rank}\t{data['cumulative_weight']}\t{data['cumulative_norm_weight']}\t{data['path']}\n"
+                        f"{taxid}\t{node}\t{rank}\t{data['cumulative_raw_weight']}\t{data['cumulative_weight']}\t{data['cumulative_norm_weight']}\t{data['path']}\n"
                     )
