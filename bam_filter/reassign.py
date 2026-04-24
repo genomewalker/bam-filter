@@ -72,6 +72,8 @@ def reassign_reads(
     calculate_pmd: bool = True,
     library_type: str = "ds",
     hierarchical_pmd: bool = False,
+    # Damage correction parameters
+    damage_window: int = 8,
     # Read filtering parameters
     min_read_count: int = 1,
     min_read_ani: float = 0.0,
@@ -220,6 +222,8 @@ def reassign_reads(
         Library type: "ds" (double-stranded) or "ss" (single-stranded)
     hierarchical_pmd : bool, default=False
         Enable hierarchical EM for ancient/modern reference classification.
+    damage_window : int, default=8
+        Window size (bp) for damage correction at read ends (1-15).
         Uses PMD damage patterns to estimate γ_k = P(ancient | reference k).
     min_read_count : int, default=1
         Minimum reads per reference
@@ -344,6 +348,7 @@ def reassign_reads(
             calculate_pmd=calculate_pmd,
             library_type=library_type,
             hierarchical_pmd=hierarchical_pmd,
+            damage_window=damage_window,
             min_read_count=min_read_count,
             min_read_length=min_read_length,
             max_read_length=max_read_length,
@@ -688,6 +693,7 @@ def reassign(args):
         "calculate_pmd": not getattr(args, "disable_pmd", False),
         "library_type": getattr(args, "library_type", "ds"),
         "hierarchical_pmd": getattr(args, "hierarchical_pmd", True),  # Default ON for ancient DNA
+        "damage_window": getattr(args, "damage_window", 8),
         "min_read_count": getattr(args, "min_read_count", 1),
         "min_read_ani": getattr(args, "min_read_ani", 0.0),
         "min_read_length": getattr(args, "min_read_length", 30),

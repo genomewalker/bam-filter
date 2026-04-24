@@ -280,8 +280,10 @@ cdef bint check_community_coherence(
 
     # Check LCA depth - if too shallow (near root), community is incoherent
     # Use ONLY depth-based checking to support custom taxonomies
+    if lca_taxid < 0 or lca_taxid > taxonomy_db.max_taxid:
+        return False
     cdef int32_t lca_idx = taxonomy_db.taxid_to_idx[lca_taxid]
-    if lca_idx < 0:
+    if lca_idx < 0 or lca_idx >= taxonomy_db.n_nodes:
         return False
 
     cdef int32_t lca_depth = taxonomy_db.nodes[lca_idx].depth
@@ -518,6 +520,7 @@ cdef uint32_t count_remaining_edges_after_removal(
     cdef uint32_t aln_ref_idx, read_idx
     cdef uint64_t read_start, read_count, other_aln_idx
     cdef bint has_connection
+    cdef bint use_split = (pool.alignment_cores != NULL)
 
     # For each neighbor, check if any reads still connect them
     for neighbor_idx in range(n_neighbors):
@@ -526,7 +529,10 @@ cdef uint32_t count_remaining_edges_after_removal(
 
         # Check all alignments to ref_idx
         for aln_idx in range(pool.alignment_count):
-            aln_ref_idx = pool.alignments[aln_idx].reference_index
+            if use_split:
+                aln_ref_idx = pool.alignment_cores[aln_idx].reference_index
+            else:
+                aln_ref_idx = pool.alignments[aln_idx].reference_index
 
             if aln_ref_idx != ref_idx:
                 continue
@@ -536,17 +542,27 @@ cdef uint32_t count_remaining_edges_after_removal(
                 continue
 
             # Get the read and check its other alignments
-            read_idx = pool.alignments[aln_idx].read_index
+            if use_split:
+                read_idx = pool.read_indices[aln_idx]
+            else:
+                read_idx = pool.alignments[aln_idx].read_index
             read_start = pool.read_alignment_starts[read_idx]
             read_count = pool.read_alignment_counts[read_idx]
 
             other_aln_idx = read_start
             while other_aln_idx < read_start + read_count:
-                if pool.alignments[other_aln_idx].reference_index == neighbor_ref_idx:
-                    # Check if the neighbor alignment also survives
-                    if alignment_keep_flags == NULL or alignment_keep_flags[other_aln_idx]:
-                        has_connection = True
-                        break
+                if use_split:
+                    if pool.alignment_cores[other_aln_idx].reference_index == neighbor_ref_idx:
+                        # Check if the neighbor alignment also survives
+                        if alignment_keep_flags == NULL or alignment_keep_flags[other_aln_idx]:
+                            has_connection = True
+                            break
+                else:
+                    if pool.alignments[other_aln_idx].reference_index == neighbor_ref_idx:
+                        # Check if the neighbor alignment also survives
+                        if alignment_keep_flags == NULL or alignment_keep_flags[other_aln_idx]:
+                            has_connection = True
+                            break
                 other_aln_idx += 1
 
             if has_connection:
@@ -661,7 +677,7 @@ cdef int remove_cross_domain_edges_for_reference(
             continue
 
         lca_idx = taxonomy_db.taxid_to_idx[lca_taxid]
-        if lca_idx < 0:
+        if lca_idx < 0 or lca_idx >= taxonomy_db.n_nodes:
             continue
 
         lca_rank_id = taxonomy_db.nodes[lca_idx].rank_id
@@ -688,6 +704,7 @@ cdef int remove_cross_domain_edges_for_reference(
     cdef uint32_t other_ref_idx
     cdef uint32_t cd_idx
     cdef int64_t i
+    cdef bint use_split = (pool.alignment_cores != NULL)
 
     aln_offset = ref_aln_offsets[ref_idx]
     aln_count = ref_aln_counts[ref_idx]
@@ -698,14 +715,20 @@ cdef int remove_cross_domain_edges_for_reference(
 
         # Check if the READ mapped to this alignment also maps to a cross-domain neighbor
         # We need to check all alignments of this read to find cross-domain pairs
-        read_idx = pool.alignments[aln_idx].read_index
+        if use_split:
+            read_idx = pool.read_indices[aln_idx]
+        else:
+            read_idx = pool.alignments[aln_idx].read_index
         read_start = pool.read_alignment_starts[read_idx]
         read_count = pool.read_alignment_counts[read_idx]
 
         # Check this read's other alignments
         other_aln_idx = read_start
         while other_aln_idx < read_start + read_count:
-            other_ref_idx = pool.alignments[other_aln_idx].reference_index
+            if use_split:
+                other_ref_idx = pool.alignment_cores[other_aln_idx].reference_index
+            else:
+                other_ref_idx = pool.alignments[other_aln_idx].reference_index
 
             # Check if other_ref_idx is in cross_domain_neighbors
             found = False
@@ -792,8 +815,10 @@ cdef int apply_tiered_filtering(
     int
         0 on success, -1 on error
     """
+
     if pattern_data == NULL or keep_flag == NULL:
         return -1
+
 
     # Check taxonomy availability
     cdef bint taxonomy_available = (taxonomy_db != NULL)
@@ -828,6 +853,7 @@ cdef int apply_tiered_filtering(
             "  Strict mode: %s\\n\\n",
             b"YES" if strict_mode else b"NO"
         )
+
 
     # Statistics counters
     cdef uint32_t count_peripheral = 0
@@ -875,7 +901,7 @@ cdef int apply_tiered_filtering(
     cdef uint32_t num_communities_found = 0
     cdef uint32_t ref_idx
     cdef uint32_t community_id
-    cdef uint32_t comm_idx, member_count
+    cdef uint32_t comm_idx, member_count, list_idx
     cdef uint32_t* members
     cdef uint32_t n_members
     cdef int32_t lca_result
@@ -887,12 +913,14 @@ cdef int apply_tiered_filtering(
         if community_id != UINT32_MAX and community_id > max_community_id:
             max_community_id = community_id
 
+
     # Allocate arrays based on actual max community ID (+ 1 for 0-indexed)
     cdef uint32_t num_communities = max_community_id + 1
     cdef uint32_t max_members_per_community = 256  # Reasonable limit
     cdef uint32_t* community_member_lists = NULL
     cdef uint32_t* community_sizes = NULL
     cdef char* community_coherence_cache = NULL
+
 
     if num_communities > 0:
         community_member_lists = <uint32_t*>malloc(num_communities * max_members_per_community * sizeof(uint32_t))
@@ -911,9 +939,12 @@ cdef int apply_tiered_filtering(
             community_coherence_cache[comm_idx] = 1  # Default: coherent
 
     # Second pass: Build membership lists
+    cdef uint32_t second_pass_count = 0
+    cdef uint32_t kept_count = 0
     for ref_idx in range(array_size):
         if keep_flag[ref_idx] == 0:
             continue
+        kept_count += 1
 
         community_id = pattern_data[ref_idx].community_id
         if community_id == UINT32_MAX:
@@ -925,7 +956,13 @@ cdef int apply_tiered_filtering(
         # Add this ref to the community's member list
         member_count = community_sizes[community_id]
         if member_count < max_members_per_community:
-            community_member_lists[community_id * max_members_per_community + member_count] = ref_idx
+            # Bounds check
+            list_idx = community_id * max_members_per_community + member_count
+            if list_idx >= num_communities * max_members_per_community:
+                bf_nogil_logf_notime(b"TIERED_FILTER", "ERROR: list_idx=%u out of bounds (max=%u) at ref=%u comm=%u\n",
+                                     list_idx, num_communities * max_members_per_community, ref_idx, community_id)
+                continue
+            community_member_lists[list_idx] = ref_idx
             community_sizes[community_id] = member_count + 1
             if member_count == 0:
                 num_communities_found += 1
@@ -946,6 +983,7 @@ cdef int apply_tiered_filtering(
                 members, n_members, pattern_data, taxonomy_db, &lca_result
             )
 
+
     if verbose:
         bf_nogil_logf_notime(
             b"TIERED_FILTER",
@@ -953,13 +991,16 @@ cdef int apply_tiered_filtering(
             num_communities_found
         )
 
+
     # ========================================================================
     # EDGE REMOVAL: Remove cross-domain edges in incoherent communities
     # ========================================================================
     cdef MemoryPool* pool = NULL
+    cdef bint use_split = 0
     cdef char* alignment_keep_flags = NULL
     cdef EdgeRemovalStats edge_stats
     cdef int64_t aln_idx, new_count, old_idx
+    cdef uint32_t aln_ref_index
     edge_stats.cross_domain_edges_found = 0
     edge_stats.alignments_removed = 0
     edge_stats.references_affected = 0
@@ -977,6 +1018,7 @@ cdef int apply_tiered_filtering(
 
     if enable_edge_removal and pool_handle != NULL and neighbor_lists != NULL and neighbor_counts != NULL:
         pool = <MemoryPool*>pool_handle
+        use_split = (pool.alignment_cores != NULL)
 
         if verbose:
             bf_nogil_logf_notime(
@@ -1020,7 +1062,11 @@ cdef int apply_tiered_filtering(
             else:
                 # First pass: count alignments per reference
                 for aln_idx in range(pool.alignment_count):
-                    ref_aln_counts[pool.alignments[aln_idx].reference_index] += 1
+                    if use_split:
+                        aln_ref_index = pool.alignment_cores[aln_idx].reference_index
+                    else:
+                        aln_ref_index = pool.alignments[aln_idx].reference_index
+                    ref_aln_counts[aln_ref_index] += 1
 
                 # Compute start offsets (cumulative sum)
                 running_offset = 0
@@ -1031,7 +1077,10 @@ cdef int apply_tiered_filtering(
 
                 # Second pass: populate alignment indices
                 for aln_idx in range(pool.alignment_count):
-                    r_idx = pool.alignments[aln_idx].reference_index
+                    if use_split:
+                        r_idx = pool.alignment_cores[aln_idx].reference_index
+                    else:
+                        r_idx = pool.alignments[aln_idx].reference_index
                     ref_aln_indices[ref_aln_write_pos[r_idx]] = aln_idx
                     ref_aln_write_pos[r_idx] += 1
 
@@ -1136,7 +1185,10 @@ cdef int apply_tiered_filtering(
                 if compute_degree_after:
                     for aln_idx in range(pool.alignment_count):
                         if alignment_keep_flags[aln_idx]:
-                            ref_idx = pool.alignments[aln_idx].reference_index
+                            if use_split:
+                                ref_idx = pool.alignment_cores[aln_idx].reference_index
+                            else:
+                                ref_idx = pool.alignments[aln_idx].reference_index
                             if ref_idx < array_size:
                                 ref_alignment_counts[ref_idx] += 1
 
@@ -1164,7 +1216,10 @@ cdef int apply_tiered_filtering(
 
                     for aln_idx in range(pool.alignment_count):
                         if alignment_keep_flags[aln_idx]:
-                            ref_idx = pool.alignments[aln_idx].reference_index
+                            if use_split:
+                                ref_idx = pool.alignment_cores[aln_idx].reference_index
+                            else:
+                                ref_idx = pool.alignments[aln_idx].reference_index
                             if ref_idx < array_size:
                                 ref_alignment_index_list[
                                     ref_alignment_offsets[ref_idx] + ref_alignment_counts[ref_idx]
@@ -1223,13 +1278,19 @@ cdef int apply_tiered_filtering(
                                 end = start + ref_alignment_counts[ref_idx]
                                 for idx_pos in range(start, end):
                                     aln_idx = ref_alignment_index_list[idx_pos]
-                                    read_idx = pool.alignments[aln_idx].read_index
+                                    if use_split:
+                                        read_idx = pool.read_indices[aln_idx]
+                                    else:
+                                        read_idx = pool.alignments[aln_idx].read_index
                                     read_start = pool.read_alignment_starts[read_idx]
                                     read_count = pool.read_alignment_counts[read_idx]
                                     other_aln_idx = read_start
                                     while other_aln_idx < read_start + read_count:
                                         if alignment_keep_flags[other_aln_idx]:
-                                            other_ref_idx = pool.alignments[other_aln_idx].reference_index
+                                            if use_split:
+                                                other_ref_idx = pool.alignment_cores[other_aln_idx].reference_index
+                                            else:
+                                                other_ref_idx = pool.alignments[other_aln_idx].reference_index
                                             if other_ref_idx != ref_idx and other_ref_idx < pool.reference_count:
                                                 marker_idx = neighbor_marker[other_ref_idx]
                                                 if marker_idx != 0:

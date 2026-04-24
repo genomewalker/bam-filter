@@ -803,7 +803,7 @@ cdef bint alignment_passes_quality_filters_with_ani(bam1_t* alignment, Alignment
 # =============================================================================
 
 DEF PMD_STAT_WINDOW = 20  # Collect PMD stats for positions 1-20 from ends
-DEF ANI_DAMAGE_WINDOW = 8  # Count damage mismatches in first/last 8bp for ANI
+DEF ANI_DAMAGE_WINDOW_DEFAULT = 8  # Default window for damage correction
 
 
 cdef inline bint is_cpg_context_5p(uint8_t* ref_seq, int32_t pos, int32_t read_len) noexcept nogil:
@@ -882,12 +882,13 @@ cdef double calculate_md_quality_score_with_stats(bam1_t* alignment,
     if not read_bases:
         return -1e20
 
+    cdef int32_t damage_window = config.damage_window if config.damage_window > 0 else ANI_DAMAGE_WINDOW_DEFAULT
     cdef double result
     try:
         decode_read_bases(seq_data, read_length, read_bases)
         result = calculate_md_score_with_stats_impl(
             <char*>(md_aux + 1), read_bases, ref_sequence, qual_data,
-            read_length, is_single_stranded, calculate_pmd,
+            read_length, is_single_stranded, calculate_pmd, damage_window,
             pmd_result, ani_stats, pmd_acc
         )
     finally:
@@ -899,7 +900,7 @@ cdef double calculate_md_quality_score_with_stats(bam1_t* alignment,
 cdef double calculate_md_score_with_stats_impl(char* md_tag, uint8_t* read_bases,
                                                 uint8_t* ref_sequence, uint8_t* qual_data,
                                                 int32_t read_length, bint is_single_stranded,
-                                                bint calculate_pmd,
+                                                bint calculate_pmd, int32_t damage_window,
                                                 float* pmd_result,
                                                 ANIStats* ani_stats,
                                                 PMDStatsAccumulator* pmd_acc) noexcept nogil:
@@ -1000,10 +1001,10 @@ cdef double calculate_md_score_with_stats_impl(char* md_tag, uint8_t* read_bases
                 if is_c_base or is_g_base:
                     z_from_5prime = k + 1
                     z_from_3prime = rlen - k
-                    if is_c_base and z_from_5prime <= ANI_DAMAGE_WINDOW:
+                    if is_c_base and z_from_5prime <= damage_window:
                         if c_at_5p_count < 255:
                             c_at_5p_count += 1
-                    if is_g_base and z_from_3prime <= ANI_DAMAGE_WINDOW:
+                    if is_g_base and z_from_3prime <= damage_window:
                         if g_at_3p_count < 255:
                             g_at_3p_count += 1
 
@@ -1119,10 +1120,10 @@ cdef double calculate_md_score_with_stats_impl(char* md_tag, uint8_t* read_bases
                 z_from_3prime = rlen - read_pos
 
                 # Count C/G ref bases in damage zones (mismatched positions)
-                if IS_C_cached[ref_base] and z_from_5prime <= ANI_DAMAGE_WINDOW:
+                if IS_C_cached[ref_base] and z_from_5prime <= damage_window:
                     if c_at_5p_count < 255:
                         c_at_5p_count += 1
-                if IS_G_cached[ref_base] and z_from_3prime <= ANI_DAMAGE_WINDOW:
+                if IS_G_cached[ref_base] and z_from_3prime <= damage_window:
                     if g_at_3p_count < 255:
                         g_at_3p_count += 1
 
@@ -1149,11 +1150,11 @@ cdef double calculate_md_score_with_stats_impl(char* md_tag, uint8_t* read_bases
                         context_type = PMD_CTX_CPG if is_cpg else PMD_CTX_NONCPG
                         pmd_record_position(pmd_acc, PMD_END_3P, context_type, z_from_3prime, True)
 
-                # ANI damage counting (first/last 8bp window)
-                if is_ct_mismatch and z_from_5prime <= ANI_DAMAGE_WINDOW:
+                # ANI damage counting (configurable damage window)
+                if is_ct_mismatch and z_from_5prime <= damage_window:
                     if ct_5p_count < 255:
                         ct_5p_count += 1
-                elif is_ga_mismatch and z_from_3prime <= ANI_DAMAGE_WINDOW:
+                elif is_ga_mismatch and z_from_3prime <= damage_window:
                     if ga_3p_count < 255:
                         ga_3p_count += 1
                 else:

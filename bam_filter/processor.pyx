@@ -320,6 +320,7 @@ cdef score_alignments(
     calculate_pmd=True,
     library_type="ds",
     hierarchical_pmd=False,
+    damage_window=8,
     reference_lengths_tsv=None,
     reference_stats_tsv=None,
     min_read_count=1,
@@ -478,6 +479,7 @@ cdef score_alignments(
     scoring_config.global_max_score = -1e30
     scoring_config.calculate_pmd = calculate_pmd
     scoring_config.is_single_stranded = (library_type == "ss")
+    scoring_config.damage_window = min(max(damage_window, 1), 15)  # Clamp to 1-15
 
     cdef EMAlgorithmConfig em_config
     em_config.maximum_iterations = max_em_iterations
@@ -594,6 +596,10 @@ cdef score_alignments(
     cdef int64_t min_filt_len, max_filt_len, total_filt_len
     cdef int invalid_original_lengths = 0
     cdef int invalid_filtered_lengths = 0
+
+    # Damage window for ANI filter and pool population
+    cdef int filter_damage_window = 8
+    cdef int c_damage_window = 8
 
     # Batch array declarations
     cdef int64_t* batch_starts = NULL
@@ -1118,10 +1124,11 @@ cdef score_alignments(
             _announce_stage("ANI Filter", "Computing corrected ANI and counting passing alignments")
             stage_timer = bf_monotonic_seconds()
 
+            filter_damage_window = scoring_config.damage_window
             with nogil:
                 filtered_alignment_count = count_alignments_passing_ani_filter(
                     processing_batches, batch_count,
-                    curve_ptr, min_ani_threshold, c_epsilon
+                    curve_ptr, min_ani_threshold, c_epsilon, filter_damage_window
                 )
             _log_stage("ANI filter count", stage_timer)
 
@@ -1162,17 +1169,18 @@ cdef score_alignments(
             _announce_stage("Memory Optimization", "Transferring ANI-filtered alignments to optimized memory structures")
             stage_timer = bf_monotonic_seconds()
 
+            c_damage_window = scoring_config.damage_window
             with nogil:
                 if memory_pool.use_split_arrays:
                     if populate_memory_pool_filtered_split(memory_pool, processing_batches, batch_count,
                                                            bam_header, curve_ptr, min_ani_threshold,
-                                                           c_epsilon, num_threads_c) != 0:
+                                                           c_epsilon, num_threads_c, c_damage_window) != 0:
                         with gil:
                             raise RuntimeError("Failed to stream filtered batches to memory pool (split)")
                 else:
                     if populate_memory_pool_filtered(memory_pool, processing_batches, batch_count,
                                                       bam_header, curve_ptr, min_ani_threshold,
-                                                      c_epsilon, num_threads_c) != 0:
+                                                      c_epsilon, num_threads_c, c_damage_window) != 0:
                         with gil:
                             raise RuntimeError("Failed to stream filtered batches to memory pool")
             _log_stage("Filtered pool streaming", stage_timer)
@@ -1868,6 +1876,7 @@ def process_bam_with_em(
     calculate_pmd=False,
     library_type="ds",
     hierarchical_pmd=False,
+    damage_window=8,
 
     # TSV
     reference_lengths_tsv=None,
@@ -2034,6 +2043,7 @@ def process_bam_with_em(
             calculate_pmd=calculate_pmd,
             library_type=library_type,
             hierarchical_pmd=hierarchical_pmd,
+            damage_window=damage_window,
             reference_lengths_tsv=reference_lengths_tsv,
             reference_stats_tsv=reference_stats_tsv,
             min_read_count=min_read_count,

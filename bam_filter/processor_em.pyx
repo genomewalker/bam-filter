@@ -27,7 +27,7 @@ from bam_filter.processor cimport (
 from bam_filter.processor_fast_math cimport stable_log_sum_exp, safe_normalize_weights
 from bam_filter.processor_graph cimport (
     update_ancientness_field, ReferenceStats, init_ancientness_arrays,
-    calculate_reference_coverage
+    calculate_reference_coverage, calculate_reference_coverage_batched
 )
 from bam_filter.unified_damage cimport (
     UnifiedDamageContext, RefDamageCounts, RefDamageParams,
@@ -2974,7 +2974,8 @@ cdef int run_em(void* pool_ptr, EMConfig* config,
         # Iterative ancientness field update
         if iterative_auth_enabled and (iteration + 1) % auth_update_interval == 0:
             # Recompute coverage metrics using current posterior weights
-            calculate_reference_coverage(pool, ref_stats_for_auth)
+            # Use batched version for memory efficiency with large datasets
+            calculate_reference_coverage_batched(pool, ref_stats_for_auth)
 
             # Update ancientness field from posterior-weighted features
             update_ancientness_field(

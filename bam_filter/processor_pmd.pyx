@@ -568,13 +568,74 @@ cdef inline float compute_damage_weight(float D_z, float epsilon) noexcept nogil
     return D_z / denom
 
 
+cdef DamageCorrection compute_damage_correction(PMDCurve* curve,
+                                                  int damage_window,
+                                                  float epsilon) noexcept nogil:
+    """Compute unified damage correction weights from fitted PMD curve.
+
+    Returns both ANI weights and log-likelihood deltas for alignment scores.
+    The same underlying model is used for both:
+    - ANI: w = D_avg / (D_avg + epsilon), correction = ct*w_5p + ga*w_3p
+    - Score: delta = log(D_avg + epsilon) - log(epsilon), correction = ct*delta_5p + ga*delta_3p
+
+    Parameters
+    ----------
+    curve : PMDCurve*
+        Fitted damage curve with D(z) values
+    damage_window : int
+        Window size for averaging D(z) (typically 1-15, default 8)
+    epsilon : float
+        Baseline error rate (from quality scores, ~0.01)
+
+    Returns
+    -------
+    DamageCorrection
+        Structure with weights and deltas for both ends
+    """
+    cdef DamageCorrection result
+    cdef int z
+    cdef int window = damage_window if damage_window > 0 else 8
+    if window > 20:
+        window = 20
+
+    result.avg_D_5p = 0.0
+    result.avg_D_3p = 0.0
+
+    for z in range(window):
+        result.avg_D_5p += curve.D_5p_noncpg[z]
+        result.avg_D_3p += curve.D_3p_noncpg[z]
+
+    result.avg_D_5p /= <float>window
+    result.avg_D_3p /= <float>window
+
+    result.w_5p = compute_damage_weight(result.avg_D_5p, epsilon)
+    result.w_3p = compute_damage_weight(result.avg_D_3p, epsilon)
+
+    cdef float log_eps = <float>log(epsilon) if epsilon > 1e-10 else -23.0
+    result.delta_log_5p = <float>log(result.avg_D_5p + epsilon) - log_eps
+    result.delta_log_3p = <float>log(result.avg_D_3p + epsilon) - log_eps
+
+    return result
+
+
 cdef float compute_corrected_ani(ANISnapshot* snapshot,
                                   PMDCurve* curve,
                                   float epsilon) noexcept nogil:
-    """Compute damage-corrected ANI from snapshot.
+    """Compute damage-corrected ANI from snapshot (default window=8).
+
+    For the unified API with configurable window, use compute_corrected_ani_with_window.
+    """
+    return compute_corrected_ani_with_window(snapshot, curve, epsilon, 8)
+
+
+cdef float compute_corrected_ani_with_window(ANISnapshot* snapshot,
+                                              PMDCurve* curve,
+                                              float epsilon,
+                                              int damage_window) noexcept nogil:
+    """Compute damage-corrected ANI from snapshot with configurable window.
 
     Adjusts ANI by treating damage-eligible mismatches as partial matches:
-    corrected_matches = matches + sum(w_i) for damage-eligible mismatches
+    corrected_matches = matches + ct*w_5p + ga*w_3p
 
     Parameters
     ----------
@@ -584,6 +645,8 @@ cdef float compute_corrected_ani(ANISnapshot* snapshot,
         Fitted damage curve
     epsilon : float
         Baseline error rate
+    damage_window : int
+        Window size for damage averaging (1-15, default 8)
 
     Returns
     -------
@@ -593,31 +656,46 @@ cdef float compute_corrected_ani(ANISnapshot* snapshot,
     if snapshot.aligned_length == 0:
         return 0.0
 
+    cdef DamageCorrection dc = compute_damage_correction(curve, damage_window, epsilon)
     cdef float matches = <float>snapshot.match_count
-    cdef float damage_contribution = 0.0
-
-    # For C→T mismatches in first 8bp from 5' end
-    # We don't have per-position breakdown, so use average D(z) for positions 1-8
-    cdef int ct_count = snapshot.ct_5p_count
-    cdef int ga_count = snapshot.ga_3p_count
-
-    # Average damage weight for positions 1-8
-    cdef float avg_D_5p = 0.0
-    cdef float avg_D_3p = 0.0
-    cdef int z
-    for z in range(8):
-        avg_D_5p += curve.D_5p_noncpg[z]
-        avg_D_3p += curve.D_3p_noncpg[z]
-    avg_D_5p /= 8.0
-    avg_D_3p /= 8.0
-
-    cdef float w_5p = compute_damage_weight(avg_D_5p, epsilon)
-    cdef float w_3p = compute_damage_weight(avg_D_3p, epsilon)
-
-    damage_contribution = ct_count * w_5p + ga_count * w_3p
-
+    cdef float damage_contribution = snapshot.ct_5p_count * dc.w_5p + snapshot.ga_3p_count * dc.w_3p
     cdef float corrected_matches = matches + damage_contribution
+
     return 100.0 * corrected_matches / <float>snapshot.aligned_length
+
+
+cdef float compute_corrected_score(float raw_score,
+                                    uint8_t ct_5p_count,
+                                    uint8_t ga_3p_count,
+                                    DamageCorrection* dc) noexcept nogil:
+    """Compute damage-corrected alignment score using unified model.
+
+    Adjusts alignment score by adding log-likelihood deltas for damage:
+    corrected_score = raw_score + ct*delta_5p + ga*delta_3p
+
+    The delta values represent the difference between:
+    - P(mismatch | damage model) = D_avg + epsilon
+    - P(mismatch | no damage) = epsilon
+
+    So delta = log(D_avg + epsilon) - log(epsilon)
+
+    Parameters
+    ----------
+    raw_score : float
+        Original alignment score (log-likelihood)
+    ct_5p_count : uint8_t
+        Number of C→T mismatches in 5' damage window
+    ga_3p_count : uint8_t
+        Number of G→A mismatches in 3' damage window
+    dc : DamageCorrection*
+        Precomputed damage correction weights
+
+    Returns
+    -------
+    float
+        Damage-corrected alignment score
+    """
+    return raw_score + ct_5p_count * dc.delta_log_5p + ga_3p_count * dc.delta_log_3p
 
 
 cdef ANIResult compute_ani_pair(ANISnapshot* snapshot,

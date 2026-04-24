@@ -165,9 +165,13 @@ cdef void count_alignments_chunk(uint64_t start_aln, uint64_t end_aln,
     """
     cdef uint64_t aln_i
     cdef uint32_t aln_ref
+    cdef bint use_split = pool.use_split_arrays
 
     for aln_i in range(start_aln, end_aln):
-        aln_ref = pool.alignments[aln_i].reference_index
+        if use_split:
+            aln_ref = pool.alignment_cores[aln_i].reference_index
+        else:
+            aln_ref = pool.alignments[aln_i].reference_index
         if aln_ref < pool.reference_count:
             thread_alignments_per_ref[aln_ref] += 1
 
@@ -206,6 +210,7 @@ cdef void count_reads_chunk(uint32_t start_read, uint32_t end_read, MemoryPool* 
     cdef uint32_t unique_capacity = 256
     cdef uint32_t* new_unique_refs
     cdef uint32_t j
+    cdef bint use_split = pool.use_split_arrays
 
     ref_seen = <char*>calloc(pool.reference_count, sizeof(char))
     if not ref_seen:
@@ -227,7 +232,10 @@ cdef void count_reads_chunk(uint32_t start_read, uint32_t end_read, MemoryPool* 
         ref_count_in_read = 0
 
         for aln_i in range(start_pos, end_pos):
-            aln_ref = pool.alignments[aln_i].reference_index
+            if use_split:
+                aln_ref = pool.alignment_cores[aln_i].reference_index
+            else:
+                aln_ref = pool.alignments[aln_i].reference_index
             if aln_ref >= pool.reference_count:
                 continue
 
@@ -341,9 +349,13 @@ cdef void calculate_dataset_summary_stats(MemoryPool* pool, DatasetSummaryStats*
     cdef uint64_t pmd_n = 0
     cdef float pmd_score
     cdef double std_error = 0.0
+    cdef bint use_split = pool.use_split_arrays
 
     for i in range(pool.alignment_count):
-        score = pool.alignments[i].alignment_score
+        if use_split:
+            score = pool.alignment_cores[i].alignment_score
+        else:
+            score = pool.alignments[i].alignment_score
 
         n += 1
         delta = score - mean
@@ -356,7 +368,10 @@ cdef void calculate_dataset_summary_stats(MemoryPool* pool, DatasetSummaryStats*
             stats.max_score = score
 
         if stats.pmd_enabled:
-            pmd_score = pool.alignments[i].pmd_score
+            if use_split:
+                pmd_score = pool.bam_aux[i].pmd_score if pool.bam_aux else 0.0
+            else:
+                pmd_score = pool.alignments[i].pmd_score
 
             pmd_n += 1
             delta = pmd_score - pmd_mean
@@ -409,6 +424,7 @@ cdef void calculate_reference_stats(MemoryPool* pool, sam_hdr_t* bam_header,
     cdef uint32_t i
     cdef bint found
     cdef uint32_t alignments_to_this_ref
+    cdef bint use_split = pool.use_split_arrays
 
     for ref_idx in range(pool.reference_count):
         ref_stats[ref_idx].total_reads = 0
@@ -431,16 +447,30 @@ cdef void calculate_reference_stats(MemoryPool* pool, sam_hdr_t* bam_header,
         ref_stats[ref_idx].pmd_std = 0.0
         ref_stats[ref_idx].pmd_nonzero_count = 0
 
+        # Initialize coverage fields (normally set by calculate_reference_coverage_batched)
+        ref_stats[ref_idx].bases_covered = 0
+        ref_stats[ref_idx].n_intervals = 0
+        ref_stats[ref_idx].breadth = 0.0
+        ref_stats[ref_idx].norm_spatial_entropy = 0.0
+        ref_stats[ref_idx].norm_gini = 0.0
+        ref_stats[ref_idx].weighted_contiguity_breadth = 0.0
+
     bf_nogil_logf_notime(NULL, b"reference_stats: computing mutually exclusive read categories")
 
     for alignment_idx in range(pool.alignment_count):
-        current_ref = pool.alignments[alignment_idx].reference_index
+        if use_split:
+            current_ref = pool.alignment_cores[alignment_idx].reference_index
+        else:
+            current_ref = pool.alignments[alignment_idx].reference_index
         if current_ref >= pool.reference_count:
             continue
 
         ref_stats[current_ref].alignment_count += 1
 
-        score_val = <double>pool.alignments[alignment_idx].alignment_score
+        if use_split:
+            score_val = <double>pool.alignment_cores[alignment_idx].alignment_score
+        else:
+            score_val = <double>pool.alignments[alignment_idx].alignment_score
         n_score = ref_stats[current_ref].alignment_count
 
         if score_val < ref_stats[current_ref].score_min:
@@ -458,7 +488,10 @@ cdef void calculate_reference_stats(MemoryPool* pool, sam_hdr_t* bam_header,
             ref_stats[current_ref].score_variance += delta * delta2
 
         if pmd_enabled:
-            pmd_val = <double>pool.alignments[alignment_idx].pmd_score
+            if use_split:
+                pmd_val = <double>pool.bam_aux[alignment_idx].pmd_score if pool.bam_aux else 0.0
+            else:
+                pmd_val = <double>pool.alignments[alignment_idx].pmd_score
 
             if pmd_val != 0.0:
                 ref_stats[current_ref].pmd_nonzero_count += 1
@@ -521,7 +554,10 @@ cdef void calculate_reference_stats(MemoryPool* pool, sam_hdr_t* bam_header,
                 return
 
         for alignment_idx in range(start_pos, end_pos):
-            current_ref = pool.alignments[alignment_idx].reference_index
+            if use_split:
+                current_ref = pool.alignment_cores[alignment_idx].reference_index
+            else:
+                current_ref = pool.alignments[alignment_idx].reference_index
             if current_ref >= pool.reference_count:
                 continue
 
@@ -612,6 +648,7 @@ cdef void calculate_reference_coverage(MemoryPool* pool, ReferenceStats* ref_sta
     cdef RLECoverage** rle_array = NULL
     cdef RefStats temp_stats
     cdef int ret
+    cdef bint use_split = pool.use_split_arrays
 
     if pool == NULL or ref_stats == NULL or pool.reference_count == 0:
         return
@@ -636,12 +673,17 @@ cdef void calculate_reference_coverage(MemoryPool* pool, ReferenceStats* ref_sta
 
     # Pass 1: Add alignment intervals to RLE structures (lazy allocation)
     # Only include alignments that pass ANI filter (corrected identity threshold)
+    # Note: When using split arrays, all alignments already passed ANI filter during population
     for aln_idx in range(pool.alignment_count):
-        # Skip alignments that failed ANI filter
-        if pool.alignments[aln_idx].passes_ani_filter == 0:
-            continue
+        # Skip alignments that failed ANI filter (only for legacy mode - split arrays are pre-filtered)
+        if not use_split:
+            if pool.alignments[aln_idx].passes_ani_filter == 0:
+                continue
 
-        current_ref = pool.alignments[aln_idx].reference_index
+        if use_split:
+            current_ref = pool.alignment_cores[aln_idx].reference_index
+        else:
+            current_ref = pool.alignments[aln_idx].reference_index
         if current_ref >= pool.reference_count:
             continue
 
@@ -655,8 +697,12 @@ cdef void calculate_reference_coverage(MemoryPool* pool, ReferenceStats* ref_sta
                 continue
 
         # Add this alignment's coverage interval
-        aln_start = <int64_t>pool.alignments[aln_idx].alignment_position
-        aln_end = aln_start + <int64_t>pool.alignments[aln_idx].aligned_length
+        if use_split:
+            aln_start = <int64_t>pool.alignment_cores[aln_idx].alignment_position
+            aln_end = aln_start + <int64_t>pool.alignment_cores[aln_idx].aligned_length
+        else:
+            aln_start = <int64_t>pool.alignments[aln_idx].alignment_position
+            aln_end = aln_start + <int64_t>pool.alignments[aln_idx].aligned_length
 
         # Clamp to reference bounds
         if aln_start < 0:
@@ -720,6 +766,7 @@ cdef void calculate_reference_coverage_batched(MemoryPool* pool, ReferenceStats*
     cdef int ret
     cdef uint32_t n_batches, batch_num
     cdef uint32_t refs_processed = 0
+    cdef bint use_split = pool.use_split_arrays
 
     if pool == NULL or ref_stats == NULL or pool.reference_count == 0:
         return
@@ -761,12 +808,17 @@ cdef void calculate_reference_coverage_batched(MemoryPool* pool, ReferenceStats*
 
         # Pass 1: Scan all alignments, build RLE only for refs in this batch
         # Only include alignments that pass ANI filter (corrected identity threshold)
+        # Note: When using split arrays, all alignments already passed ANI filter during population
         for aln_idx in range(pool.alignment_count):
-            # Skip alignments that failed ANI filter
-            if pool.alignments[aln_idx].passes_ani_filter == 0:
-                continue
+            # Skip alignments that failed ANI filter (only for legacy mode - split arrays are pre-filtered)
+            if not use_split:
+                if pool.alignments[aln_idx].passes_ani_filter == 0:
+                    continue
 
-            current_ref = pool.alignments[aln_idx].reference_index
+            if use_split:
+                current_ref = pool.alignment_cores[aln_idx].reference_index
+            else:
+                current_ref = pool.alignments[aln_idx].reference_index
             if current_ref < batch_start or current_ref >= batch_end:
                 continue  # Skip refs not in this batch
 
@@ -783,8 +835,12 @@ cdef void calculate_reference_coverage_batched(MemoryPool* pool, ReferenceStats*
                     continue
 
             # Add coverage interval
-            aln_start = <int64_t>pool.alignments[aln_idx].alignment_position
-            aln_end = aln_start + <int64_t>pool.alignments[aln_idx].aligned_length
+            if use_split:
+                aln_start = <int64_t>pool.alignment_cores[aln_idx].alignment_position
+                aln_end = aln_start + <int64_t>pool.alignment_cores[aln_idx].aligned_length
+            else:
+                aln_start = <int64_t>pool.alignments[aln_idx].alignment_position
+                aln_end = aln_start + <int64_t>pool.alignments[aln_idx].aligned_length
 
             if aln_start < 0:
                 aln_start = 0
@@ -936,6 +992,9 @@ cdef void accumulate_posterior_weighted_features(
     cdef Alignment* aln
     cdef double phi_j, weight
     cdef double damage_5p, damage_3p
+    cdef bint use_split = pool.use_split_arrays
+    cdef uint8_t ct_5p, ga_3p, c_at_5p, g_at_3p
+    cdef uint16_t aligned_len
 
     if pool == NULL or phi_weights == NULL or ref_stats == NULL:
         return
@@ -977,8 +1036,22 @@ cdef void accumulate_posterior_weighted_features(
         end_pos = start_pos + aln_count
 
         for aln_idx in range(start_pos, end_pos):
-            aln = &pool.alignments[aln_idx]
-            ref_idx = aln.reference_index
+            if use_split:
+                ref_idx = pool.alignment_cores[aln_idx].reference_index
+                aligned_len = pool.alignment_cores[aln_idx].aligned_length
+                ct_5p = pool.damage_counts[aln_idx].ct_5p_count if pool.damage_counts else 0
+                ga_3p = pool.damage_counts[aln_idx].ga_3p_count if pool.damage_counts else 0
+                c_at_5p = pool.damage_counts[aln_idx].c_at_5p_count if pool.damage_counts else 0
+                g_at_3p = pool.damage_counts[aln_idx].g_at_3p_count if pool.damage_counts else 0
+            else:
+                aln = &pool.alignments[aln_idx]
+                ref_idx = aln.reference_index
+                aligned_len = aln.aligned_length
+                ct_5p = aln.ct_5p_count
+                ga_3p = aln.ga_3p_count
+                c_at_5p = aln.c_at_5p_count
+                g_at_3p = aln.g_at_3p_count
+
             if ref_idx >= n_refs:
                 continue
 
@@ -990,14 +1063,14 @@ cdef void accumulate_posterior_weighted_features(
             weight = phi_j
 
             # Accumulate damage counts (C->T at 5', G->A at 3')
-            ct_sums[ref_idx] += weight * <double>aln.ct_5p_count
-            ga_sums[ref_idx] += weight * <double>aln.ga_3p_count
-            ct_opp_sums[ref_idx] += weight * <double>aln.c_at_5p_count
-            ga_opp_sums[ref_idx] += weight * <double>aln.g_at_3p_count
+            ct_sums[ref_idx] += weight * <double>ct_5p
+            ga_sums[ref_idx] += weight * <double>ga_3p
+            ct_opp_sums[ref_idx] += weight * <double>c_at_5p
+            ga_opp_sums[ref_idx] += weight * <double>g_at_3p
 
             # Accumulate length statistics
-            len_sums[ref_idx] += weight * <double>aln.aligned_length
-            if aln.aligned_length < 60:
+            len_sums[ref_idx] += weight * <double>aligned_len
+            if aligned_len < 60:
                 short_counts[ref_idx] += weight
             total_counts[ref_idx] += weight
 
@@ -1260,7 +1333,7 @@ cdef void calculate_unique_read_counts_selective(MemoryPool* pool, ReferencePatt
     cdef uint32_t read_idx, ref_idx, current_ref
     cdef uint64_t start_pos, end_pos, alignment_idx
     cdef uint32_t alignment_count
-    
+
     # Track which references each read maps to
     cdef uint32_t* read_refs = NULL
     cdef uint32_t ref_capacity = 0
@@ -1268,7 +1341,8 @@ cdef void calculate_unique_read_counts_selective(MemoryPool* pool, ReferencePatt
     cdef uint32_t i
     cdef bint found
     cdef uint32_t surviving_refs = 0
-    
+    cdef bint use_split = pool.use_split_arrays
+
     # Count how many references we're processing
     for ref_idx in range(pool.reference_count):
         if total_reads[ref_idx] >= <uint32_t>low_coverage_threshold:
@@ -1304,7 +1378,10 @@ cdef void calculate_unique_read_counts_selective(MemoryPool* pool, ReferencePatt
         # Find unique references for this read
         unique_ref_count = 0
         for alignment_idx in range(start_pos, end_pos):
-            current_ref = pool.alignments[alignment_idx].reference_index
+            if use_split:
+                current_ref = pool.alignment_cores[alignment_idx].reference_index
+            else:
+                current_ref = pool.alignments[alignment_idx].reference_index
             if current_ref >= pool.reference_count:
                 continue
             
@@ -1395,6 +1472,7 @@ cdef void print_pattern_summary(MemoryPool* memory_pool, sam_hdr_t* bam_header,
     cdef uint32_t* read_refs = NULL
     cdef char* ref_seen = NULL
     cdef bint found
+    cdef bint use_split = memory_pool.use_split_arrays
 
     cdef double base_multimap, multimap_component, connection_penalty
     cdef double self_multimap, neighbor_influence, neighbor_penalty
@@ -1444,7 +1522,10 @@ cdef void print_pattern_summary(MemoryPool* memory_pool, sam_hdr_t* bam_header,
                 unique_ref_count = 0
 
                 for alignment_idx in range(start_pos, end_pos):
-                    ref_idx = memory_pool.alignments[alignment_idx].reference_index
+                    if use_split:
+                        ref_idx = memory_pool.alignment_cores[alignment_idx].reference_index
+                    else:
+                        ref_idx = memory_pool.alignments[alignment_idx].reference_index
                     if ref_idx < memory_pool.reference_count and not ref_seen[ref_idx]:
                         ref_seen[ref_idx] = 1
                         read_refs[unique_ref_count] = ref_idx
@@ -1734,6 +1815,7 @@ cdef int count_unique_refs_thread_local(uint32_t read_idx, MemoryPool* pool,
     cdef uint32_t i
     cdef uint32_t slot, other_ref
     cdef bint used_malloc
+    cdef bint use_split = pool.use_split_arrays
 
     if ref_count < 1:
         return 0
@@ -1751,7 +1833,10 @@ cdef int count_unique_refs_thread_local(uint32_t read_idx, MemoryPool* pool,
         used_malloc = True
 
     for alignment_idx in range(start_pos, end_pos):
-        ref_idx = pool.alignments[alignment_idx].reference_index
+        if use_split:
+            ref_idx = pool.alignment_cores[alignment_idx].reference_index
+        else:
+            ref_idx = pool.alignments[alignment_idx].reference_index
         if ref_idx < array_size:
             read_refs[valid_count] = ref_idx
             valid_count += 1
@@ -1801,6 +1886,7 @@ cdef int fill_ref_to_reads_thread_local(uint32_t read_idx, MemoryPool* pool,
     cdef uint32_t prev_ref
     cdef uint32_t i
     cdef bint used_malloc
+    cdef bint use_split = pool.use_split_arrays
 
     if ref_count < 1:
         return 0
@@ -1818,7 +1904,10 @@ cdef int fill_ref_to_reads_thread_local(uint32_t read_idx, MemoryPool* pool,
         used_malloc = True
 
     for alignment_idx in range(start_pos, end_pos):
-        ref_idx = pool.alignments[alignment_idx].reference_index
+        if use_split:
+            ref_idx = pool.alignment_cores[alignment_idx].reference_index
+        else:
+            ref_idx = pool.alignments[alignment_idx].reference_index
         if ref_idx < array_size:
             read_refs[valid_count] = ref_idx
             valid_count += 1
@@ -2030,7 +2119,8 @@ cdef void compute_reference_neighbor_metrics(uint32_t start_ref, uint32_t end_re
     cdef uint32_t* refs_ptr
     cdef double neighbor_multimap_sum, neighbor_connections_sum
     cdef uint32_t neighbor_count
-    cdef uint64_t start_pos 
+    cdef uint64_t start_pos
+    cdef bint use_split = pool.use_split_arrays
 
     if not stamp:
         return
@@ -2084,7 +2174,10 @@ cdef void compute_reference_neighbor_metrics(uint32_t start_ref, uint32_t end_re
 
                 start_pos = pool.read_alignment_starts[read_idx]
                 for j in range(ref_count):
-                    other_ref = pool.alignments[start_pos + j].reference_index
+                    if use_split:
+                        other_ref = pool.alignment_cores[start_pos + j].reference_index
+                    else:
+                        other_ref = pool.alignments[start_pos + j].reference_index
                     if other_ref != target_ref and other_ref < array_size:
                         if stamp[other_ref] != gen:
                             stamp[other_ref] = gen
@@ -2177,6 +2270,7 @@ cdef void compute_neighbor_connections_avg_from_exact(uint32_t start_ref, uint32
     cdef uint32_t neighbor_count
     cdef double neighbor_sum
     cdef uint32_t* refs_ptr
+    cdef bint use_split = pool.use_split_arrays
 
     if not stamp or not neighbor_connections_avg or not exact_connection_counts:
         return
@@ -2216,7 +2310,10 @@ cdef void compute_neighbor_connections_avg_from_exact(uint32_t start_ref, uint32
                 if ref_count < 1:
                     continue
                 for j in range(ref_count):
-                    other_ref = pool.alignments[pool.read_alignment_starts[read_idx] + j].reference_index
+                    if use_split:
+                        other_ref = pool.alignment_cores[pool.read_alignment_starts[read_idx] + j].reference_index
+                    else:
+                        other_ref = pool.alignments[pool.read_alignment_starts[read_idx] + j].reference_index
                     if other_ref != target_ref and other_ref < array_size:
                         if stamp[other_ref] != gen:
                             stamp[other_ref] = gen
@@ -2294,6 +2391,8 @@ cdef uint32_t count_unique_refs_for_read(MemoryPool* pool, uint32_t read_idx, ui
     cdef uint32_t k = 0
     cdef uint32_t i
     cdef uint32_t dedup_count
+    cdef bint use_split = pool.use_split_arrays
+    cdef uint32_t ref_idx_val
 
     if ref_count < 1:
         return ref_count
@@ -2306,8 +2405,12 @@ cdef uint32_t count_unique_refs_for_read(MemoryPool* pool, uint32_t read_idx, ui
         return 0
 
     for i in range(start_pos, end_pos):
-        if pool.alignments[i].reference_index < array_size:
-            tmp[k] = pool.alignments[i].reference_index
+        if use_split:
+            ref_idx_val = pool.alignment_cores[i].reference_index
+        else:
+            ref_idx_val = pool.alignments[i].reference_index
+        if ref_idx_val < array_size:
+            tmp[k] = ref_idx_val
             k += 1
 
     if k == 0:
@@ -2338,6 +2441,8 @@ cdef void fill_unique_refs_for_read(ReadRefsIndex* rri, MemoryPool* pool, uint32
     cdef uint32_t* tmp = NULL
     cdef uint32_t k = 0
     cdef uint32_t i, dedup_count
+    cdef bint use_split = pool.use_split_arrays
+    cdef uint32_t ref_idx_val
 
     if rri.counts[read_idx] == 0:
         return
@@ -2345,9 +2450,12 @@ cdef void fill_unique_refs_for_read(ReadRefsIndex* rri, MemoryPool* pool, uint32
     if ref_count < 1:
         if ref_count == 1:
             start_pos = pool.read_alignment_starts[read_idx]
-            i = pool.alignments[start_pos].reference_index
-            if i < array_size:
-                rri.read_ptrs[read_idx][0] = i
+            if use_split:
+                ref_idx_val = pool.alignment_cores[start_pos].reference_index
+            else:
+                ref_idx_val = pool.alignments[start_pos].reference_index
+            if ref_idx_val < array_size:
+                rri.read_ptrs[read_idx][0] = ref_idx_val
         return
 
     start_pos = pool.read_alignment_starts[read_idx]
@@ -2358,8 +2466,12 @@ cdef void fill_unique_refs_for_read(ReadRefsIndex* rri, MemoryPool* pool, uint32
         return
 
     for i in range(start_pos, end_pos):
-        if pool.alignments[i].reference_index < array_size:
-            tmp[k] = pool.alignments[i].reference_index
+        if use_split:
+            ref_idx_val = pool.alignment_cores[i].reference_index
+        else:
+            ref_idx_val = pool.alignments[i].reference_index
+        if ref_idx_val < array_size:
+            tmp[k] = ref_idx_val
             k += 1
 
     if k == 0:
@@ -2525,6 +2637,7 @@ cdef WeightedGraph* analyze_reference_graph(MemoryPool* pool, ReferencePattern* 
     cdef uint32_t max_ref_id = 0
     cdef int64_t i
     cdef uint32_t array_size
+    cdef bint use_split = pool.use_split_arrays
 
     cdef double* neighbor_multimap_avg = NULL
     cdef double* neighbor_connections_avg = NULL
@@ -2618,8 +2731,13 @@ cdef WeightedGraph* analyze_reference_graph(MemoryPool* pool, ReferencePattern* 
         array_size = mapping.n_retained_refs
 
     cdef uint64_t invalid_refs = 0
+    cdef uint32_t check_ref_idx
     for i in range(pool.alignment_count):
-        if pool.alignments[i].reference_index >= array_size:
+        if use_split:
+            check_ref_idx = pool.alignment_cores[i].reference_index
+        else:
+            check_ref_idx = pool.alignments[i].reference_index
+        if check_ref_idx >= array_size:
             invalid_refs += 1
 
     if invalid_refs:
@@ -2963,8 +3081,10 @@ cdef WeightedGraph* analyze_reference_graph(MemoryPool* pool, ReferencePattern* 
             # Calculate all reference statistics including read categories and score stats
             calculate_reference_stats(pool, bam_header, ref_stats)
 
-            # Calculate coverage statistics (breadth, entropy, gini, WCB) from MemoryPool
-            calculate_reference_coverage(pool, ref_stats)
+            # REMOVED: RLE-based coverage calculation is expensive O(batches × alignments)
+            # and redundant with EM's posterior-weighted coverage (norm_entropy_post, norm_gini_post).
+            # Coverage columns in TSV will be 0 - use 'filter' command for detailed coverage analysis.
+            # calculate_reference_coverage_batched(pool, ref_stats)
 
             # Populate pattern_data[].unique_read_count from ref_stats for filtering logic
             # This ensures consistency between TSV output and filtering decisions
@@ -3258,12 +3378,13 @@ cdef void accumulate_co_mappings(uint32_t start_read, uint32_t end_read,
     cdef uint32_t read_idx, alignment_idx, ref_idx, ref_count
     cdef uint64_t start_pos, end_pos
     cdef uint32_t i, collected_count
-    cdef uint64_t co_mappings 
+    cdef uint64_t co_mappings
     cdef double co_mappings_f
     cdef uint32_t* temp_refs = NULL
     cdef uint32_t max_possible_refs, alloc_size
     cdef char* ref_seen = NULL
     cdef uint32_t* new_refs
+    cdef bint use_split = pool.use_split_arrays
 
     for read_idx in range(start_read, end_read):
         if read_idx >= pool.unique_read_count:
@@ -3295,7 +3416,10 @@ cdef void accumulate_co_mappings(uint32_t start_read, uint32_t end_read,
 
         collected_count = 0
         for alignment_idx in range(start_pos, end_pos):
-            ref_idx = pool.alignments[alignment_idx].reference_index
+            if use_split:
+                ref_idx = pool.alignment_cores[alignment_idx].reference_index
+            else:
+                ref_idx = pool.alignments[alignment_idx].reference_index
             if (ref_idx < array_size and not ref_seen[ref_idx]):
 
                 if collected_count >= alloc_size:

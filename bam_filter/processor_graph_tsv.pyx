@@ -586,20 +586,32 @@ cdef int write_graph_tsv_c(MemoryPool* pool, sam_hdr_t* bam_header,
         if pool.damage_log_bf != NULL and ref_idx < pool.reference_count:
             damage_log_bf = pool.damage_log_bf[ref_idx]
 
-        # Coverage statistics from ref_stats
+        # Coverage statistics: prefer EM-derived posterior values, fall back to ref_stats
         cov_breadth = 0.0
         cov_bases_covered = 0
         cov_n_intervals = 0
         cov_norm_spatial_entropy = 0.0
         cov_norm_gini = 0.0
         cov_wcb = 0.0
+        # Use EM-derived posterior-weighted values if available (faster, computed during EM)
+        if pool.norm_entropy_post != NULL and ref_idx < pool.reference_count:
+            cov_norm_spatial_entropy = pool.norm_entropy_post[ref_idx]
+        if pool.norm_gini_post != NULL and ref_idx < pool.reference_count:
+            cov_norm_gini = pool.norm_gini_post[ref_idx]
+        if pool.authenticity_scores_post != NULL and ref_idx < pool.reference_count:
+            cov_wcb = pool.authenticity_scores_post[ref_idx]  # Use auth score for WCB column
+        # Fall back to ref_stats for breadth/intervals (these require RLE calculation)
         if ref_stats and ref_idx < pool.reference_count:
             cov_breadth = ref_stats[ref_idx].breadth
             cov_bases_covered = ref_stats[ref_idx].bases_covered
             cov_n_intervals = ref_stats[ref_idx].n_intervals
-            cov_norm_spatial_entropy = ref_stats[ref_idx].norm_spatial_entropy
-            cov_norm_gini = ref_stats[ref_idx].norm_gini
-            cov_wcb = ref_stats[ref_idx].weighted_contiguity_breadth
+            # Only override if EM values weren't available
+            if pool.norm_entropy_post == NULL:
+                cov_norm_spatial_entropy = ref_stats[ref_idx].norm_spatial_entropy
+            if pool.norm_gini_post == NULL:
+                cov_norm_gini = ref_stats[ref_idx].norm_gini
+            if pool.authenticity_scores_post == NULL:
+                cov_wcb = ref_stats[ref_idx].weighted_contiguity_breadth
 
         # Initialize lineage names
         name_superkingdom = NULL

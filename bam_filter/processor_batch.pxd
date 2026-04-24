@@ -124,7 +124,8 @@ cdef int64_t count_alignments_passing_ani_filter(ProcessingBatch** batches,
                                                   int64_t batch_count,
                                                   PMDCurve* curve,
                                                   float min_ani_threshold,
-                                                  float epsilon) noexcept nogil
+                                                  float epsilon,
+                                                  int damage_window=*) noexcept nogil
 
 # Filtered population: transfer only passing alignments + compute authenticity per batch
 cdef int populate_memory_pool_filtered(MemoryPool* pool,
@@ -134,7 +135,8 @@ cdef int populate_memory_pool_filtered(MemoryPool* pool,
                                         PMDCurve* curve,
                                         float min_ani_threshold,
                                         float epsilon,
-                                        int num_threads) except -1 nogil
+                                        int num_threads,
+                                        int damage_window=*) except -1 nogil
 
 # Split array version for memory-optimized storage
 cdef int populate_memory_pool_filtered_split(MemoryPool* pool,
@@ -144,4 +146,5 @@ cdef int populate_memory_pool_filtered_split(MemoryPool* pool,
                                               PMDCurve* curve,
                                               float min_ani_threshold,
                                               float epsilon,
-                                              int num_threads) except -1 nogil
+                                              int num_threads,
+                                              int damage_window=*) except -1 nogil

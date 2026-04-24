@@ -681,6 +681,7 @@ defaults = {
     "em_unknown_score": -50.0,
     "em_length_init": False,
     "hierarchical_pmd": True,  # Default ON for ancient DNA (ancient/modern classification)
+    "damage_window": 8,  # Window size (bp) for damage correction at read ends
     "sample_pi_override": 0.0,  # Sample-level P(ancient) gate; 0.0 = auto from PMD curve
     # === UNIFIED φ-SPACE EM PARAMETERS ===
     "em_mode": "phi",  # "standard" (rho=1.0) or "phi" (rho=0.7, recommended for metagenomics)
@@ -1815,6 +1816,17 @@ def get_arguments(argv=None):
              "π = omega × D1/(D1+baseline). Set to 0.01-0.99 to force a specific "
              "prior probability that this sample contains ancient DNA. "
              "Useful for modern samples where damage should be ignored.",
+    )
+    reassign_pmd_args.add_argument(
+        "--damage-window",
+        dest="damage_window",
+        type=int,
+        default=defaults["damage_window"],
+        metavar="INT",
+        help="Window size (bp) for damage correction at read ends (1-15). "
+             "Default 8 captures ~95%% of damage signal. Damage counts (C→T at 5', "
+             "G→A at 3') within this window are used for both ANI correction and "
+             "alignment score correction using the fitted PMD curve.",
     )
     reassign_export_args.add_argument(
         "-S",

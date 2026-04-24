@@ -45,6 +45,7 @@ from bam_filter.processor_pmd cimport (
     PMDCurve,
     ANISnapshot,
     compute_corrected_ani,
+    compute_corrected_ani_with_window,
 )
 from cython.parallel cimport prange, threadid
 from .processor_types cimport (
@@ -428,11 +429,13 @@ cdef int process_batch_alignments_with_pmd(samFile* bam_file, sam_hdr_t* header,
     if scoring_config.calculate_pmd:
         pmd_ptr = &temp_pmd_score
 
+    # Always collect ANI stats for ANI filter (needed even when PMD disabled)
+    ani_ptr = &ani_stats
+
     # Get thread-local PMD accumulator if context provided and stats collection enabled
     if pmd_context != NULL and pmd_context.collect_stats:
         if thread_id >= 0 and thread_id < pmd_context.num_threads:
             pmd_acc = &pmd_context.thread_contexts[thread_id].stats
-        ani_ptr = &ani_stats
 
     batch.processed_by_thread_id = thread_id
 
@@ -1080,7 +1083,8 @@ cdef int64_t count_alignments_passing_ani_filter(ProcessingBatch** batches,
                                                   int64_t batch_count,
                                                   PMDCurve* curve,
                                                   float min_ani_threshold,
-                                                  float epsilon) noexcept nogil:
+                                                  float epsilon,
+                                                  int damage_window=8) noexcept nogil:
     """Count alignments that pass the corrected ANI filter.
 
     Iterates through all batches and computes corrected ANI for each alignment
@@ -1098,6 +1102,8 @@ cdef int64_t count_alignments_passing_ani_filter(ProcessingBatch** batches,
         Minimum ANI percentage (0-100) to pass filter
     epsilon : float
         Baseline sequencing error rate
+    damage_window : int, optional
+        Window size for damage correction averaging (default 8)
 
     Returns
     -------
@@ -1130,7 +1136,7 @@ cdef int64_t count_alignments_passing_ani_filter(ProcessingBatch** batches,
                 snapshot.other_mm_count = 0
                 snapshot.flags = 0
 
-                corrected_ani = compute_corrected_ani(&snapshot, curve, epsilon)
+                corrected_ani = compute_corrected_ani_with_window(&snapshot, curve, epsilon, damage_window)
             else:
                 # No PMD curve - use raw ANI
                 if src.aligned_length > 0:
@@ -1152,7 +1158,8 @@ cdef int populate_memory_pool_filtered(MemoryPool* pool,
                                         PMDCurve* curve,
                                         float min_ani_threshold,
                                         float epsilon,
-                                        int num_threads) except -1 nogil:
+                                        int num_threads,
+                                        int damage_window=8) except -1 nogil:
     """Transfer only ANI-filtered alignments to memory pool.
 
     Computes corrected ANI for each alignment using the fitted PMD curve,
@@ -1177,6 +1184,8 @@ cdef int populate_memory_pool_filtered(MemoryPool* pool,
         Baseline sequencing error rate
     num_threads : int
         Number of threads (unused, retained for API compatibility)
+    damage_window : int, optional
+        Window size for damage correction averaging (default 8)
 
     Returns
     -------
@@ -1217,7 +1226,7 @@ cdef int populate_memory_pool_filtered(MemoryPool* pool,
                 snapshot.other_mm_count = 0
                 snapshot.flags = 0
 
-                corrected_ani = compute_corrected_ani(&snapshot, curve, epsilon)
+                corrected_ani = compute_corrected_ani_with_window(&snapshot, curve, epsilon, damage_window)
             else:
                 # No PMD curve - use raw ANI
                 if src.aligned_length > 0:
@@ -1308,7 +1317,8 @@ cdef int populate_memory_pool_filtered_split(MemoryPool* pool,
                                               PMDCurve* curve,
                                               float min_ani_threshold,
                                               float epsilon,
-                                              int num_threads) except -1 nogil:
+                                              int num_threads,
+                                              int damage_window=8) except -1 nogil:
     """Transfer ANI-filtered alignments to memory pool using split array storage.
 
     Memory-optimized version that populates split arrays (AlignmentCore, read_indices,
@@ -1333,6 +1343,8 @@ cdef int populate_memory_pool_filtered_split(MemoryPool* pool,
         Baseline sequencing error rate
     num_threads : int
         Number of threads (unused, retained for API compatibility)
+    damage_window : int, optional
+        Window size for damage correction averaging (default 8)
 
     Returns
     -------
@@ -1397,7 +1409,7 @@ cdef int populate_memory_pool_filtered_split(MemoryPool* pool,
                 snapshot.g_at_3p_count = src.g_at_3p_count
                 snapshot.other_mm_count = 0
                 snapshot.flags = 0
-                corrected_ani = compute_corrected_ani(&snapshot, curve, epsilon)
+                corrected_ani = compute_corrected_ani_with_window(&snapshot, curve, epsilon, damage_window)
             else:
                 if src.aligned_length > 0:
                     raw_ani = (<float>src.match_count / <float>src.aligned_length) * 100.0

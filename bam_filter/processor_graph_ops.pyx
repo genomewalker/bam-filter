@@ -251,6 +251,7 @@ cdef uint64_t count_edges_from_read_index(
     cdef uint8_t* read_seen_refs = NULL
     cdef uint32_t* seen_refs_this_read = NULL
     cdef uint32_t seen_count = 0
+    cdef bint use_split
 
     if not edge_weights:
         return 0
@@ -268,6 +269,8 @@ cdef uint64_t count_edges_from_read_index(
         free(edge_weights)
         return 0
     cdef uint32_t seen_capacity = 1024
+
+    use_split = pool.use_split_arrays
 
     if verbose:
         bf_nogil_logf_notime(b"IGRAPH OPS", "Counting edges from ReadIndex...\n")
@@ -298,7 +301,10 @@ cdef uint64_t count_edges_from_read_index(
             # First pass: mark which references this read maps to (unique per read)
             aln_idx64 = aln_start_i
             while aln_idx64 < aln_end_i:
-                other_ref_idx = pool.alignments[aln_idx64].reference_index
+                if use_split:
+                    other_ref_idx = pool.alignment_cores[aln_idx64].reference_index
+                else:
+                    other_ref_idx = pool.alignments[aln_idx64].reference_index
                 aln_idx64 += 1
 
                 if other_ref_idx >= num_refs or other_ref_idx == ref_idx:
@@ -538,6 +544,7 @@ cdef uint32_t pick_min_edge_weight_elbow(
     # Progress tracking
     cdef uint32_t progress_interval = pool.unique_read_count // 20 if pool.unique_read_count > 20 else 1
     cdef uint32_t reads_processed = 0
+    cdef bint use_split
 
     if not histogram:
         return 1
@@ -559,6 +566,8 @@ cdef uint32_t pick_min_edge_weight_elbow(
         free(histogram)
         return 1
 
+    use_split = pool.use_split_arrays
+
     if verbose:
         bf_nogil_logf_notime(b"EDGE-THRESHOLD", "Collecting edge weights (read-centric, %u reads)...\n", pool.unique_read_count)
 
@@ -575,7 +584,10 @@ cdef uint32_t pick_min_edge_weight_elbow(
         # Cap at 50 refs to avoid combinatorial explosion from highly multi-mapping reads
         read_refs_count = 0
         for aln_idx in range(aln_start, aln_end):
-            ref_a = pool.alignments[aln_idx].reference_index
+            if use_split:
+                ref_a = pool.alignment_cores[aln_idx].reference_index
+            else:
+                ref_a = pool.alignments[aln_idx].reference_index
             if ref_a >= num_refs:
                 continue
             if ref_stats and ref_stats[ref_a].total_reads < min_read_count:
@@ -843,6 +855,7 @@ cdef int build_igraph_direct_from_read_index(
     # Progress tracking
     cdef uint32_t progress_interval = pool.unique_read_count // 20 if pool.unique_read_count > 20 else 1
     cdef uint32_t reads_processed = 0
+    cdef bint use_split
 
     # Component analysis
     cdef igraph_vector_int_t comp_membership
@@ -856,13 +869,23 @@ cdef int build_igraph_direct_from_read_index(
     cdef igraph_vector_int_t empty_edges
     cdef igraph_vector_int_t edges_vec
 
+    use_split = pool.use_split_arrays
+
     if verbose:
         bf_nogil_logf_notime(b"IGRAPH OPS", "Read-centric igraph builder (min_edge_weight=%u)\n", min_edge_weight)
 
-    # Validate inputs
-    if not pool.read_alignment_starts or not pool.read_alignment_counts or not pool.alignments:
+    # Validate inputs - check either alignments OR split arrays based on mode
+    if not pool.read_alignment_starts or not pool.read_alignment_counts:
         if verbose:
             bf_nogil_logf_notime(b"IGRAPH OPS", "ERROR: Invalid pool arrays\n")
+        return -1
+    if not use_split and not pool.alignments:
+        if verbose:
+            bf_nogil_logf_notime(b"IGRAPH OPS", "ERROR: Invalid pool alignments (non-split mode)\n")
+        return -1
+    if use_split and not pool.alignment_cores:
+        if verbose:
+            bf_nogil_logf_notime(b"IGRAPH OPS", "ERROR: Invalid pool alignment_cores (split mode)\n")
         return -1
 
     # Allocate hash table
@@ -897,7 +920,10 @@ cdef int build_igraph_direct_from_read_index(
         # Collect unique references for this read
         read_refs_count = 0
         for aln_idx in range(aln_start, aln_end):
-            ref_a = pool.alignments[aln_idx].reference_index
+            if use_split:
+                ref_a = pool.alignment_cores[aln_idx].reference_index
+            else:
+                ref_a = pool.alignments[aln_idx].reference_index
             if ref_a >= num_refs:
                 continue
             if ref_stats and ref_stats[ref_a].total_reads < min_read_count:

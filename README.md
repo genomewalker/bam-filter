@@ -156,8 +156,8 @@ Full list of options:
 ```bash
 $ filterBAM filter --help
 usage: filterBAM filter [-h] --bam BAM [-p STR] [-r FILE] [-t INT] [--reference-trim-length INT] [--trim-min INT] [--trim-max INT] [-A FLOAT] [-l INT] [-L INT] [-n INT] [-b FLOAT] [-e FLOAT]
-                        [-g FLOAT] [-B FLOAT] [-a FLOAT] [-c FLOAT] [-V FLOAT] [-C FLOAT] [--include-low-detection] [-m STR] [-N] [--disable-sort] [--scale STR] --stats [FILE]
-                        [--stats-filtered [FILE]] [--bam-filtered [FILE]] [--read-length-freqs [FILE]] [--read-hits-count [FILE]] [--knee-plot [FILE]] [--coverage-plots [FILE]] [--tmp-dir DIR]
+                        [-g FLOAT] [-B FLOAT] [-a FLOAT] [-c FLOAT] [-V FLOAT] [-C FLOAT] [--include-low-detection] [-m STR] [-N] [--disable-sort] [--scale STR] --stats FILE
+                        [--stats-filtered FILE] [--bam-filtered FILE] [--read-length-freqs [FILE]] [--read-hits-count [FILE]] [--knee-plot [FILE]] [--coverage-plots [FILE]] [--tmp-dir DIR]
                         [--low-memory]
 
 optional arguments:
@@ -172,7 +172,7 @@ required arguments:
   --bam BAM             BAM file containing aligned reads (default: None)
 
 Filter required arguments:
-  --stats [FILE]        Save a TSV file with the statistics for each reference (default: None)
+  --stats FILE          Save a TSV file with the statistics for each reference (default: None)
 
 filtering arguments:
   -A FLOAT, --min-read-ani FLOAT
@@ -216,9 +216,9 @@ miscellaneous arguments:
   --low-memory          Activate the low memory mode (default: False)
 
 output arguments:
-  --stats-filtered [FILE]
+  --stats-filtered FILE
                         Save a TSV file with the statistics for each reference after filtering (default: None)
-  --bam-filtered [FILE]
+  --bam-filtered FILE
                         Save a BAM file with the references that passed the filtering criteria (default: None)
   --read-length-freqs [FILE]
                         Save a JSON file with the read length frequencies mapped to each reference (default: None)

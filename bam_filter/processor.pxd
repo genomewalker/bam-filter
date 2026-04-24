@@ -240,6 +240,7 @@ cdef struct AlignmentScoringConfig:
     double global_max_score
     bint calculate_pmd
     bint is_single_stranded
+    int32_t damage_window  # Window size for damage correction (default 8, max 15)
 
 
 # Functions implemented in processor.pyx

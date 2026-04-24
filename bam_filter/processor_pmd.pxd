@@ -172,6 +172,16 @@ cdef struct ANIResult:
     float damage_contribution     # Sum of w_i for damage-eligible mismatches
 
 
+# Unified damage correction weights (computed from fitted PMD curve)
+cdef struct DamageCorrection:
+    float w_5p                    # ANI weight for 5' C→T: D_avg/(D_avg+ε)
+    float w_3p                    # ANI weight for 3' G→A: D_avg/(D_avg+ε)
+    float delta_log_5p            # Score delta for 5' C→T: log(D_avg+ε) - log(ε)
+    float delta_log_3p            # Score delta for 3' G→A: log(D_avg+ε) - log(ε)
+    float avg_D_5p                # Average D(z) over damage window at 5' end
+    float avg_D_3p                # Average D(z) over damage window at 3' end
+
+
 # =============================================================================
 # Per-Reference Damage Statistics (Bayesian ancient/modern classification)
 # Accumulated after EM using assignment probabilities (phi) as weights.
@@ -321,9 +331,24 @@ cdef float compute_corrected_ani(ANISnapshot* snapshot,
                                   PMDCurve* curve,
                                   float epsilon) noexcept nogil
 
+cdef float compute_corrected_ani_with_window(ANISnapshot* snapshot,
+                                              PMDCurve* curve,
+                                              float epsilon,
+                                              int damage_window) noexcept nogil
+
 cdef ANIResult compute_ani_pair(ANISnapshot* snapshot,
                                  PMDCurve* curve,
                                  float epsilon) noexcept nogil
+
+# Unified damage correction (ANI + score)
+cdef DamageCorrection compute_damage_correction(PMDCurve* curve,
+                                                  int damage_window,
+                                                  float epsilon) noexcept nogil
+
+cdef float compute_corrected_score(float raw_score,
+                                    uint8_t ct_5p_count,
+                                    uint8_t ga_3p_count,
+                                    DamageCorrection* dc) noexcept nogil
 
 # Hierarchical EM helpers
 cdef int init_hierarchical_em(PMDGlobalContext* ctx,

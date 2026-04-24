@@ -1010,25 +1010,26 @@ cdef void calculate_rle_coverage_stats(RLECoverage* rle, RefStats* stats, int tr
     stats.feature_space_clustering_score = 1.0 / (1.0 + combined_cv)
 
     # Calculate coverage standard deviation and variance for c_v and d_i (only covered positions)
-    cdef double sum_cov = 0.0
-    cdef double sum_cov2 = 0.0
+    # Welford online variance (weighted by segment length) — avoids catastrophic cancellation.
     cdef int64_t n_cov = 0
-    cdef double mean_cov_cov = 0.0
+    cdef double wf_mean_cov = 0.0
+    cdef double wf_M2_cov = 0.0
     cdef double var_cov = 0.0
     cdef double sd_cov = 0.0
+    cdef double wf_delta = 0.0
+    cdef int64_t interval_len_cov = 0
     for i in range(rle_idx):
         depth_val = <double>depths[i]
-        interval_len = ends[i] - starts[i]
+        interval_len_cov = ends[i] - starts[i]
         if depth_val > 0.0:
-            sum_cov += depth_val * interval_len
-            sum_cov2 += depth_val * depth_val * interval_len
-            n_cov += interval_len
+            n_cov += interval_len_cov
+            wf_delta = depth_val - wf_mean_cov
+            wf_mean_cov += wf_delta * interval_len_cov / n_cov
+            wf_M2_cov += wf_delta * (depth_val - wf_mean_cov) * interval_len_cov
     if n_cov > 1:
-        mean_cov_cov = sum_cov / n_cov
-        var_cov = (sum_cov2 - (sum_cov * sum_cov) / n_cov) / (n_cov - 1)
+        var_cov = wf_M2_cov / (n_cov - 1)
         sd_cov = sqrt(var_cov)
     else:
-        mean_cov_cov = 0.0
         var_cov = 0.0
         sd_cov = 0.0
     # Calculate c_v and d_i using mean_coverage (per-base, including zeros)
